@@ -36,10 +36,12 @@
 bash build.sh --pkg --soc=ascend910b --ops=spmv
 ```
 
+> **说明**：run 包名中的芯片字段使用短名（见 `cmake/package.cmake`）：`ascend910b` 对应 `910b`、`ascend950` 对应 `950`、`ascend910_93` 对应 `A3`、`ascend310p` 对应 `310p`，完整包名为 `cann-<芯片短名>-ops-sparse-<版本>_linux-<arch>.run`。例如 `--soc=ascend910b` 生成 `cann-910b-ops-sparse-<版本>_linux-<arch>.run`。
+
 若提示如下信息，说明编译成功。
 
 ```bash
-Self-extractable archive "cann-${soc_version}-ops-sparse-${cann_version}_linux-${arch}.run" successfully created.
+Self-extractable archive "cann-910b-ops-sparse-${cann_version}_linux-${arch}.run" successfully created.
 ```
 
 编译成功后，run包存放于项目根目录的build_out目录下。
@@ -47,7 +49,7 @@ Self-extractable archive "cann-${soc_version}-ops-sparse-${cann_version}_linux-$
 ### 2. 安装Spmv算子包
 
 ```bash
-./build_out/cann-${soc_version}-ops-sparse-*linux*.run --install --install-path=/usr/local/Ascend/
+./build_out/cann-910b-ops-sparse-*.run --install --install-path=/usr/local/Ascend/
 ```
 
 注：安装算子包之后，每次调用会从算子包中加载算子，若需快速调试验证算子功能，可直接按照 [3. 快速验证：运行算子样例](#3-快速验证运行算子样例) 步骤进行，无需安装算子包。

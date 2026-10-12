@@ -24,7 +24,7 @@
 
       直接调用 CMake 时传 `-DCMAKE_BUILD_TYPE=Debug` 同样生效。
 
-    编译成功后，安装包生成在 `build_out/` 目录下，文件名类似 `cann-950-ops-sparse_<cann_version>_linux-<arch>.run`。
+    编译成功后，安装包生成在 `build_out/` 目录下，文件名类似 `cann-950-ops-sparse-<cann_version>_linux-<arch>.run`。
 
     - `${cann_version}`：表示 toolkit 安装包版本号，需满足上文的最低版本要求。
     - `${arch}`：表示 CPU 架构，如 `aarch64`、`x86_64`。
@@ -36,9 +36,9 @@
 
     ```bash
     # 赋予可执行权限
-    chmod +x build_out/cann-950-ops-sparse_*.run
+    chmod +x build_out/cann-950-ops-sparse-*.run
     # 安装（root 用户默认安装到 /usr/local/Ascend）
-    ./build_out/cann-950-ops-sparse_*.run --install --quiet --install-path=${install_path}
+    ./build_out/cann-950-ops-sparse-*.run --install --quiet --install-path=${install_path}
     ```
     - `${install_path}`：表示指定安装路径，默认安装在 `/usr/local/Ascend` 目录。
 
