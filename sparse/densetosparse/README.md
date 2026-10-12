@@ -475,7 +475,7 @@ cmake --build build --target densetosparse_test densetosparse_perf --parallel
 
 PyTorch 接口（`Tensor.to_sparse*` 的 NPU 适配）通过 `torch_extension`
 框架提供，构建和加载方式见
-[`../torch_extension/README.md`](../torch_extension/README.md)。
+[`../../torch_extension/README.md`](../../torch_extension/README.md)。
 
 ## 目录结构
 

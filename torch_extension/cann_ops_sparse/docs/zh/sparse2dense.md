@@ -5,7 +5,7 @@
 本扩展通过仓内统一的 `torch_extension` 框架，为 Ascend NPU 注册标准 ATen 算子
 `aten::_to_dense` 的后端实现。用户直接调用 `Tensor.to_dense()`，无需自定义 schema。
 
-构建与安装方式见 [`../../../torch_extension/README.md`](../../../torch_extension/README.md)。
+构建与安装方式见 [`../../../README.md`](../../../README.md)。
 
 ## 支持规格
 
