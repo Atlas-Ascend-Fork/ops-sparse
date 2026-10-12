@@ -332,7 +332,7 @@ aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream strea
 | ❌ 错误 | ✅ 正确 | 说明 |
 |---------|---------|------|
 | 传入 `aclsparseSpMatDescr_t` 给只读参数 | 传入 `aclsparseConstSpMatDescr_t` | 输入描述符必须用 const 版本 |
-| 跳过 `GetBufferSize` 直接调用算子 | 先 `GetBufferSize` → 分配 buffer → 再调用 | 三阶段不可跳过 |
+| 跳过 `GetBufferSize` 直接调用算子 | 仅当接口暴露 `GetBufferSize` 时：先查询 → 按返回值决定是否分配 buffer → 再调用 | 阶段按接口声明调用，并非所有接口都必选三阶段；Preprocess 为可选，无需预处理时 bufferSize=0 且阶段 2 不存在（见 §1.5），单步接口（如 Gather）按其自身约定调用 |
 | 忘记 `DestroySpMat` | Create/Destroy 配对 | 描述符必须释放 |
 
 ### Legacy API 错误
