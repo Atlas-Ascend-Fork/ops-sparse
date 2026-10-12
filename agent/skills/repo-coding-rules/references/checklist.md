@@ -84,7 +84,7 @@ grep -nE "[^a-zA-Z_](/|%)[ ]*[a-zA-Z_]+" $(find . -name "*.cpp") | grep -v "_s"
 **快速检查命令**：
 ```bash
 # 检查是否使用了 realloc / alloca
-grep -rn "\brealloc\b|\balloca\b" $(find . -name "*.cpp" -o -name "*.c")
+grep -rnE "\brealloc\b|\balloca\b" $(find . -name "*.cpp" -o -name "*.c")
 ```
 
 ---
