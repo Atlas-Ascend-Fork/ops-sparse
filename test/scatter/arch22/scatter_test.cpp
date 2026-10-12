@@ -11,10 +11,10 @@
  */
 
 /*
- * Scatter 算子测试 —— 结构对齐 spmv_test.cpp，精度采用 bit-exact 判定。
+ * Scatter 算子测试 —— 精度采用 bit-exact 判定。
  *
- * scatter 是非计算类算子（纯数据搬移：y[indices[i]] = values[i]），按
- * /ops-precision-standard 精度标准，非计算类算子要求逐位一致（bit-exact）。
+ * scatter 是非计算类算子（纯数据搬移：y[indices[i]] = values[i]），
+ * 按精度标准，非计算类算子要求逐位一致（bit-exact）。
  * 因此 Verification 对 float 做严格逐位匹配（memcmp），任何一位不同即判失败。
  * 同时保留 MARE/MERE 作为信息性指标打印（便于观察），但不参与达标判定。
  *
@@ -22,13 +22,15 @@
  *           aclsparseCreateSpVec / aclsparseCreateDnVec ->
  *           aclsparseScatter -> aclsparseDestroy* / aclsparseDestroy。
  *
- * dtype 约束：Host 实现对 idxType/valueType 做了 NOT_SUPPORTED 校验，scatter 仅支持
- *   idxType = ACL_SPARSE_INDEX_32I、valueType = ACL_FLOAT。因此 ValT 实际只有 float，
- * 保留模板骨架以对齐 spmv 风格，但模板参数固定为 float。
+ * dtype 约束：Host 校验链支持 valueType ∈ {int8, float16, bfloat16,
+ *   float32, complex64}（vecX.values 与 vecY 一致），idxType 仅 ACL_SPARSE_INDEX_32I，
+ *   idxBase ∈ {0, 1}。float 模板用例覆盖 fp32/base0 基线，"Extended dtype &
+ *   idxBase Tests" 段以字节缓冲 + bit-exact golden 覆盖五 dtype ×
+ *   base 0/1（含 complex64 2×fp32 交错存储口径），以及 Host 参数校验链错误码用例。
  *
  * 索引约束（互异）：本测试只覆盖互异索引场景，所有用例的 indices 均无重复，确保
  *   kernel 写入的 GM 地址互不冲突，结果具有确定性。这与 cuSPARSE scatter 语义下
- *   "互异索引 → 唯一确定写入" 的约定一致，也与原 B 版测试只用互异索引的做法一致。
+ *   "互异索引 → 唯一确定写入" 的约定一致。
  *   含重复索引的场景下，kernel 跨核并发写同一 GM 地址会导致 last-write-wins 顺序
  *   非确定（cuSPARSE 语义下本就未定义），不在本测试覆盖范围内。
  *
@@ -37,7 +39,7 @@
  *   通过（isnan 判定），其余元素仍严格 bit-exact。NaN 用例在 worstInfo 中单独标注。
  *   +0.0 / -0.0 仍按严格 bit-exact（区分符号位），因为 scatter 是纯搬移，符号位必须保留。
  *
- * 用例分区（对齐 spmv 的 main 组织方式）：
+ * 用例分区：
  *   1. 基础用例：小/中/大 N、nnz=1、nnz=N（全覆盖）、nnz=0（早退）
  *   2. 索引模式：contiguous / reverse / stride / random-unique（均为互异索引）
  *   3. 特殊 value：含 0 / 负数 / 大值 / Inf / NaN
@@ -56,11 +58,13 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <memory>
 #include <sstream>
 #include <type_traits>
 #include "acl/acl.h"
+#include "securec.h"  // memcpy_s, EOK
 #include "cann_ops_sparse.h"
 
 // ===================== 工具宏 =====================
@@ -76,10 +80,19 @@
         printf(message, ##__VA_ARGS__); \
     } while (0)
 
+// securec 拷贝封装：bit-exact golden 的固定长度 bit 搬运，失败即致命
+//（不可能路径，防静默产出错误 golden）
+static void CheckedMemcpy(void *dst, size_t dstBytes, const void *src, size_t count)
+{
+    if (memcpy_s(dst, dstBytes, src, count) != EOK) {
+        throw std::runtime_error("scatter test: memcpy_s failed");
+    }
+}
+
 // ===================== 索引分布生成 =====================
 
 /*
- * 索引分布模式枚举，对齐 spmv GenerateCsr 的多种数据生成风格。
+ * 索引分布模式枚举。
  * scatter 的核心维度是 (N, nnz, 索引分布)，索引分布决定 kernel 内
  * run-length 写入快路径的命中率，是覆盖 kernel 分支的关键。
  */
@@ -102,7 +115,6 @@ const char *IndexPatternName(IndexPattern p) {
 
 /*
  * 为 scatter 生成互异索引（升序）：从 [0, N) 中无放回采样 nnz 个。
- * 思路对齐 spmv 的 SampleRowColumnsUnique（visited 数组去重）。
  */
 std::vector<int32_t> GenUniqueIndices(int64_t N, int64_t nnz, std::mt19937 &rng) {
     if (nnz <= 0) return {};
@@ -169,7 +181,7 @@ std::vector<int32_t> GenIndicesByPattern(int64_t N, int64_t nnz, IndexPattern pa
 // ===================== 数据生成（values / yInit） =====================
 
 /*
- * 生成随机 float 值，对齐 spmv GenerateDenseVector 的风格。
+ * 生成随机 float 值。
  */
 template <typename T>
 void GenerateValues(size_t nnz, std::vector<T> &vals, std::mt19937 &rng,
@@ -213,7 +225,7 @@ void ScatterCpu(const std::vector<int32_t> &indices,
 
 /*
  * 非计算类算子：逐位一致（bit-exact）。返回 0=通过，1=失败。
- * 同时计算 MARE/MERE 作为信息性指标打印（对齐 spmv Verification 的输出风格），
+ * 同时计算 MARE/MERE 作为信息性指标打印，
  * 但达标判定严格基于 bit-exact。
  *
  * NaN 处理：双方均为 NaN 视为匹配（isnan 判定），不计入失败；
@@ -362,7 +374,7 @@ aclDataType AclTypeOf<float>() { return ACL_FLOAT; }
 /*
  * @brief Scatter 单用例测试（使用 aclsparseScatter 接口）
  *
- * @tparam ValT   值类型（scatter 仅支持 float，保留模板以对齐 spmv 风格）
+ * @tparam ValT   值类型（当前仅 float 实例化）
  *
  * @param N        稠密向量 vecY 的长度
  * @param nnz      非零元素个数
@@ -505,7 +517,7 @@ struct TestStats {
 };
 
 /*
- * RunAndTrack：执行单个 Test 用例并统计结果，对齐 spmv 的 RunAndTrack 骨架。
+ * RunAndTrack：执行单个 Test 用例并统计结果。
  * 适配 scatter 维度：(N, nnz, pattern, fillVal)。
  */
 template <typename ValT>
@@ -537,7 +549,7 @@ int RunAndTrack(size_t N, size_t nnz, IndexPattern pattern,
 // ===================== 随机测试辅助函数 =====================
 
 /*
- * RunRandomParams：随机采样 (N, nnz, pattern) 执行多例，对齐 spmv 的 RunRandomParams。
+ * RunRandomParams：随机采样 (N, nnz, pattern) 执行多例。
  */
 template <typename ValT>
 void RunRandomParams(int numCases, const std::string &tagPrefix,
@@ -569,25 +581,505 @@ void RunRandomParams(int numCases, const std::string &tagPrefix,
     }
 }
 
-// ===================== main =====================
+// ===================== 扩展能力测试：五 dtype + idxBase 0/1 =====================
 
-int main(int32_t /*argc*/, char * /*argv*/[]) {
-    const int32_t deviceId = 0;  // device 0 空闲；device 1 被他人占用
-    aclrtStream stream = nullptr;
-    int ret = Init(deviceId, &stream);
-    if (ret != ACL_SUCCESS) {
-        LOG_PRINT("Init acl failed. ERROR: %d\n", ret);
-        return ret;
+/*
+ * 能力扩展 smoke/功能覆盖：
+ *   - 五 dtype（int8/float16/bfloat16/float32/complex64）× base 0/1，
+ *     字节缓冲 + 纯 bit 搬运 golden（非计算类算子 bit-exact）；
+ *   - complex64 建模为 2×fp32 交错存储（8B），验证 T 视角偏移 ×2 口径；
+ *   - int8/fp16/bf16 验证非 4B 元素的 MTE3 任意偏移写出与段拷贝路径；
+ *   - idxBase=1 验证 run 检测减法路径；
+ *   - Host 参数校验链错误码（idxType 64I / 非法 idxBase / dtype 不一致 / 非法 shape /
+ *     空句柄描述符）逐项验证。
+ */
+
+// float -> dtype bits 转换器（golden 为纯 bit 搬运，转换仅需确定性，无舍入语义要求）
+static void FloatToFp32Bytes(float v, uint8_t *dst)
+{
+    CheckedMemcpy(dst, sizeof(float), &v, sizeof(float));
+}
+
+static void FloatToFp16Bytes(float v, uint8_t *dst)
+{
+    __fp16 h = static_cast<__fp16>(v);  // aarch64 原生半精度
+    CheckedMemcpy(dst, sizeof(__fp16), &h, sizeof(__fp16));
+}
+
+static void FloatToBf16Bytes(float v, uint8_t *dst)
+{
+    uint32_t x;
+    CheckedMemcpy(&x, sizeof(x), &v, sizeof(x));
+    uint16_t bits = static_cast<uint16_t>(x >> 16);  // 截断即可：golden 是 bit 拷贝
+    CheckedMemcpy(dst, sizeof(bits), &bits, sizeof(bits));
+}
+
+static void FloatToInt8Bytes(float v, uint8_t *dst)
+{
+    int b = static_cast<int>(v);
+    if (b > 127) { b = 127; }
+    if (b < -128) { b = -128; }
+    int8_t s = static_cast<int8_t>(b);
+    CheckedMemcpy(dst, sizeof(int8_t), &s, sizeof(int8_t));
+}
+
+static void FloatToC64Bytes(float v, uint8_t *dst)
+{
+    // complex64 = 2×fp32 交错（re, im），与 Kernel T=float/ELEM_BYTES=8 的存储口径一致
+    float re = v;
+    float im = -2.0f * v + 0.5f;
+    CheckedMemcpy(dst, sizeof(float), &re, sizeof(float));
+    CheckedMemcpy(dst + sizeof(float), sizeof(float), &im, sizeof(float));
+}
+
+struct ScatterDtypeDesc {
+    const char *name;
+    aclDataType aclType;
+    size_t elemBytes;
+    void (*conv)(float, uint8_t *);
+};
+
+/*
+ * 通用 dtype 单用例：字节缓冲 + bit-exact golden。
+ * 索引生成 [0,N) 内目标 targets，描述符 indices = targets + idxBase；
+ * golden: golden[target[i]*es .. +es) = values[i*es .. +es)。
+ */
+
+// dtype 用例数据：索引 / golden 构造阶段
+struct DtypeCaseData {
+    std::vector<int32_t> targets;
+    std::vector<int32_t> descIdx;
+    std::vector<uint8_t> valBytes;
+    std::vector<uint8_t> yBytes;
+    std::vector<uint8_t> golden;
+};
+
+static DtypeCaseData DtypePrepareData(const ScatterDtypeDesc &dt, size_t N, size_t nnz,
+                                      IndexPattern pattern, aclsparseIndexBase_t idxBase)
+{
+    DtypeCaseData d;
+    const size_t es = dt.elemBytes;
+    std::mt19937 rng(12345u + static_cast<uint32_t>(nnz) + static_cast<uint32_t>(N));
+    std::uniform_real_distribution<float> valDist(-10.0f, 10.0f);
+    std::uniform_real_distribution<float> yDist(-5.0f, 5.0f);
+
+    d.targets = GenIndicesByPattern(static_cast<int64_t>(N),
+                                    static_cast<int64_t>(nnz), pattern, rng);
+    const int32_t baseOff = (idxBase == ACL_SPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    d.descIdx.reserve(d.targets.size());
+    for (int32_t t : d.targets) {
+        d.descIdx.push_back(t + baseOff);
+    }
+    const size_t realNnz = d.targets.size();
+
+    d.valBytes.assign(realNnz * es, 0);
+    d.yBytes.assign(N * es, 0);
+    for (size_t i = 0; i < realNnz; ++i) {
+        dt.conv(valDist(rng), d.valBytes.data() + i * es);
+    }
+    for (size_t i = 0; i < N; ++i) {
+        dt.conv(yDist(rng), d.yBytes.data() + i * es);
+    }
+    d.golden = d.yBytes;
+    for (size_t i = 0; i < realNnz; ++i) {
+        const size_t dstOff = static_cast<size_t>(d.targets[i]) * es;
+        CheckedMemcpy(d.golden.data() + dstOff, d.golden.size() - dstOff,
+                      d.valBytes.data() + i * es, es);
+    }
+    return d;
+}
+
+// dtype 用例设备缓冲 RAII（aclrtFree 析构释放；声明顺序 idx/val/y，析构序 y/val/idx，
+// 寿命覆盖 scatter → 同步 → D2H 全程）
+struct DtypeDevBufs {
+    std::unique_ptr<void, aclError (*)(void *)> idx{nullptr, aclrtFree};
+    std::unique_ptr<void, aclError (*)(void *)> val{nullptr, aclrtFree};
+    std::unique_ptr<void, aclError (*)(void *)> y{nullptr, aclrtFree};
+};
+
+// 设备缓冲分配（失败返回错误码，已分配部分随 RAII 释放）
+static int DtypeAllocDevice(const ScatterDtypeDesc &dt, size_t N, DtypeCaseData &d,
+                            DtypeDevBufs &bufs)
+{
+    const size_t realNnz = d.targets.size();
+    const size_t es = dt.elemBytes;
+    uint8_t *idxDev = nullptr, *valDev = nullptr, *yDev = nullptr;
+    int aclRet = CreateDeviceTensor(reinterpret_cast<uint8_t *>(d.descIdx.data()),
+                                    realNnz * sizeof(int32_t), &idxDev);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    bufs.idx.reset(idxDev);
+    aclRet = CreateDeviceTensor(d.valBytes.data(), realNnz * es, &valDev);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    bufs.val.reset(valDev);
+    aclRet = CreateDeviceTensor(d.yBytes.data(), N * es, &yDev);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    bufs.y.reset(yDev);
+    return 0;
+}
+
+// handle 创建/绑流 + 描述符创建 + scatter 提交。
+// 返回 0 时 spHandle/vecXDesc/vecYDesc 存活交由调用方销毁；非 0 时已清理本次创建的
+// 资源并返回错误码。
+static int DtypeSubmitScatter(const ScatterDtypeDesc &dt, size_t N, size_t realNnz,
+                              aclsparseIndexBase_t idxBase, const DtypeDevBufs &bufs,
+                              aclrtStream stream, aclsparseHandle_t &spHandle,
+                              aclsparseSpVecDescr_t &vecXDesc, aclsparseDnVecDescr_t &vecYDesc)
+{
+    spHandle = nullptr;
+    aclsparseStatus_t sparseRet = aclsparseCreate(&spHandle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return sparseRet);
+    sparseRet = aclsparseSetStream(spHandle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              aclsparseDestroy(spHandle); return sparseRet);
+
+    vecXDesc = nullptr;
+    sparseRet = aclsparseCreateSpVec(&vecXDesc, static_cast<int64_t>(N),
+                                     static_cast<int64_t>(realNnz), bufs.idx.get(),
+                                     bufs.val.get(), ACL_SPARSE_INDEX_32I, idxBase, dt.aclType);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateSpVec failed. ERROR: %d\n", sparseRet);
+              aclsparseDestroy(spHandle); return sparseRet);
+    vecYDesc = nullptr;
+    sparseRet = aclsparseCreateDnVec(&vecYDesc, static_cast<int64_t>(N), bufs.y.get(), dt.aclType);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateDnVec failed. ERROR: %d\n", sparseRet);
+              aclsparseDestroySpVec(vecXDesc); aclsparseDestroy(spHandle); return sparseRet);
+
+    sparseRet = aclsparseScatter(spHandle, vecXDesc, vecYDesc);
+    if (sparseRet != ACL_SPARSE_STATUS_SUCCESS) {
+        LOG_PRINT("aclsparseScatter failed. ERROR: %d\n", sparseRet);
+        aclsparseDestroySpVec(vecXDesc); aclsparseDestroyDnVec(vecYDesc);
+        aclsparseDestroy(spHandle);
+        return sparseRet;
+    }
+    return 0;
+}
+
+// dtype 用例设备执行阶段（描述符创建 → scatter → 同步 → D2H）。
+// 返回 0 且经 result 带回输出；非 0 为错误码。
+static int DtypeRunOnDevice(const ScatterDtypeDesc &dt, size_t N, size_t nnz,
+                            aclsparseIndexBase_t idxBase, DtypeCaseData &d,
+                            aclrtStream stream, std::vector<uint8_t> &result)
+{
+    const size_t realNnz = d.targets.size();
+    const size_t es = dt.elemBytes;
+
+    DtypeDevBufs bufs;
+    int aclRet = DtypeAllocDevice(dt, N, d, bufs);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    uint8_t *yDev = static_cast<uint8_t *>(bufs.y.get());
+
+    aclsparseHandle_t spHandle = nullptr;
+    aclsparseSpVecDescr_t vecXDesc = nullptr;
+    aclsparseDnVecDescr_t vecYDesc = nullptr;
+    const int submitRet = DtypeSubmitScatter(dt, N, realNnz, idxBase, bufs, stream,
+                                             spHandle, vecXDesc, vecYDesc);
+    CHECK_RET(submitRet == 0, return submitRet);
+
+    aclRet = aclrtSynchronizeStream(stream);
+    CHECK_RET(aclRet == ACL_SUCCESS,
+              LOG_PRINT("aclrtSynchronizeStream failed. ret=%d\n", aclRet);
+              aclsparseDestroySpVec(vecXDesc); aclsparseDestroyDnVec(vecYDesc);
+              aclsparseDestroy(spHandle); return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+
+    result.assign(N * es, 0);
+    aclRet = aclrtMemcpy(result.data(), N * es, yDev, N * es, ACL_MEMCPY_DEVICE_TO_HOST);
+    CHECK_RET(aclRet == ACL_SUCCESS,
+              LOG_PRINT("aclrtMemcpy D2H failed. ERROR: %d\n", aclRet);
+              aclsparseDestroySpVec(vecXDesc); aclsparseDestroyDnVec(vecYDesc);
+              aclsparseDestroy(spHandle); return aclRet);
+
+    aclsparseDestroySpVec(vecXDesc);
+    aclsparseDestroyDnVec(vecYDesc);
+    aclsparseDestroy(spHandle);
+    return 0;
+}
+
+int TestDtype(const ScatterDtypeDesc &dt, size_t N, size_t nnz, IndexPattern pattern,
+              aclsparseIndexBase_t idxBase, aclrtStream stream, const std::string &tag)
+{
+    std::cout << "====Dtype case: " << tag << " type=" << dt.name << " N=" << N
+              << " nnz=" << nnz << " pattern=" << IndexPatternName(pattern)
+              << " idxBase=" << ((idxBase == ACL_SPARSE_INDEX_BASE_ONE) ? 1 : 0) << "====\n";
+
+    DtypeCaseData d = DtypePrepareData(dt, N, nnz, pattern, idxBase);
+
+    std::vector<uint8_t> result;
+    const int runRet = DtypeRunOnDevice(dt, N, nnz, idxBase, d, stream, result);
+    CHECK_RET(runRet == 0, return runRet);
+
+    const size_t es = dt.elemBytes;
+    if (std::memcmp(result.data(), d.golden.data(), N * es) != 0) {
+        size_t diffCnt = 0, firstDiff = 0;
+        for (size_t i = 0; i < N * es; ++i) {
+            if (result[i] != d.golden[i]) {
+                if (diffCnt == 0) { firstDiff = i; }
+                diffCnt++;
+            }
+        }
+        LOG_PRINT("[ERROR] bit-exact FAIL (%s): %zu/%zu bytes differ, first at byte %zu\n",
+                  tag.c_str(), diffCnt, N * es, firstDiff);
+        LOG_PRINT("====Dtype case fail!====\n\n");
+        return 1;
+    }
+    std::cout << "====Dtype case pass!====\n\n";
+    return 0;
+}
+
+void RunDtypeAndTrack(const ScatterDtypeDesc &dt, size_t N, size_t nnz, IndexPattern pattern,
+                      aclsparseIndexBase_t idxBase, TestStats &stats, aclrtStream stream,
+                      const std::string &tag)
+{
+    int ret = TestDtype(dt, N, nnz, pattern, idxBase, stream, tag);
+    stats.total++;
+    if (ret == 0) {
+        stats.passed++;
+    } else {
+        stats.failed++;
+        stats.failedCases.push_back("[" + std::string(tag) + "] type=" + dt.name +
+                                    " N=" + std::to_string(N) + " nnz=" + std::to_string(nnz) +
+                                    " base=" + std::to_string(idxBase));
+    }
+}
+
+// ===================== Host 参数校验链错误码测试 =====================
+
+/*
+ * 错误路径逐项验证：
+ *   idxType 64I / 非法 idxBase / dtype 不一致 / 不支持 dtype / size>nums /
+ *   nnz>0 且 nums=0 / 空描述符 → ACL_SPARSE_STATUS_INVALID_VALUE；
+ *   空句柄 → ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR。
+ */
+
+// 错误路径共享上下文：设备数据 + handle + 正常 dnVec 描述符（device 缓冲随 ctx 析构释放）
+struct ErrorPathCtx {
+    std::unique_ptr<void, aclError (*)(void *)> idxDev{nullptr, aclrtFree};
+    std::unique_ptr<void, aclError (*)(void *)> valDev{nullptr, aclrtFree};
+    std::unique_ptr<void, aclError (*)(void *)> yDev{nullptr, aclrtFree};
+    aclsparseHandle_t spHandle = nullptr;
+    aclsparseDnVecDescr_t dnOk = nullptr;
+    size_t N = 0;
+    size_t nnz = 0;
+};
+
+// 错误路径数据与句柄准备（失败时清理已建资源并返回错误码）
+static int ErrorPathPrepare(size_t N, size_t nnz, aclrtStream stream, ErrorPathCtx &ctx)
+{
+    const size_t es = sizeof(float);
+    std::vector<int32_t> idx(nnz);
+    std::vector<float> val(nnz, 1.5f), y(N, 0.25f);
+    for (size_t i = 0; i < nnz; ++i) { idx[i] = static_cast<int32_t>(i * 3); }
+
+    uint8_t *idxDev = nullptr, *valDev = nullptr, *yDev = nullptr;
+    int aclRet = CreateDeviceTensor(reinterpret_cast<uint8_t *>(idx.data()), nnz * 4, &idxDev);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    ctx.idxDev.reset(idxDev);
+    aclRet = CreateDeviceTensor(reinterpret_cast<uint8_t *>(val.data()), nnz * es, &valDev);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    ctx.valDev.reset(valDev);
+    aclRet = CreateDeviceTensor(reinterpret_cast<uint8_t *>(y.data()), N * es, &yDev);
+    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+    ctx.yDev.reset(yDev);
+
+    aclsparseHandle_t spHandle = nullptr;
+    aclsparseStatus_t sparseRet = aclsparseCreate(&spHandle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return sparseRet);
+    sparseRet = aclsparseSetStream(spHandle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, aclsparseDestroy(spHandle); return sparseRet);
+    ctx.spHandle = spHandle;
+
+    aclsparseDnVecDescr_t dnOk = nullptr;
+    sparseRet = aclsparseCreateDnVec(&dnOk, static_cast<int64_t>(N), yDev, ACL_FLOAT);
+    dnOk = (sparseRet == ACL_SPARSE_STATUS_SUCCESS) ? dnOk : nullptr;
+    CHECK_RET(dnOk != nullptr, aclsparseDestroy(spHandle); return 1);
+    ctx.dnOk = dnOk;
+    return 0;
+}
+
+// 错误路径用例判定（三组用例共享）
+static void ExpectErrorPath(const char *name, aclsparseStatus_t got, aclsparseStatus_t want,
+                            TestStats &stats, int &failed)
+{
+    bool ok = (got == want);
+    std::cout << "  [" << (ok ? "PASS" : "FAIL") << "] " << name
+              << ": got=" << got << " want=" << want << "\n";
+    if (!ok) { failed++; }
+    stats.total++;
+    if (ok) { stats.passed++; } else {
+        stats.failed++;
+        stats.failedCases.push_back(std::string("[error-path] ") + name);
+    }
+}
+
+// 错误路径 SpVec 描述符构造（复用共享设备数据指针，构造失败返回 nullptr）
+static aclsparseSpVecDescr_t MakeErrSpVec(const ErrorPathCtx &ctx, aclsparseIndexType_t idxType,
+                                          aclsparseIndexBase_t idxBase, aclDataType valType,
+                                          int64_t size)
+{
+    aclsparseSpVecDescr_t d = nullptr;
+    aclsparseStatus_t r = aclsparseCreateSpVec(&d, size, static_cast<int64_t>(ctx.nnz),
+                                               ctx.idxDev.get(), ctx.valDev.get(),
+                                               idxType, idxBase, valType);
+    return (r == ACL_SPARSE_STATUS_SUCCESS) ? d : nullptr;
+}
+
+// 用例准备失败统一清理（dnOk + handle），返回 1 中止
+static int ErrorPathAbort(const ErrorPathCtx &ctx)
+{
+    aclsparseDestroyDnVec(ctx.dnOk);
+    aclsparseDestroy(ctx.spHandle);
+    return 1;
+}
+
+// 错误路径用例组 1：空句柄 / 空 vecX 描述符（null_input）
+static void ErrorPathNullCases(const ErrorPathCtx &ctx, TestStats &stats, int &failed)
+{
+    {   // 空句柄
+        aclsparseSpVecDescr_t sp = MakeErrSpVec(ctx, ACL_SPARSE_INDEX_32I,
+                                                ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT,
+                                                static_cast<int64_t>(ctx.N));
+        ExpectErrorPath("null-handle", aclsparseScatter(nullptr, sp, ctx.dnOk),
+                        ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR, stats, failed);
+        if (sp != nullptr) { aclsparseDestroySpVec(sp); }
+    }
+    {   // 空描述符
+        ExpectErrorPath("null-vecX", aclsparseScatter(ctx.spHandle, nullptr, ctx.dnOk),
+                        ACL_SPARSE_STATUS_INVALID_VALUE, stats, failed);
+    }
+}
+
+// 错误路径属性负例单条执行：构造 → scatter → 判定 → 销毁；构造失败统一清理返回非 0
+static int ErrorPathAttrOne(const ErrorPathCtx &ctx, TestStats &stats, int &failed,
+                            const char *name, aclsparseIndexType_t idxType,
+                            aclsparseIndexBase_t idxBase, aclDataType valType,
+                            aclsparseStatus_t want)
+{
+    aclsparseSpVecDescr_t sp = MakeErrSpVec(ctx, idxType, idxBase, valType,
+                                            static_cast<int64_t>(ctx.N));
+    CHECK_RET(sp != nullptr, return ErrorPathAbort(ctx));
+    ExpectErrorPath(name, aclsparseScatter(ctx.spHandle, sp, ctx.dnOk), want, stats, failed);
+    aclsparseDestroySpVec(sp);
+    return 0;
+}
+
+// 错误路径用例组 2：描述符属性负例（idxType / idxBase / dtype）。
+// 返回非 0 表示用例准备失败
+static int ErrorPathAttrCases(const ErrorPathCtx &ctx, TestStats &stats, int &failed)
+{
+    // idxType = 64I（仅支持 I32）
+    CHECK_RET(ErrorPathAttrOne(ctx, stats, failed, "idxType-64I", ACL_SPARSE_INDEX_64I,
+                               ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT,
+                               ACL_SPARSE_STATUS_INVALID_VALUE) != 0, return 1);
+    // 非法 idxBase = 2
+    CHECK_RET(ErrorPathAttrOne(ctx, stats, failed, "idxBase-2", ACL_SPARSE_INDEX_32I,
+                               static_cast<aclsparseIndexBase_t>(2), ACL_FLOAT,
+                               ACL_SPARSE_STATUS_INVALID_VALUE) != 0, return 1);
+    // dtype 不一致（values fp16 vs y fp32）
+    CHECK_RET(ErrorPathAttrOne(ctx, stats, failed, "dtype-mismatch", ACL_SPARSE_INDEX_32I,
+                               ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT16,
+                               ACL_SPARSE_STATUS_INVALID_VALUE) != 0, return 1);
+    // 不支持 dtype（ACL_INT32）
+    CHECK_RET(ErrorPathAttrOne(ctx, stats, failed, "unsupported-dtype-int32", ACL_SPARSE_INDEX_32I,
+                               ACL_SPARSE_INDEX_BASE_ZERO, ACL_INT32,
+                               ACL_SPARSE_STATUS_INVALID_VALUE) != 0, return 1);
+    return 0;
+}
+
+// 错误路径用例组 3：shape / 规模负例（size>nums / nnz>0 且 nums=0 / nnz=0 成功早退）
+// 返回非 0 表示用例准备失败
+// nnz>0 且 vecY nums=0 单条（size=0 仅 nnz=0 合法）。
+// 返回非 0 表示用例准备失败
+static int ErrorPathNnzGt0Size0Case(const ErrorPathCtx &ctx, TestStats &stats, int &failed)
+{
+    aclsparseDnVecDescr_t dn0 = nullptr;
+    aclsparseStatus_t dn0Ret = aclsparseCreateDnVec(&dn0, 0, nullptr, ACL_FLOAT);
+    dn0 = (dn0Ret == ACL_SPARSE_STATUS_SUCCESS) ? dn0 : nullptr;
+    if (dn0 == nullptr) {
+        std::cout << "  [SKIP] nnz-gt-0-size-0: aclsparseCreateDnVec(0) rejected at create\n";
+        return 0;
+    }
+    aclsparseSpVecDescr_t sp = MakeErrSpVec(ctx, ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO,
+                                            ACL_FLOAT, static_cast<int64_t>(ctx.N));
+    if (sp == nullptr) {
+        aclsparseDestroyDnVec(dn0);
+        return ErrorPathAbort(ctx);
+    }
+    ExpectErrorPath("nnz-gt-0-size-0", aclsparseScatter(ctx.spHandle, sp, dn0),
+                    ACL_SPARSE_STATUS_INVALID_VALUE, stats, failed);
+    aclsparseDestroySpVec(sp);
+    aclsparseDestroyDnVec(dn0);
+    return 0;
+}
+
+// 错误路径用例组 3：shape / 规模负例（size>nums / nnz>0 且 nums=0 / nnz=0 成功早退）
+// 返回非 0 表示用例准备失败
+static int ErrorPathShapeCases(const ErrorPathCtx &ctx, TestStats &stats, int &failed)
+{
+    {   // SpVec size > vecY nums
+        aclsparseSpVecDescr_t sp = MakeErrSpVec(ctx, ACL_SPARSE_INDEX_32I,
+                                                ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT,
+                                                static_cast<int64_t>(2 * ctx.N));
+        CHECK_RET(sp != nullptr, return ErrorPathAbort(ctx));
+        ExpectErrorPath("size-gt-nums", aclsparseScatter(ctx.spHandle, sp, ctx.dnOk),
+                        ACL_SPARSE_STATUS_INVALID_VALUE, stats, failed);
+        aclsparseDestroySpVec(sp);
+    }
+    CHECK_RET(ErrorPathNnzGt0Size0Case(ctx, stats, failed) != 0, return 1);
+    {   // nnz=0：成功返回且不修改 vecY（数据指针可为 null）
+        aclsparseSpVecDescr_t sp = nullptr;
+        aclsparseStatus_t sparseRet = aclsparseCreateSpVec(&sp, static_cast<int64_t>(ctx.N), 0,
+                                                           nullptr, nullptr,
+                                                           ACL_SPARSE_INDEX_32I,
+                                                           ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+        CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+                  aclsparseDestroyDnVec(ctx.dnOk); aclsparseDestroy(ctx.spHandle); return sparseRet);
+        ExpectErrorPath("nnz0-success", aclsparseScatter(ctx.spHandle, sp, ctx.dnOk),
+                        ACL_SPARSE_STATUS_SUCCESS, stats, failed);
+        aclsparseDestroySpVec(sp);
+    }
+    return 0;
+}
+
+int TestErrorPaths(TestStats &stats, aclrtStream stream)
+{
+    std::cout << "====Error path tests====\n";
+    const size_t N = 16, nnz = 4;
+    ErrorPathCtx ctx;
+    ctx.N = N;
+    ctx.nnz = nnz;
+    const int prepRet = ErrorPathPrepare(N, nnz, stream, ctx);
+    if (prepRet != 0) {
+        return prepRet;
     }
 
-    TestStats stats;
+    int failed = 0;
+    ErrorPathNullCases(ctx, stats, failed);
+    const int attrRet = ErrorPathAttrCases(ctx, stats, failed);
+    if (attrRet != 0) {
+        return attrRet;
+    }
+    const int shapeRet = ErrorPathShapeCases(ctx, stats, failed);
+    if (shapeRet != 0) {
+        return shapeRet;
+    }
 
-    std::cout << "\n"
-              << "###########################################################\n"
-              << "##            Scatter Test Suite (bit-exact)             ##\n"
-              << "###########################################################\n\n";
+    aclsparseDestroyDnVec(ctx.dnOk);
+    aclsparseDestroy(ctx.spHandle);
+    std::cout << "====Error path tests done (failed=" << failed << ")====\n\n";
+    return failed == 0 ? 0 : 1;
+}
 
-    // ============ 基础用例：小/中/大 N、nnz=1、nnz=N、nnz=0 ============
+// ===================== 用例套件编排 =====================
+
+/*
+ * main 骨架：Init → 分区套件调度 → 汇总打印 → Finalize；各分区用例由 RunXxxSuite 编排。
+ */
+
+// 基础用例套件：小/中/大 N、nnz=1、nnz=N（全覆盖）、nnz=0（早退）
+static void RunBasicSuite(TestStats &stats, aclrtStream stream)
+{
     std::cout << "======== Basic Tests ========\n";
     RunAndTrack<float>(16, 8, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "small-8of16");
     RunAndTrack<float>(16, 12, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "small-12of16");
@@ -596,8 +1088,11 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     RunAndTrack<float>(4096, 4096, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "full-density-rand");
     RunAndTrack<float>(1024, 0, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "nnz0-early-return");
     RunAndTrack<float>(65536, 1024, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "medium-1k");
+}
 
-    // ============ 索引模式覆盖（均为互异索引）============
+// 索引模式覆盖套件（均为互异索引）
+static void RunIndexPatternSuite(TestStats &stats, aclrtStream stream)
+{
     std::cout << "\n======== Index Pattern Tests ========\n";
     RunAndTrack<float>(4096, 1024, IndexPattern::CONTIGUOUS, nullptr, stats, stream, "contiguous-head");
     RunAndTrack<float>(8192, 4096, IndexPattern::CONTIGUOUS, nullptr, stats, stream, "contiguous-large");
@@ -605,8 +1100,11 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     RunAndTrack<float>(8192, 512, IndexPattern::STRIDE, nullptr, stats, stream, "stride8");
     RunAndTrack<float>(8192, 1000, IndexPattern::STRIDE, nullptr, stats, stream, "stride3");
     RunAndTrack<float>(4096, 2048, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "random-unique");
+}
 
-    // ============ 特殊 value：含 0/负数/大值/Inf/NaN ============
+// 特殊 value 套件：含 0/负数/大值/Inf/NaN
+static void RunSpecialValueSuite(TestStats &stats, aclrtStream stream)
+{
     std::cout << "\n======== Special Values Tests (0/neg/large/Inf/NaN) ========\n";
     {
         // 含 +0/-0/负数/大值/Inf/-Inf/NaN 的混合 value
@@ -650,26 +1148,93 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
         std::vector<float> nanVal = {std::numeric_limits<float>::quiet_NaN()};
         RunAndTrack<float>(2048, 256, IndexPattern::RANDOM_UNIQUE, &nanVal, stats, stream, "all-nan");
     }
+}
 
-    // ============ 非对齐 nnz（考验 DataCopyPad 边界）============
+// 非对齐 nnz 套件（考验 DataCopyPad 边界）
+static void RunNonAlignedSuite(TestStats &stats, aclrtStream stream)
+{
     std::cout << "\n======== Non-aligned nnz Tests ========\n";
     RunAndTrack<float>(4096, 7, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "nonalign-7");
     RunAndTrack<float>(4096, 13, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "nonalign-13");
     RunAndTrack<float>(4096, 33, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "nonalign-33");
     RunAndTrack<float>(4096, 65, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "nonalign-65");
     RunAndTrack<float>(4096, 127, IndexPattern::RANDOM_UNIQUE, nullptr, stats, stream, "nonalign-127");
+}
 
-    // ============ 随机参数采样 ============
+// 随机参数采样套件
+static void RunRandomSuite(TestStats &stats, aclrtStream stream)
+{
     RunRandomParams<float>(30, "float-rand-", stats, stream);
+}
 
-    // ============ 大规模测试（互异索引）============
+// 扩展能力套件：五 dtype × base 0/1（bit-exact 字节缓冲）+ Host 校验链错误码
+static void RunExtendedDtypeSuite(TestStats &stats, aclrtStream stream)
+{
+    std::cout << "\n======== Extended dtype & idxBase Tests ========\n";
+    const ScatterDtypeDesc dtypes[] = {
+        {"float32",   ACL_FLOAT,      4, FloatToFp32Bytes},
+        {"float16",   ACL_FLOAT16,    2, FloatToFp16Bytes},
+        {"bfloat16",  ACL_BF16,   2, FloatToBf16Bytes},
+        {"int8",      ACL_INT8,      1, FloatToInt8Bytes},
+        {"complex64", ACL_COMPLEX64,  8, FloatToC64Bytes},
+    };
+    for (const auto &dt : dtypes) {
+        const std::string n = dt.name;
+        // base 0 / base 1 各一组（随机互异索引）
+        RunDtypeAndTrack(dt, 4096, 1024, IndexPattern::RANDOM_UNIQUE,
+                         ACL_SPARSE_INDEX_BASE_ZERO, stats, stream, n + "-base0-rand");
+        RunDtypeAndTrack(dt, 4096, 1024, IndexPattern::RANDOM_UNIQUE,
+                         ACL_SPARSE_INDEX_BASE_ONE, stats, stream, n + "-base1-rand");
+        // 连续段（run 拷贝快路径，base 1 验证 run 检测减法路径）
+        RunDtypeAndTrack(dt, 4096, 1000, IndexPattern::CONTIGUOUS,
+                         ACL_SPARSE_INDEX_BASE_ONE, stats, stream, n + "-base1-contig");
+        // 逆序（逐元素写退化路径）
+        RunDtypeAndTrack(dt, 2048, 512, IndexPattern::REVERSE,
+                         ACL_SPARSE_INDEX_BASE_ZERO, stats, stream, n + "-base0-reverse");
+        // 尾块（非 tile 整数倍）
+        RunDtypeAndTrack(dt, 4096, 37, IndexPattern::RANDOM_UNIQUE,
+                         ACL_SPARSE_INDEX_BASE_ZERO, stats, stream, n + "-base0-tail37");
+        // nnz=0（早退：不触碰 vecY，指针可为 null）
+        RunDtypeAndTrack(dt, 64, 0, IndexPattern::RANDOM_UNIQUE,
+                         ACL_SPARSE_INDEX_BASE_ZERO, stats, stream, n + "-base0-nnz0");
+        // 全密集（nnz = N）
+        RunDtypeAndTrack(dt, 64, 64, IndexPattern::CONTIGUOUS,
+                         ACL_SPARSE_INDEX_BASE_ONE, stats, stream, n + "-base1-fulldense");
+    }
+    // 动态大规模（P 场景同源参数规模）
+    RunDtypeAndTrack(dtypes[0], 16384, 1024, IndexPattern::RANDOM_UNIQUE,
+                     ACL_SPARSE_INDEX_BASE_ZERO, stats, stream, "float32-base0-large");
+    RunDtypeAndTrack(dtypes[4], 16384, 1024, IndexPattern::RANDOM_UNIQUE,
+                     ACL_SPARSE_INDEX_BASE_ONE, stats, stream, "complex64-base1-large");
+
+    // ---- Host 参数校验链错误码 ----
+    std::cout << "\n======== Host Validation / Error Code Tests ========\n";
+    TestErrorPaths(stats, stream);
+}
+
+// 大规模套件（互异索引）
+static void RunLargeScaleSuite(TestStats &stats, aclrtStream stream)
+{
     std::cout << "\n======== Large Scale Tests ========\n";
     RunAndTrack<float>(5 * 1024 * 1024, 1024 * 1024, IndexPattern::RANDOM_UNIQUE,
                        nullptr, stats, stream, "large-1M-rand");
     RunAndTrack<float>(4 * 1024 * 1024, 1024 * 1024, IndexPattern::CONTIGUOUS,
                        nullptr, stats, stream, "large-1M-contiguous");
+    // 边界回归：fp32 连续 distinct [0,nnz)、N=4M；131072 与 131073 各连跑 3 次，
+    // 防范非确定可见性类缺陷单次侥幸通过
+    for (int rep = 0; rep < 3; rep++) {
+        RunAndTrack<float>(4 * 1024 * 1024, 131072, IndexPattern::CONTIGUOUS,
+                           nullptr, stats, stream,
+                           ("boundary-131072-r" + std::to_string(rep)).c_str());
+        RunAndTrack<float>(4 * 1024 * 1024, 131073, IndexPattern::CONTIGUOUS,
+                           nullptr, stats, stream,
+                           ("boundary-131073-r" + std::to_string(rep)).c_str());
+    }
+}
 
-    // ====================== 汇总 ======================
+// 汇总打印（Total/Passed/Failed/Pass rate/失败明细）
+static void PrintTestSummary(const TestStats &stats)
+{
     std::cout << "\n========================================\n";
     std::cout << "              Test Summary\n";
     std::cout << "========================================\n";
@@ -688,6 +1253,36 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
         }
     }
     std::cout << "========================================\n";
+}
+
+// ===================== main =====================
+
+int main(int32_t /*argc*/, char * /*argv*/[]) {
+    const int32_t deviceId = 0;  // 使用 device 0
+    aclrtStream stream = nullptr;
+    int ret = Init(deviceId, &stream);
+    if (ret != ACL_SUCCESS) {
+        LOG_PRINT("Init acl failed. ERROR: %d\n", ret);
+        return ret;
+    }
+
+    TestStats stats;
+
+    std::cout << "\n"
+              << "###########################################################\n"
+              << "##            Scatter Test Suite (bit-exact)             ##\n"
+              << "###########################################################\n\n";
+
+    // ============ 各分区套件调度 ============
+    RunBasicSuite(stats, stream);
+    RunIndexPatternSuite(stats, stream);
+    RunSpecialValueSuite(stats, stream);
+    RunNonAlignedSuite(stats, stream);
+    RunRandomSuite(stats, stream);
+    RunExtendedDtypeSuite(stats, stream);
+    RunLargeScaleSuite(stats, stream);
+
+    PrintTestSummary(stats);
 
     Finalize(deviceId, stream);
     return (stats.failed == 0) ? 0 : 1;

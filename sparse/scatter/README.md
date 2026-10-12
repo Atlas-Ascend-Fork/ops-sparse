@@ -1,6 +1,6 @@
 # Scatter算子
 
-> 6.1 文档补全阶段产出。developer-doc 依据算子代码与设计文档编写，面向使用者。
+> developer-doc 依据算子代码编写，面向使用者。
 
 ## 算子概述
 
@@ -58,8 +58,29 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带执行 stream，Host 内存 |
-| vecX | 输入 | aclsparseSpVecDescr_t | 输入稀疏向量描述符（由 `aclsparseCreateSpVec` 创建），其 indices/values 为 Device 指针，Host 内存 |
+| vecX | 输入 | aclsparseConstSpVecDescr_t | 输入稀疏向量描述符（只读，由 `aclsparseCreateConstSpVec` / `aclsparseCreateSpVec` 创建），其 indices/values 为 Device 指针，Host 内存 |
 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量描述符（由 `aclsparseCreateDnVec` 创建），其 values 为 Device 指针，作为写入目标，Host 内存 |
+
+#### A2/A3支持数据类型
+
+| 数据类型 | aclDataType | 说明 |
+|----------|-------------|------|
+| INT8 | ACL_INT8 | 8 位有符号整数，valSize = 1 byte |
+| FP16 | ACL_FLOAT16 | 半精度浮点，valSize = 2 bytes |
+| BF16 | ACL_BF16 | bfloat16，valSize = 2 bytes |
+| FP32 | ACL_FLOAT | 单精度浮点，valSize = 4 bytes |
+| COMPLEX64 | ACL_COMPLEX64 | 单精度复数（2×fp32 交错存储），valSize = 8 bytes |
+
+| 索引类型 | aclsparseIndexType_t | 说明 |
+|----------|----------------------|------|
+| I32 | ACL_SPARSE_INDEX_32I | 32 位有符号整数（A2/A3 仅支持该类型） |
+
+| 索引基址 | aclsparseIndexBase_t | 说明 |
+|----------|----------------------|------|
+| ZERO | ACL_SPARSE_INDEX_BASE_ZERO | 0-based 索引，`indices[i]` 直接用作 Y 偏移 |
+| ONE | ACL_SPARSE_INDEX_BASE_ONE | 1-based 索引，内部访问 Y 时减 1 |
+
+> A2/A3（arch22，DAV_2201）实现要求 `vecX.valueType` 必须与 `vecY.valueType` 一致且在上表五 dtype 范围内，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 
 #### A5支持数据类型
 
@@ -86,16 +107,17 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
  	 - handle、vecX、vecY 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
  	 - handle 须先调用 `aclsparseSetStream` 设置 stream
  	 - nnz == 0 时直接返回 `ACL_SPARSE_STATUS_SUCCESS`，vecY 保持不变；nnz > 0 时 vecX 的 indices/values 与 vecY 的 values 不可为 nullptr
- 	 - 当前实现的支持范围（以 kernel 实际行为为准）：
+ 	 - Host 校验链（非法参数在同步返回前拦截，不启动 kernel）：`nnz > 0` 且 `vecX.size == 0` 或 `vecX.size > vecY.nums`、空指针、未声明输入输出 alias、非法 idxType/idxBase/valueType 或 `vecX.valueType != vecY.valueType`，均返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+ 	 - 当前实现的支持范围（A2/A3 arch22 交付实现，与仓内 `sparse/scatter/arch22/` 代码一致）：
  	   - vecX 的索引类型（idxType）仅支持 `ACL_SPARSE_INDEX_32I`（kernel 按 int32 读取 indices）；`ACL_SPARSE_INDEX_64I` 暂未支持
- 	   - vecX 的值类型（valueType）与 vecY 的值类型（valueType）均仅支持 `ACL_FLOAT`（kernel 按 float 读写 values/y）
- 	   - 索引基址（idxBase）仅支持 `ACL_SPARSE_INDEX_BASE_ZERO`（kernel 直接将索引用作 vecY 偏移，不扣除基址）
- 	 - 索引取值范围：indices[i] 须在 `[0, vecY.size)` 范围内。kernel 直接以索引作为 vecY 的 GM 偏移写入，越界访问行为未定义，调用方须自行保证
+ 	   - vecX 的值类型（valueType）与 vecY 的值类型（valueType）一致，且仅支持 `ACL_INT8` / `ACL_FLOAT16` / `ACL_BF16` / `ACL_FLOAT` / `ACL_COMPLEX64`（complex64 为 2×fp32 交错存储）
+ 	   - 索引基址（idxBase）支持 `ACL_SPARSE_INDEX_BASE_ZERO` 与 `ACL_SPARSE_INDEX_BASE_ONE`（ONE 时内部访问 Y 减 1 调整）
+ 	 - 索引取值范围：`indices[i] - idxBase` 须在 `[0, vecY.nums)` 范围内。kernel 直接以换算后索引作为 vecY 的 GM 偏移写入，Device 侧越界按异步错误协议或调用方前置条件处理（Host 不同步返回），调用方须自行保证
  	 - vecX.size 须 >= nnz（由 `aclsparseCreateSpVec` 校验）
- 	 - **输入索引约束（去重有序）**：vecX 的 indices 须去重（元素互异）且按升序有序。
- 	   - 本算子为非计算类，要求 bit-exact。kernel 采用多核并发，各核独立对自身分片做 run-length 检测后写入 GM。当 indices 去重且有序时，各核写入的 GM 地址互不重叠，结果确定且逐位一致。
- 	   - 若 indices 含重复元素，多核并发写同一 GM 地址，last-write-wins 顺序由核间调度决定，无法保证与全局 nnz 顺序一致，结果非确定（cuSPARSE 语义下重复索引本就未定义）。因此调用方须在调用前完成去重与排序，否则结果不保证。
- 	   - 此外，升序的连续索引段会命中 kernel 内部的 run-length 快速拷贝路径，获得更优性能；去重有序既是正确性前置条件，也有利于性能。
+ 	 - **索引排序与重复（确定性口径）**：indices 允许未排序；无重复索引时输出 bit-wise 确定一致。
+ 	   - 本算子为非计算类，要求 bit-exact。kernel 采用多核并发，各核独立对自身分片写入 GM；当 indices 互异时各核写入的 GM 地址互不重叠，结果确定且逐位一致。
+ 	   - 若 indices 含重复元素，多核并发写同一 GM 地址，最终写入值为对应输入 values 之一（last-write-wins，非累加），顺序由核间调度决定，结果非确定（cuSPARSE 语义下重复索引本就未定义）。如需确定性结果，调用方应保证 indices 互异。
+ 	   - 升序连续索引段会命中 kernel 内部的 run-length 快速拷贝路径，获得更优性能；去重有序是性能建议而非正确性前置条件。
 
 #### A5 约束说明
 

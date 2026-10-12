@@ -1932,7 +1932,10 @@ aclsparseStatus_t aclsparseSpMMOp(
  * - idxBase = ONE 时，indices 基于 1，内部访问 Y 时减 1 调整。
  * - 索引重复时 last-write-wins（行为不确定，与 cuSPARSE 一致）。
  * - 索引未排序允许。
- * - 支持 valueType ∈ {FP32, FP16, BF16}，idxType ∈ {I32, I64}。
+ * - 支持 valueType ∈ {INT8, FP16, BF16, FP32, COMPLEX64}（vecX.values 与 vecY dtype 须一致，
+ *   complex64 为 2×fp32 交错存储）；idxType 仅 I32；idxBase ∈ {0, 1}。
+ * - nnz=0 时成功返回且不修改 vecY；非法参数（空句柄/描述符、非法 idxType/idxBase/
+ *   dtype、nnz>0 且 size=0、未声明 alias 等）返回确定参数错误。
  * - 异步执行，同步由调用方通过 stream 负责。
  *
  * @param handle IN, HOST, aclsparse 库上下文句柄。
