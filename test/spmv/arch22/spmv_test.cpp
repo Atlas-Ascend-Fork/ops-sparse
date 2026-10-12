@@ -21,6 +21,7 @@
 #include <memory>
 #include <type_traits>
 #include <cstdint>
+#include <limits>
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
 
@@ -338,6 +339,22 @@ int32_t Verification(const std::vector<T> &cpuGolden,
     for (size_t i = 0; i < npuRet.size(); ++i) {
         float npuVal = static_cast<float>(npuRet[i]);
         float cpuVal = static_cast<float>(cpuGolden[i]);
+
+        if (!std::isfinite(npuVal) || !std::isfinite(cpuVal)) {
+            // Non-finite values must not be excused by the matched-ratio tolerance:
+            // fabs(NaN) compares false against both the running max error and the
+            // per-element tolerance, so without this check a lone NaN element is
+            // silently skipped and a 99%-match result can still report success.
+            maxAbsError = std::numeric_limits<float>::infinity();
+            worstIdx = i;
+            worstGolden = cpuVal;
+            worstNpu = npuVal;
+            worstMargin = std::numeric_limits<float>::infinity();
+            std::cout << "[WARNING] value[" << i << "] is not finite: golden=" << cpuVal
+                      << " npu_result=" << npuVal << "\n";
+            continue;
+        }
+
         float aError = std::fabs(npuVal - cpuVal);
         if (aError > maxAbsError) {
             maxAbsError = aError;
