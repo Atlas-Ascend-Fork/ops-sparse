@@ -48,6 +48,7 @@ struct DenseToSparseRunContext {
   size_t offsetWidth;
   size_t indexWidth;
   size_t offsetCount;
+  int64_t bellValueCount;
   std::vector<uint8_t> patternBytes;
   DeviceBuffer denseBuffer;
   std::unique_ptr<DeviceBuffer> offsets, pattern, bellValues;
@@ -69,6 +70,9 @@ struct DenseToSparseRunContext {
         offsetCount(p.format == "CSR"   ? static_cast<size_t>(p.m + 1)
                     : p.format == "CSC" ? static_cast<size_t>(p.n + 1)
                                         : 0),
+        bellValueCount(p.format == "BELL" ? DenseToSparseBellValueCount(
+                                                p.m, p.block_size, p.ell_cols)
+                                          : 0),
         patternBytes(PackDenseToSparseIndices(input.ellPattern, indexType)),
         denseBuffer(CopyDense(input)) {}
 
@@ -90,10 +94,9 @@ inline bool PrepareDenseToSparseRun(DenseToSparseRunContext *ctx) {
         DeviceBuffer::alloc(ctx->offsetCount * ctx->offsetWidth));
   }
   ctx->pattern = DenseToSparseCopy(ctx->patternBytes);
-  if (ctx->param.format == "BELL" && ctx->param.m * ctx->param.ell_cols > 0) {
+  if (ctx->param.format == "BELL" && ctx->bellValueCount > 0) {
     ctx->bellValues = std::make_unique<DeviceBuffer>(DeviceBuffer::alloc(
-        static_cast<size_t>(ctx->param.m * ctx->param.ell_cols) *
-        ctx->valueWidth));
+        static_cast<size_t>(ctx->bellValueCount) * ctx->valueWidth));
   }
   ctx->result.descriptorStatus = ctx->dense.create(
       ctx->param.m, ctx->param.n, ctx->param.ld, ctx->denseBuffer.get(),
@@ -207,8 +210,7 @@ inline void CopyDenseToSparseRunOutput(DenseToSparseRunContext *ctx) {
           : 0);
   ctx->result.values.resize(
       ctx->param.format == "BELL"
-          ? static_cast<size_t>(ctx->param.m * ctx->param.ell_cols) *
-                ctx->valueWidth
+          ? static_cast<size_t>(ctx->bellValueCount) * ctx->valueWidth
           : static_cast<size_t>(ctx->result.queriedNnz) * ctx->valueWidth);
   if (ctx->index0)
     ctx->index0->copyToHost(ctx->result.indices0.data(),

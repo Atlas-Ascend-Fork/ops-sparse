@@ -36,6 +36,8 @@ inline size_t DenseToSparseTypeSize(aclDataType type) {
     return 2;
   if (type == ACL_FLOAT)
     return 4;
+  if (type == ACL_COMPLEX64)
+    return 8;
   return 0;
 }
 
@@ -48,6 +50,8 @@ inline aclDataType DenseToSparseValueType(const std::string &name) {
     return ACL_BF16;
   if (name == "FP32")
     return ACL_FLOAT;
+  if (name == "CPLX64")
+    return ACL_COMPLEX64;
   if (name == "FP64")
     return ACL_DOUBLE;
   return static_cast<aclDataType>(-1);
@@ -76,7 +80,7 @@ inline DenseSparseFormat DenseToSparseFormatOf(const std::string &name) {
 }
 
 inline void StoreDenseBits(std::vector<uint8_t> *dense, size_t element,
-                           size_t width, uint32_t bits) {
+                           size_t width, uint64_t bits) {
   for (size_t byte = 0; byte < width; ++byte) {
     (*dense)[element * width + byte] =
         static_cast<uint8_t>((bits >> (byte * 8)) & 0xffu);
@@ -104,15 +108,22 @@ inline bool DenseToSparseIsNonzero(const DenseToSparseParam &p, uint64_t linear,
   return p.distribution != "Z25" || linear % 4 != 0;
 }
 
-inline uint32_t DenseToSparseInputBits(aclDataType type, uint64_t linear,
+inline uint64_t DenseToSparseInputBits(aclDataType type, uint64_t linear,
                                        uint64_t seed) {
   if (type == ACL_INT8) {
-    uint32_t bits =
+    uint64_t bits =
         static_cast<uint8_t>(static_cast<int8_t>((linear + seed) % 255 - 127));
     return bits == 0 ? 1 : bits;
   }
   if (type == ACL_FLOAT)
     return 0x3f000001u + static_cast<uint32_t>(linear % 127);
+  if (type == ACL_COMPLEX64) {
+    // Alternate which component carries the magnitude so that cases with a
+    // zero real part or a zero imaginary part still count as non-zero.
+    const uint64_t re = linear % 3 == 0 ? 0u : 0x3f000001u + (linear % 127);
+    const uint64_t im = linear % 3 == 1 ? 0u : 0xbf000001u + (linear % 113);
+    return (im << 32) | re;
+  }
   if (type == ACL_FLOAT16)
     return 0x3801u + static_cast<uint16_t>(linear % 63);
   return 0x3f01u + static_cast<uint16_t>(linear % 63);
@@ -135,27 +146,42 @@ inline void FillDenseToSparseValues(DenseToSparseHostInput *input,
   }
 }
 
+// Signed zeros first (both excluded from the structure), then NaN, infinities
+// and an ordinary value that must all be preserved bit for bit.
+inline uint64_t DenseToSparseSpecialBits(aclDataType type, size_t k) {
+  const uint32_t special32[] = {0x00000000u, 0x80000000u, 0x7fc12345u,
+                                0x7f800000u, 0xff800000u, 0x3fc00000u};
+  // complex64 is packed as (imaginary << 32) | real, so these cover a zero
+  // pair with mixed signs plus a non-zero component in either half.
+  const uint64_t complex64[] = {0x0000000000000000ull, 0x8000000000000000ull,
+                                0x000000007fc12345ull, 0x7fc1234500000000ull,
+                                0xff8000007f800000ull, 0xbfc000003fc00000ull};
+  const uint16_t special16[] = {
+      0x0000u,
+      0x8000u,
+      static_cast<uint16_t>(type == ACL_FLOAT16 ? 0x7e55u : 0x7fc5u),
+      static_cast<uint16_t>(type == ACL_FLOAT16 ? 0x7c00u : 0x7f80u),
+      static_cast<uint16_t>(type == ACL_FLOAT16 ? 0xfc00u : 0xff80u),
+      0x3f00u};
+  if (type == ACL_COMPLEX64)
+    return complex64[k];
+  if (type == ACL_FLOAT)
+    return special32[k];
+  return special16[k];
+}
+
 inline void FillDenseToSparseSpecial(DenseToSparseHostInput *input,
                                      const DenseToSparseParam &p,
                                      aclDataType type, size_t width) {
   const uint64_t logical = static_cast<uint64_t>(p.m) * p.n;
   if (p.distribution == "SPECIAL" && logical >= 6 && type != ACL_INT8) {
-    const uint32_t special32[] = {0x00000000u, 0x80000000u, 0x7fc12345u,
-                                  0x7f800000u, 0xff800000u, 0x3fc00000u};
-    const uint16_t special16[] = {
-        0x0000u,
-        0x8000u,
-        static_cast<uint16_t>(type == ACL_FLOAT16 ? 0x7e55u : 0x7fc5u),
-        static_cast<uint16_t>(type == ACL_FLOAT16 ? 0x7c00u : 0x7f80u),
-        static_cast<uint16_t>(type == ACL_FLOAT16 ? 0xfc00u : 0xff80u),
-        0x3f00u};
     for (size_t k = 0; k < 6; ++k) {
       const int64_t row = static_cast<int64_t>(k) / p.n;
       const int64_t col = static_cast<int64_t>(k) % p.n;
       const size_t element =
           DenseToSparsePhysicalIndex(row, col, p.ld, p.order == "ROW");
       StoreDenseBits(&input->dense, element, width,
-                     type == ACL_FLOAT ? special32[k] : special16[k]);
+                     DenseToSparseSpecialBits(type, k));
     }
   }
 }
@@ -164,11 +190,17 @@ inline void FillDenseToSparseBellPattern(DenseToSparseHostInput *input,
                                          const DenseToSparseParam &p) {
   if (p.format != "BELL")
     return;
-  const int64_t slots = p.ell_cols / p.block_size;
-  input->ellPattern.resize(static_cast<size_t>((p.m / p.block_size) * slots),
-                           -1);
+  const int64_t slots = DenseToSparseCeilDiv(p.ell_cols, p.block_size);
+  const int64_t blockRows = DenseToSparseCeilDiv(p.m, p.block_size);
+  const int64_t blockColumns = DenseToSparseCeilDiv(p.n, p.block_size);
+  input->ellPattern.resize(static_cast<size_t>(blockRows * slots), -1);
+  // 退化输入下块列数可能为 0，此时没有任何块列可供指向，pattern 保持全 -1。
+  // DenseToSparseCeilDiv 不会返回负数，所以这里判 0 即可覆盖全部退化情形。
+  if (blockColumns == 0) {
+    return;
+  }
   const int64_t base = p.base == "ONE" ? 1 : 0;
-  for (int64_t blockRow = 0; blockRow < p.m / p.block_size; ++blockRow) {
+  for (int64_t blockRow = 0; blockRow < blockRows; ++blockRow) {
     for (int64_t slot = 0; slot < slots; ++slot) {
       const bool padding =
           p.distribution.find("PAD") != std::string::npos && slot == slots - 1;
@@ -177,14 +209,14 @@ inline void FillDenseToSparseBellPattern(DenseToSparseHostInput *input,
           (p.distribution == "BELL_Z75" && slot % 4 != 0);
       if (!padding && !sparsePadding) {
         input->ellPattern[static_cast<size_t>(blockRow * slots + slot)] =
-            (slot + blockRow) % (p.n / p.block_size) + base;
+            (slot + blockRow) % blockColumns + base;
       }
     }
   }
   if (p.distribution == "BELL_OOB" && !input->ellPattern.empty()) {
     input->ellPattern.front() = -2;
     if (input->ellPattern.size() > 1) {
-      input->ellPattern.back() = p.n / p.block_size + (p.base == "ONE" ? 1 : 0);
+      input->ellPattern.back() = blockColumns + base;
     }
   }
 }

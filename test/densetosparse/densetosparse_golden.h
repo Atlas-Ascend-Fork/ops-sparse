@@ -65,7 +65,38 @@ inline bool DenseToSparseIsZero(const uint8_t *value, size_t width,
     std::copy_n(value, sizeof(bits), reinterpret_cast<uint8_t *>(&bits));
     return (bits & 0x7fffffffu) == 0;
   }
+  if (width == 8) {
+    // complex64: zero only when both FP32 components have zero magnitude bits.
+    uint64_t bits = 0;
+    std::copy_n(value, sizeof(bits), reinterpret_cast<uint8_t *>(&bits));
+    return ((static_cast<uint32_t>(bits) & 0x7fffffffu) |
+            (static_cast<uint32_t>(bits >> 32) & 0x7fffffffu)) == 0;
+  }
   throw std::invalid_argument("unsupported floating value width");
+}
+
+inline int64_t DenseToSparseCeilDiv(int64_t value, int64_t divisor) {
+  if (divisor < 0) {
+    return 0;
+  }
+  if (divisor == 0) {
+    return 0;
+  }
+  return (value + divisor - 1) / divisor;
+}
+
+// Blocked-ELL capacity on the padded block grid; equals rows*ellCols whenever
+// rows and ellCols are multiples of blockSize.
+inline int64_t DenseToSparseBellValueCount(int64_t rows, int64_t blockSize,
+                                           int64_t ellCols) {
+  return DenseToSparseCeilDiv(rows, blockSize) *
+         DenseToSparseCeilDiv(ellCols, blockSize) * blockSize * blockSize;
+}
+
+inline int64_t DenseToSparseBellPatternCount(int64_t rows, int64_t blockSize,
+                                             int64_t ellCols) {
+  return DenseToSparseCeilDiv(rows, blockSize) *
+         DenseToSparseCeilDiv(ellCols, blockSize);
 }
 
 inline size_t DenseToSparsePhysicalIndex(int64_t row, int64_t col, int64_t ld,
@@ -138,7 +169,27 @@ inline bool DenseToSparseBellBlockColumnValid(int64_t encoded,
                                                int64_t safeBlockSize) {
   const int64_t nonzeroBlockSize =
       safeBlockSize > 0 ? safeBlockSize : 1;
-  return encoded != -1 && blockCol >= 0 && blockCol < n / nonzeroBlockSize;
+  return encoded != -1 && blockCol >= 0 &&
+         blockCol < DenseToSparseCeilDiv(n, nonzeroBlockSize);
+}
+
+/// 把一个非零块的有效区域搬进它在 Blocked-ELL 里的 slot。超出矩阵的逻辑元素保持
+/// 结果缓冲初始化时的正零。
+inline void DenseToSparseFillBellBlock(const DenseToSparseGoldenArgs &args,
+                                       int64_t blockSize, int64_t slots,
+                                       int64_t blockRow, int64_t slot,
+                                       int64_t blockCol,
+                                       DenseToSparseGoldenResult *result) {
+  for (int64_t innerCol = 0; innerCol < blockSize; ++innerCol) {
+    for (int64_t innerRow = 0; innerRow < blockSize; ++innerRow) {
+      if (blockRow * blockSize + innerRow >= args.m ||
+          blockCol * blockSize + innerCol >= args.n) {
+        continue;
+      }
+      DenseToSparseCopyBellValue(args, blockSize, slots, blockRow, slot,
+                                 blockCol, innerCol, innerRow, result);
+    }
+  }
 }
 
 inline DenseToSparseGoldenResult
@@ -149,31 +200,26 @@ DenseToSparseBellGolden(const DenseToSparseGoldenArgs &args, int64_t blockSize,
     throw std::invalid_argument("invalid Blocked-ELL geometry");
   }
   const int64_t safeBlockSize = blockSize > 0 ? blockSize : 1;
-  if (args.m % safeBlockSize != 0 || args.n % safeBlockSize != 0 ||
-      ellCols < 0 || ellCols > args.n || ellCols % safeBlockSize != 0) {
+  if (ellCols < 0 ||
+      DenseToSparseCeilDiv(ellCols, safeBlockSize) >
+          DenseToSparseCeilDiv(args.n, safeBlockSize)) {
     throw std::invalid_argument("invalid Blocked-ELL geometry");
   }
-  uint64_t generic = 0;
-  uint64_t patternCount = 0;
-  uint64_t valueCount = 0;
-  if (!DenseToSparseCheckedMul(static_cast<uint64_t>(args.m),
-                               static_cast<uint64_t>(ellCols), &generic) ||
-      generic > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
-      !DenseToSparseCheckedMul(static_cast<uint64_t>(args.m / safeBlockSize),
-                               static_cast<uint64_t>(ellCols / safeBlockSize),
-                               &patternCount) ||
-      !DenseToSparseCheckedMul(static_cast<uint64_t>(args.m),
-                               static_cast<uint64_t>(ellCols), &valueCount) ||
-      ellPattern.size() != patternCount ||
+  const uint64_t patternCount = static_cast<uint64_t>(
+      DenseToSparseBellPatternCount(args.m, safeBlockSize, ellCols));
+  const uint64_t valueCount = static_cast<uint64_t>(
+      DenseToSparseBellValueCount(args.m, safeBlockSize, ellCols));
+  if (ellPattern.size() != patternCount ||
       valueCount > std::numeric_limits<size_t>::max() / args.valueWidth) {
     throw std::overflow_error("Blocked-ELL capacity overflow/mismatch");
   }
   DenseToSparseGoldenResult result;
-  result.genericNnz = static_cast<int64_t>(generic);
+  result.genericNnz = static_cast<int64_t>(valueCount);
   result.ellPattern = ellPattern;
   result.values.assign(static_cast<size_t>(valueCount) * args.valueWidth, 0);
-  const int64_t slots = ellCols / safeBlockSize;
-  for (int64_t blockRow = 0; blockRow < args.m / safeBlockSize; ++blockRow) {
+  const int64_t slots = DenseToSparseCeilDiv(ellCols, safeBlockSize);
+  const int64_t blockRows = DenseToSparseCeilDiv(args.m, safeBlockSize);
+  for (int64_t blockRow = 0; blockRow < blockRows; ++blockRow) {
     for (int64_t slot = 0; slot < slots; ++slot) {
       const int64_t encoded =
           ellPattern[static_cast<size_t>(blockRow * slots + slot)];
@@ -182,12 +228,8 @@ DenseToSparseBellGolden(const DenseToSparseGoldenArgs &args, int64_t blockSize,
                                              safeBlockSize)) {
         continue;
       }
-      for (int64_t innerCol = 0; innerCol < blockSize; ++innerCol) {
-        for (int64_t innerRow = 0; innerRow < blockSize; ++innerRow) {
-          DenseToSparseCopyBellValue(args, blockSize, slots, blockRow, slot,
-                                     blockCol, innerCol, innerRow, &result);
-        }
-      }
+      DenseToSparseFillBellBlock(args, safeBlockSize, slots, blockRow, slot,
+                                 blockCol, &result);
     }
   }
   return result;

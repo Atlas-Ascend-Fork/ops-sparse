@@ -49,7 +49,7 @@ values 载荷按填充网格（`ceil(rows/b)*b x ellCols`）分配，空槽的�
 | CSR | `rowOffsets[m + 1]` | `colIndices[nnz]`、`values[nnz]` | 按行压缩；每行内列索引递增 |
 | CSC | `colOffsets[n + 1]` | `rowIndices[nnz]`、`values[nnz]` | 按列压缩；每列内行索引递增 |
 | COO | 无结构数组要求 | `rowIndices[nnz]`、`colIndices[nnz]`、`values[nnz]` | 按逻辑 row-major 顺序输出坐标 |
-| BELL | `ellColInd[(ellCols / blockSize) * (m / blockSize)]`、`ellValue[m * ellCols]` | 无 | 按预置 block-column pattern 提取块值 |
+| BELL | `ellColInd[ceil(ellCols / blockSize) * ceil(m / blockSize)]`、`ellValue[blockRows * b * slots * b]` | 无 | 按预置 block-column pattern 提取块值 |
 
 CSR/CSC 的 descriptor 创建能力与 DenseToSparse 的执行能力需要区分：
 `aclsparseCreateCsr` 和 `aclsparseCreateCsc` 可接受 I32/I32、I32/I64、I64/I32、
@@ -83,17 +83,25 @@ BELL 转换使用调用者在调用前确定的固定 pattern，而不是从稠�
 令 `rows = m`、`cols = n`、`ellBlockSize = b`，则必须满足：
 
 - `b > 0`；
-- `rows % b == 0`、`cols % b == 0`、`ellCols % b == 0`；
 - `0 <= ellCols <= cols`。
 
-BELL 有 `blockRows = rows / b` 个 block row，每个 block row 有
-`slots = ellCols / b` 个固定 slot。因此：
+`rows`、`cols`、`ellCols` 都不要求被 `b` 整除；不整除时最后一个 block row 或
+block column 是尾块。几何量按向上取整计算：
+
+```text
+blockRows = ceil(rows / b)
+slots     = ceil(ellCols / b)
+```
 
 | 数组/字段 | 元素数或语义 |
 |-----------|--------------|
 | `ellColInd` | `blockRows * slots` 个 I32 或 I64 block-column indices |
-| `ellValue` | `rows * ellCols` 个 value 标量 |
-| `aclsparseSpMatGetSize(..., &nnz)` | `nnz = rows * ellCols`，即存储标量容量 |
+| `ellValue` | `blockRows * b * slots * b` 个 value 标量 |
+| `aclsparseSpMatGetSize(..., &nnz)` | `nnz = blockRows * b * slots * b`，即存储标量容量 |
+
+容量按补齐后的块网格计算，因此**每个 slot 恒占 `b * b` 个标量**，尾块与非尾块
+的块内寻址公式一致。当 `rows` 与 `ellCols` 都能被 `b` 整除时，该容量恰好等于
+`rows * ellCols`，与不支持尾块时的行为完全相同。
 
 这里的 `nnz` 不是 Dense 中的实际非零数，也不是有效 pattern 覆盖范围内的实际
 非零数。创建 BELL 描述符前必须按上述元素数分配 `ellColInd` 和 `ellValue`；
@@ -102,10 +110,14 @@ BELL 有 `blockRows = rows / b` 个 block row，每个 block row 有
 ### Pattern、padding 与越界项
 
 对 base 为 `base` 的 pattern 项 `encoded`，仅当
-`base <= encoded < base + cols / b` 时有效，对应的 0-based block column 为
+`base <= encoded < base + ceil(cols / b)` 时有效，对应的 0-based block column 为
 `encoded - base`。`-1`、任何小于 `base` 的值以及超出 block-column 范围的值
 均按 padding 处理；对应整个 `b * b` slot 在 `ellValue` 中写为该 value 类型的
 **正零**。这也适用于 1-based pattern 中的 `0`。
+
+尾块内越界的逻辑元素同样写**正零**：对 slot 内的逻辑位置 `(row, col)`，
+仅当 `row < rows && col < cols` 时才从 Dense 搬运，否则写正零。因此
+`rows`、`cols` 不整除时补齐出来的行列不会读取 Dense，也不会越界访问。
 
 `ellColInd` 位于 Device。接口不会把 pattern 同步到 Host 后逐项校验其内容，
 因此 GetBufferSize 和 Analysis 不会因某个 pattern 项越界而报错；该项在 Convert
@@ -189,8 +201,8 @@ aclrtFree(devicePattern);
 ```
 
 BELL 的 index 类型支持 `ACL_SPARSE_INDEX_32I` 和
-`ACL_SPARSE_INDEX_64I`，value 类型仅支持 `ACL_INT8`、`ACL_FLOAT16`、
-`ACL_BF16` 和 `ACL_FLOAT`，且必须与 Dense 的 value 类型一致。
+`ACL_SPARSE_INDEX_64I`，value 类型支持 `ACL_INT8`、`ACL_FLOAT16`、
+`ACL_BF16`、`ACL_FLOAT` 和 `ACL_COMPLEX64`，且必须与 Dense 的 value 类型一致。
 
 ## 支持数据类型
 
@@ -203,9 +215,14 @@ value 类型要求 `matA` 与 `matB` 相同；各架构支持范围如下。
 | float16 | `ACL_FLOAT16` | 支持 | 支持 |
 | bfloat16 | `ACL_BF16` | 支持 | 支持 |
 | float32 | `ACL_FLOAT` | 支持 | 支持 |
-| complex64 | `ACL_COMPLEX64` | 支持 | 不支持 |
+| complex64 | `ACL_COMPLEX64` | 支持 | 支持 |
 
-不支持 float64；arch35 不支持任何复数类型。传入不支持类型返回
+complex64 是交织的 `(实部, 虚部)` 两个 FP32，按 8 字节整体搬运。任一分量的
+幅值位非零即视为非零，因此 `(+0, -0)` 这类两分量皆零的元素不入结构，而
+`(NaN, 0)`、`(0, Inf)` 等任一分量为 NaN 或 Inf 的元素都会保留，实部虚部各自
+按位一致。
+
+不支持 float64 和 complex128；传入这些类型返回
 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 **Device 索引固定为 I32（`ACL_SPARSE_INDEX_32I`）**：I64 描述符在三阶段接口上

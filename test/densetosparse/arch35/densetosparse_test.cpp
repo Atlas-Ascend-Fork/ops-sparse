@@ -246,6 +246,104 @@ TEST_F(DenseToSparseExceptionTest,
                 {1, 5, 2, 6, 0, 0, 0, 0, 11, 15, 12, 16, 0, 0, 0, 0}));
 }
 
+std::vector<uint8_t> PackComplex64Bits(const std::vector<uint64_t> &bits) {
+  std::vector<uint8_t> bytes(bits.size() * sizeof(uint64_t));
+  const auto *begin = reinterpret_cast<const uint8_t *>(bits.data());
+  std::copy(begin, begin + bytes.size(), bytes.begin());
+  return bytes;
+}
+
+// complex64 is stored as (imaginary << 32) | real.
+constexpr uint64_t kC64Zero = 0x0000000000000000ull;
+constexpr uint64_t kC64NegZeroPair = 0x8000000080000000ull;
+constexpr uint64_t kC64RealOnly = 0x000000003fc00000ull;
+constexpr uint64_t kC64ImagOnly = 0xbfc0000000000000ull;
+constexpr uint64_t kC64NanImag = 0x7fc1234500000000ull;
+constexpr uint64_t kC64InfPair = 0xff8000007f800000ull;
+
+TEST_F(DenseToSparseExceptionTest, Complex64KeepsEitherComponentNonzero) {
+  auto p = MakeStatelessParam("CSR");
+  p.value_type = "CPLX64";
+  p.m = 2;
+  p.n = 3;
+  p.ld = 3;
+  DenseToSparseHostInput host;
+  host.dense = PackComplex64Bits({kC64Zero, kC64NegZeroPair, kC64RealOnly,
+                                  kC64ImagOnly, kC64NanImag, kC64InfPair});
+  const auto actual = RunDenseToSparse(*handle_, env_->stream(), p, host);
+  ExpectDenseToSparseStatuses(p, actual);
+  EXPECT_EQ(actual.queriedNnz, 4);
+  EXPECT_EQ(actual.offsets,
+            PackDenseToSparseIndices({0, 1, 4}, ACL_SPARSE_INDEX_32I));
+  EXPECT_EQ(actual.indices0,
+            PackDenseToSparseIndices({2, 0, 1, 2}, ACL_SPARSE_INDEX_32I));
+  EXPECT_EQ(actual.values,
+            PackComplex64Bits(
+                {kC64RealOnly, kC64ImagOnly, kC64NanImag, kC64InfPair}));
+}
+
+TEST_F(DenseToSparseExceptionTest, Complex64MatchesGoldenAcrossFormats) {
+  for (const std::string format : {"CSR", "CSC", "COO"}) {
+    auto p = MakeStatelessParam(format);
+    p.value_type = "CPLX64";
+    p.base = "ONE";
+    p.distribution = "SPECIAL";
+    const auto host = MakeDenseToSparseInput(p);
+    const auto golden = DenseToSparseGolden(DenseToSparseFormatOf(p.format),
+                                            p.m, p.n, p.ld, true, 1,
+                                            sizeof(uint64_t), false, host.dense);
+    const auto actual = RunDenseToSparse(*handle_, env_->stream(), p, host);
+    ExpectDenseToSparseStatuses(p, actual);
+    ExpectDenseToSparseGolden(p, golden, actual);
+  }
+}
+
+TEST_F(DenseToSparseExceptionTest, BlockedEllTailBlocksPadWithPositiveZero) {
+  auto p = MakeStatelessParam("BELL");
+  p.m = 3;
+  p.n = 3;
+  p.ld = 3;
+  p.block_size = 2;
+  p.ell_cols = 2;
+  DenseToSparseHostInput host;
+  host.dense = PackFp32Bits({1, 2, 3, 4, 5, 6, 7, 8, 9});
+  host.ellPattern = {0, 1};
+  const auto actual = RunDenseToSparse(*handle_, env_->stream(), p, host);
+  ExpectDenseToSparseStatuses(p, actual);
+  // 2 block rows x 1 slot, each owning a full 2x2 block, so 8 scalars.
+  EXPECT_EQ(actual.bellNnzAfterQuery, 8);
+  EXPECT_EQ(actual.bellNnzAfterAnalysis, 8);
+  EXPECT_EQ(actual.bellNnzAfterConvert, 8);
+  EXPECT_EQ(actual.ellPattern,
+            PackDenseToSparseIndices(host.ellPattern, ACL_SPARSE_INDEX_32I));
+  // Block (0,0) is whole; block (1,1) only has row 2 and column 2 in range.
+  EXPECT_EQ(actual.values, PackFp32Bits({1, 4, 2, 5, 9, 0, 0, 0}));
+}
+
+TEST_F(DenseToSparseExceptionTest, BlockedEllTailMatchesGoldenForAllBlockSizes) {
+  for (const int64_t blockSize : {2, 4}) {
+    for (const std::string order : {"ROW", "COL"}) {
+      auto p = MakeStatelessParam("BELL");
+      p.order = order;
+      p.base = "ONE";
+      p.m = 7;
+      p.n = 7;
+      p.ld = 9;
+      p.block_size = blockSize;
+      p.ell_cols = 5;
+      p.distribution = "BELL_FULL";
+      const auto host = MakeDenseToSparseInput(p);
+      const auto golden = DenseToSparseGolden(
+          DenseSparseFormat::BLOCKED_ELL, p.m, p.n, p.ld, order == "ROW", 1,
+          sizeof(uint32_t), false, host.dense, p.block_size, p.ell_cols,
+          host.ellPattern);
+      const auto actual = RunDenseToSparse(*handle_, env_->stream(), p, host);
+      ExpectDenseToSparseStatuses(p, actual);
+      ExpectDenseToSparseGolden(p, golden, actual);
+    }
+  }
+}
+
 TEST_F(DenseToSparseExceptionTest, GetBufferSizeIsRepeatablePureQuery) {
   const auto p = MakeStatelessParam("CSR");
   const auto host = MakeDenseToSparseInput(p);
@@ -559,6 +657,9 @@ DenseToSparseTilingData MakeSingleElementWhiteboxTiling(uint32_t base = 0) {
   tiling.cols = 1;
   tiling.ld = 1;
   tiling.unitCount = 1;
+  // One unit covering the single column; the host normally derives this from
+  // the matrix shape.
+  tiling.majorChunk = 1;
   tiling.statusOffset = 0;
   tiling.nnzOffset = 32;
   tiling.level0Offset = 64;
@@ -1158,8 +1259,10 @@ aclsparseStatus_t RunBellL2Case(const std::string &mutation) {
                                      ACL_SPARSE_INDEX_32I,
                                      ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
   }
-  if (mutation == "bell_shape_or_ellcols_not_divisible") {
-    return aclsparseCreateBlockedEll(&bell, 5, 4, 2, 2, &pattern, &value,
+  if (mutation == "bell_tail_values_null") {
+    // rows=5 leaves a tail block: capacity is the padded 3x1 block grid, so
+    // ellValue is still required even though rows % ellBlockSize != 0.
+    return aclsparseCreateBlockedEll(&bell, 5, 4, 2, 2, &pattern, nullptr,
                                      ACL_SPARSE_INDEX_32I,
                                      ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
   }
@@ -1177,6 +1280,15 @@ aclsparseStatus_t RunBellL2Case(const std::string &mutation) {
     return aclsparseCreateBlockedEll(&bell, 4, 4, 2, 2, &pattern, nullptr,
                                      ACL_SPARSE_INDEX_32I,
                                      ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+  }
+  if (mutation == "bell_ceildiv_overflow") {
+    // ellCols 接近 INT64_MAX：CeilDiv(ellCols, ellBlockSize) 的旧写法
+    // (value + divisor - 1) 会有符号溢出，且发生在容量检查之前。正确实现应在
+    // slots 超出补齐后的块列数时返回 INVALID_VALUE，而非触发 UB。
+    return aclsparseCreateBlockedEll(
+        &bell, 0, std::numeric_limits<int64_t>::max() - 2, 2,
+        std::numeric_limits<int64_t>::max(), &pattern, &value,
+        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
   }
   return aclsparseCreateBlockedEll(
       &bell, std::numeric_limits<int64_t>::max() - 1,

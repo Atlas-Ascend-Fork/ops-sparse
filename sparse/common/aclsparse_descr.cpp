@@ -26,6 +26,18 @@
 
 namespace {
 
+static int64_t CeilDiv(int64_t value, int64_t divisor)
+{
+    if (value < 0) {
+        return 0;
+    }
+    // value + divisor - 1 会在 value 接近 INT64_MAX 时有符号溢出（UB），且这里的
+    // CeilDiv 排在 BlockedEllCapacity 的容量/溢出检查之前。对非负 value 与正
+    // divisor，value / divisor + (有余数) 恒不溢出，且与向上取整等价；除法与取模
+    // 都放进 divisor > 0 的分支里，非正除数直接返回 0。
+    return divisor > 0 ? value / divisor + (value % divisor != 0 ? 1 : 0) : 0;
+}
+
 static aclsparseStatus_t ValidateAttributeParams(const void *spMatDescr, const void *data)
 {
     if (spMatDescr == nullptr) {
@@ -472,6 +484,37 @@ aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+/// Blocked-ELL 的容量换算与溢出校验。
+///
+/// rows/cols/ellCols 都可能留下尾块，容量按补齐后的块网格计算，使每个 slot 恒占
+/// ellBlockSize^2 个标量；几何整除时与 rows*ellCols 一致。
+static aclsparseStatus_t BlockedEllCapacity(int64_t rows, int64_t cols,
+    int64_t blockSize, int64_t ellCols, int64_t *indexCount, int64_t *valueCount)
+{
+    if (blockSize == 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const int64_t blockRows = CeilDiv(rows, blockSize);
+    const int64_t slots = CeilDiv(ellCols, blockSize);
+    // Slots 以整块列计数，上界是补齐后的块列数而不是 cols；有列尾块时 ellCols
+    // 可能超过 cols。
+    if (slots > CeilDiv(cols, blockSize)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const int64_t limit = std::numeric_limits<int64_t>::max();
+    if ((blockRows != 0 && slots > limit / blockRows) ||
+        blockSize > limit / blockSize) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *indexCount = blockRows * slots;
+    const int64_t blockScalars = blockSize * blockSize;
+    if (*indexCount != 0 && blockScalars > limit / *indexCount) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *valueCount = *indexCount * blockScalars;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 aclsparseStatus_t aclsparseCreateBlockedEll(
     aclsparseSpMatDescr_t *descr, int64_t rows, int64_t cols,
     int64_t ellBlockSize, int64_t ellCols, void *ellColInd, void *ellValue,
@@ -481,31 +524,21 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
     if (descr == nullptr || rows < 0 || cols < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (ellBlockSize <= 0) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    const int64_t safeEllBlockSize = ellBlockSize > 0 ? ellBlockSize : 1;
-    // Blocked-ELL uses a ceil-padded block grid: the trailing block row and
-    // column cover fewer than ellBlockSize logical elements (their payload
-    // slots still exist and hold dtype-positive zeros). ellCols is therefore
-    // allowed up to the padded column extent. Operators that only support
-    // fully divisible grids re-validate in their own host layer.
-    const int64_t paddedCols =
-        (cols + safeEllBlockSize - 1) / safeEllBlockSize * safeEllBlockSize;
-    const int64_t paddedRows =
-        (rows + safeEllBlockSize - 1) / safeEllBlockSize * safeEllBlockSize;
-    if (ellCols < 0 || ellCols > paddedCols ||
+    if (ellBlockSize <= 0 || ellCols < 0 ||
         (indexType != ACL_SPARSE_INDEX_32I && indexType != ACL_SPARSE_INDEX_64I) ||
-        (indexBase != ACL_SPARSE_INDEX_BASE_ZERO && indexBase != ACL_SPARSE_INDEX_BASE_ONE) ||
-        ellCols % safeEllBlockSize != 0 ||
-        (paddedRows != 0 &&
-         ellCols > std::numeric_limits<int64_t>::max() / paddedRows)) {
+        (indexBase != ACL_SPARSE_INDEX_BASE_ZERO && indexBase != ACL_SPARSE_INDEX_BASE_ONE)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    const int64_t valueCount = paddedRows * ellCols;
-    const int64_t indexCount =
-        ((rows + safeEllBlockSize - 1) / safeEllBlockSize) *
-        (ellCols / safeEllBlockSize);
+    // 描述符只约束上界与容量：ellCols 可以取到补齐后的列范围（尾块的 slot 仍然
+    // 存在并填零）。是否必须为整块列由各架构 host 层自行决定——arch22 在
+    // ValidateBell() 中要求整除，arch35 支持列尾块。
+    int64_t indexCount = 0;
+    int64_t valueCount = 0;
+    const aclsparseStatus_t capacity = BlockedEllCapacity(
+        rows, cols, ellBlockSize, ellCols, &indexCount, &valueCount);
+    if (capacity != ACL_SPARSE_STATUS_SUCCESS) {
+        return capacity;
+    }
     if ((indexCount > 0 && ellColInd == nullptr) ||
         (valueCount > 0 && ellValue == nullptr)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
