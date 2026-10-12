@@ -83,6 +83,8 @@ inline bool Sparse2DenseIsNonzero(const std::string &dist, uint64_t linear,
         return false;
     if (dist == "Z99" || dist == "SINGLE")
         return linear == seed % std::max<uint64_t>(logical, 1);
+    if (dist == "Z80")
+        return linear % 5 == 0;
     if (dist == "Z75")
         return linear % 4 == 0;
     if (dist == "Z50")
