@@ -68,13 +68,20 @@ check_install_path() {
     exitlog
     exit 1
   fi
+  # 拒绝 ~user 形式（~ 后紧跟非 / 的字符，如 ~root、~root/path）；
+  # 脚本仅支持 ~ 与 ~/...，不查询 passwd 做 ~user 展开
+  if [[ "${TARGET_INSTALL_PATH}" =~ ^~[^/] ]]; then
+    logandprint "[ERROR]: ERR_NO:${PARAM_INVALID}; --install-path does not support '~user' form (e.g. ~root); use an absolute path or ~/... instead."
+    exitlog
+    exit 1
+  fi
+  # 展开 ~（必须在转换为绝对路径之前，否则 ~/... 会被拼成 $PWD/~/...）
+  if [[ "${TARGET_INSTALL_PATH}" == ~* ]]; then
+    TARGET_INSTALL_PATH="${TARGET_INSTALL_PATH/#\~/$HOME}"
+  fi
   # 转换为绝对路径
   if [[ "${TARGET_INSTALL_PATH}" != /* ]]; then
     TARGET_INSTALL_PATH="$(cd "${USER_PWD:-.}" && pwd)/${TARGET_INSTALL_PATH}"
-  fi
-  # 展开 ~
-  if [[ "${TARGET_INSTALL_PATH}" == ~* ]]; then
-    TARGET_INSTALL_PATH="${TARGET_INSTALL_PATH/#\~/$HOME}"
   fi
   # 若路径为软链接，解析为实际路径
   if resolved=$(readlink -f "${TARGET_INSTALL_PATH}" 2>/dev/null) && [ -n "${resolved}" ]; then
@@ -87,7 +94,8 @@ check_install_path() {
 get_opts() {
   while [ $# -gt 0 ]; do
     # 跳过 makeself 传入的路径参数（如 --./xxx.run、--/path/to/dir、./xxx.run）
-    if [[ "$1" == *".run"* ]] || [[ "$1" == ./* ]] || [[ "$1" == /* ]] || [[ "$1" == --./* ]] || [[ "$1" == --/* ]]; then
+    # 注意：不能再用 *".run"* 过滤，否则 --install-path=/path/pkg.run 会被当作包路径整体跳过
+    if [[ "$1" == ./* ]] || [[ "$1" == /* ]] || [[ "$1" == --./* ]] || [[ "$1" == --/* ]]; then
       shift
       continue
     fi
