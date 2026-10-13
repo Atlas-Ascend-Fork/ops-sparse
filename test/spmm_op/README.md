@@ -30,7 +30,7 @@ test/spmm_op/
 ├── spmm_op_param.h                   // CSV 参数解析结构体 SpmmOpTestParam
 └── arch35/
     ├── spmm_op_test.cpp              // GTest 测试主体（TEST_P + TEST_F）
-    ├── spmm_op_test.csv              // CSV 驱动用例数据（121 个用例）
+    ├── spmm_op_test.csv              // CSV 驱动用例数据（158 个用例）
     ├── spmm_op_npu_wrapper.h         // NPU 7 函数生命周期 RAII 封装
     └── spmm_op_perf.cpp              // 独立性能采集程序（60 用例）
 ```
@@ -51,7 +51,7 @@ test/spmm_op/
 
 判定条件（逐元素）：`|npu - golden| <= (atol + rtol * |golden|)` 且 `|npu - golden| <= max(fixedValue, 32 * ULP)`，匹配率 >= 99%。
 
-## 测试用例分类（145 个测试）
+## 测试用例分类（182 个测试）
 
 | 分类 | 数量 | 说明 |
 |------|------|------|
@@ -65,11 +65,14 @@ test/spmm_op/
 | indexBase=ONE | 3 | ZERO/ONE × I32/I64 组合 |
 | Kahan 高精度 | 4 | ALG1_HIGH_PRECISION FP32（大K/大值域）+ FP16 静默忽略 |
 | unsorted | 4 | colInd 行内打乱 × FP32/FP16/ALG1/ALG2 |
+| G 泛化组合 | 20 | G01-G20，交叉覆盖 dtype、算法、转置、索引类型与稀疏度 |
+| ZS 零维与 BetaC | 9 | BetaC 边界、m/n=0 与 opB=T 组合 |
+| ST 多核与压力 | 8 | 多 block/tile、高密度、大 shape 与 I64 组合 |
 | E01-E19 异常 | 19 | null handle/matA/matB/matC/alpha/beta/bufferSize/descr/plan，维度不匹配，不支持类型 |
 | 值更新 | 2 | ALG1 csrValues 原地更新（FP32/FP16） |
 | 确定性 | 3 | bit-identical 5 次重复、ALG1 vs ALG2 一致性、5 种子稳定性 |
 
-> 其中 L0-L2、WB、P1、P2、I64、IB、KH、US 共 121 个用例由 CSV 驱动（TEST_P）；E01-E19 异常、值更新、确定性共 24 个用例为 TEST_F 硬编码。
+> 其中 L0-L2、WB、P1、P2、I64、IB、KH、US、G、ZS、ST 共 158 个用例由 CSV 驱动（TEST_P）；E01-E19 异常、值更新、确定性共 24 个用例为 TEST_F 硬编码。
 
 ## CSV 列定义
 
@@ -152,8 +155,8 @@ bash build.sh --ops=spmm_op --soc=ascend950 --run
 预期输出：
 
 ```
-[==========] 145 tests from 4 test suites ran.
-[  PASSED  ] 145 tests.
+[==========] 182 tests from 4 test suites ran.
+[  PASSED  ] 182 tests.
 [PASS] spmm_op_test
 ```
 
@@ -161,7 +164,7 @@ bash build.sh --ops=spmm_op --soc=ascend950 --run
 
 | test suite | 驱动方式 | 用例数 |
 |------------|---------|--------|
-| SpmmOpCases (SpmmOpTest) | TEST_P + CSV | 121 |
+| SpmmOpCases (SpmmOpTest) | TEST_P + CSV | 158 |
 | SpmmOpExceptionTest | TEST_F | 19 |
 | SpmmOpValueUpdateTest | TEST_F | 2 |
 | SpmmOpDeterminismTest | TEST_F | 3 |
