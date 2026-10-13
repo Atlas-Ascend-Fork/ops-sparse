@@ -88,7 +88,7 @@ aclsparseStatus_t ValidateDimensions(const aclsparseSpMatDescr *matA,
     // 索引受 int32 约束：维度与 nnz 均不得超过 INT32_MAX。
     constexpr uint64_t kInt32Max = 2147483647ULL;
     if (matA->rows > kInt32Max || matA->cols > kInt32Max || matB->cols > kInt32Max ||
-        matA->nnz > kInt32Max || matB->nnz > kInt32Max) {
+        matA->nnz > kInt32Max || matB->nnz > kInt32Max || matC->nnz > kInt32Max) {
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
