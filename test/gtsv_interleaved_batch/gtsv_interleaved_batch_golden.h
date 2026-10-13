@@ -120,6 +120,7 @@ inline bool ThomasGoldenSelfTest(int m, int batchCount, uint32_t seed, double fp
     double maxErr = 0.0;
     for (int i = 0; i < (int)xSolved.size(); i++) {
         double err = std::abs(static_cast<double>(xSolved[i]) - static_cast<double>(xTrue[i]));
+        if (!std::isfinite(err)) return false;
         if (err > maxErr) maxErr = err;
     }
     return (maxErr < fp64_tol);
