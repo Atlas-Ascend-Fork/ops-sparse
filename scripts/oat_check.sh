@@ -138,11 +138,11 @@ done
 # ---------------------------------------------------------------------------
 # 5. Build oat command — use OAT.xml if present in repo root
 # ---------------------------------------------------------------------------
-_OAT_CMD="$_PYTHON -m oat -mode s -s $REPO_ROOT -r $OAT_REPORT_DIR -n $REPO_NAME -w 1 -f $FILE_LIST"
+set -- -mode s -s "$REPO_ROOT" -r "$OAT_REPORT_DIR" -n "$REPO_NAME" -w 1 -f "$FILE_LIST"
 
 _OAT_XML="$REPO_ROOT/OAT.xml"
 if [ -f "$_OAT_XML" ]; then
-    _OAT_CMD="$_OAT_CMD -oatconfig $_OAT_XML"
+    set -- "$@" -oatconfig "$_OAT_XML"
 fi
 
 # ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ echo ""
 echo "[OAT] Running compliance scan..."
 
 set +e
-eval "$_OAT_CMD" >/dev/null 2>&1
+"$_PYTHON" -m oat "$@" >/dev/null 2>&1
 _OAT_RC=$?
 set -e
 
@@ -160,7 +160,7 @@ if [ "$_OAT_RC" -ne 0 ] && [ "$_OAT_RC" -ne 1 ]; then
     echo ""
     echo "[OAT] [WARNING] oat exited with unexpected code $_OAT_RC."
     echo "[OAT] Try re-running manually:"
-    echo "  $_OAT_CMD"
+    echo "[OAT] Re-run scripts/oat_check.sh to retry the scan."
     echo "[OAT] Skipping OAT check, continuing commit..."
     exit 0
 fi
