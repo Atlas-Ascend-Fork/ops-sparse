@@ -11,20 +11,24 @@
 cmake_minimum_required(VERSION 3.16)
 
 # ============================================================================
-# 架构特定源文件收集逻辑（修复版）
+# 架构特定源文件收集逻辑
 # ============================================================================
 # 原理：
 #   1. 首先收集所有 .cpp 源文件作为基础源文件
 #   2. 根据 ARCH_SPECIFIC_DIRS 过滤掉所有架构特定目录中的文件
 #   3. 根据 SOC_ARCH_DIRS 重新添加当前 SOC 对应的架构特定源文件
 #
-# 修复说明：
-#   原方案使用 file(GLOB_RECURSE ... **/*.cpp) 模式无法正确匹配嵌套目录
-#   新方案使用路径字符串匹配来正确识别架构特定文件
+# 说明：
+#   file(GLOB_RECURSE ... **/*.cpp) 模式无法正确匹配嵌套目录，
+#   故使用路径字符串匹配来正确识别架构特定文件
 # ============================================================================
 
 # 收集基础源文件（所有 .cpp 文件）
 file(GLOB_RECURSE BASE_SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+
+# 过滤构建树残留：算子目录内独立构建的 build/ 产物不得进入源清单
+#（残留源会污染仓顶构建的 GLOB 收集；根构建目录在本目录之外不受影响）
+list(FILTER BASE_SRC_FILES EXCLUDE REGEX "/build/")
 message(STATUS "[sparse] Total source files before filtering: ${BASE_SRC_FILES}")
 
 # -------------------------------------------------------------------------------------------------
@@ -71,6 +75,7 @@ if(SOC_ARCH_DIRS)
   foreach(arch_dir ${SOC_ARCH_DIRS})
     # 收集所有源文件，然后筛选出匹配当前架构目录的文件
     file(GLOB_RECURSE all_srcs ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+    list(FILTER all_srcs EXCLUDE REGEX "/build/")
     set(arch_dir_srcs "")
     foreach(src ${all_srcs})
       if(src MATCHES "/${arch_dir}/")

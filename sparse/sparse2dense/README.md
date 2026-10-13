@@ -26,6 +26,15 @@ $$
 - **零 workspace**：`bufferSize` 恒返回 0
 - **支持行/列主序输出**：通过 `aclsparseOrder_t` 指定，支持任意 leading dimension（ld）
 
+## 架构支持
+
+| 架构 | 硬件 | 实现目录 | 说明 |
+|------|------|----------|------|
+| arch35 | Ascend 950PR / 950DT | `arch35/` | Reg 优先 scatter；memset 清零；无数据级校验 |
+| arch22 | Atlas A2 训练系列（910B3/910B4）、Atlas A3 训练系列（910_93），DAV_2201 | `arch22/` | 清零 + scatter 双 kernel；Host 校验链（CheckMeta → 坐标校验 → FillTiling），坐标越界/offsets 非法拒绝，重复坐标合法（结果取任一写入值） |
+
+两架构 `bufferSize` 均恒返回 0（零 workspace 协议）。**aclsparse API 层**：重复 `(row, col)`（COO 直接重复与 CSR/CSC 段内展开重复）合法，结果取任一写入值（并行环境下写序不确定，本实现显式约定；cuSPARSE 对重复索引不做正确性承诺）；坐标越界仍返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，乱序坐标可接受。**torch_extension 层**：遵循 PyTorch `Tensor.to_dense` 对未 coalesce COO 重复坐标的求和语义，所有 SoC 进入原生算子前预归并（见 `torch_extension/sparse2dense.py`）；CSR/CSC 段内重复在 torch 层同样取任一写入值。arch22 原生接受未 coalesce 的 COO 张量（C API 能力；torch_extension 层统一预归并后进入）。
+
 ## 接口原型
 
 ```cpp
@@ -84,7 +93,7 @@ CSR/CSC 的 `ptrType` 与 `IdxType` 必须均为 `ACL_SPARSE_INDEX_32I`。COO �
 必须为 `ACL_SPARSE_INDEX_32I`。所有格式均支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和
 `ACL_SPARSE_INDEX_BASE_ONE`。
 
-COO 格式中重复的 `(row, col)` 的结果为其中任意一个值（并行写非确定，与 cuSPARSE 的 last-write-wins 语义一致但在并行环境下写顺序不确定）。
+重复的 `(row, col)`（COO 直接重复与 CSR/CSC 段内展开重复）合法，结果为其中任意一个值（并行环境下写顺序不确定，本实现显式约定；cuSPARSE 对重复索引不做正确性承诺）。坐标经 base 换算后仍须落在 `[0, rows) × [0, cols)` 内，越界在 Host 校验链返回参数错误，不发起 kernel。torch_extension 层对未 coalesce COO 重复坐标按 PyTorch `to_dense` 求和语义预归并（见 `torch_extension/sparse2dense.py`）；CSR/CSC 段内重复在 torch 层同样取任一写入值。
 
 ## 支持数据类型
 
@@ -99,7 +108,17 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 | int8 | `ACL_INT8` | 1B |
 | complex64 | `ACL_COMPLEX64` | 8B（Reg 路径按 `uint64_t` bit-copy） |
 
-不支持 float64；传入返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+arch22 实现支持以下 value 类型（无 int32，含 complex64），`matA` 与 `matB` 的 value 类型必须相同。
+
+| 数据类型 | 枚举 | 元素大小 |
+|----------|------|---------|
+| float32 | `ACL_FLOAT` | 4B |
+| float16 | `ACL_FLOAT16` | 2B |
+| bfloat16 | `ACL_BF16` | 2B |
+| int8 | `ACL_INT8` | 1B |
+| complex64 | `ACL_COMPLEX64` | 8B |
+
+两架构均不支持 float64；传入不支持的类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ## 数值、布局与边界语义
 
@@ -108,10 +127,10 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 - leading dimension (ld) 可大于最小值（即允许 stride padding），用于满足对齐需求。
 - matA 和 matB 的 value 类型必须一致，不支持跨类型转换。kernel 以原始 dtype 读写，
   保证 bit-exact 无精度损失。
-- matB 的 Device 内存由算子内部清零（热路径为 SIMT uint64 grid-stride；`nnz=0`/空矩阵走 `aclrtMemsetAsync`），调用方无需预先清零。
+- matB 的 Device 内存由算子内部清零（arch35：热路径为 SIMT uint64 grid-stride，`nnz=0`/空矩阵走 `aclrtMemsetAsync`；arch22：清零 kernel，覆盖全部存储缓冲含 ld padding），调用方无需预先清零。
 - NaN（包括其 payload）、`+Inf`、`-Inf`、`+0`、`-0` 和普通有限非零值均按位搬运，
   不执行数值计算或类型转换。
-- 支持零维矩阵、全零矩阵和全非零矩阵。`nnz=0` 时仅执行清零后直接返回，不 launch kernel。
+- 支持零维矩阵、全零矩阵和全非零矩阵。`nnz=0` 时输出清零后直接返回（arch35 不 launch kernel；arch22 由清零 kernel 承接输出定义）。
 - 矩阵行数、列数不可超过 `INT32_MAX`。
 
 ## Workspace 与生命周期
@@ -269,9 +288,12 @@ Dense matrix (4 x 4, row-major):
 
 ## 测试覆盖
 
-测试文件位于 `test/sparse2dense/`，采用 GTest + CSV 参数化测试框架，共 **50 个测试用例**（32 正确性 + 16 负向 + 2 跳过），在 Ascend950 真机全部通过。
+测试文件位于 `test/sparse2dense/`，采用 GTest + CSV 参数化测试框架。
 
-### 测试结构
+- **arch35（Ascend 950 真机）**：50 个测试用例（32 正确性 + 16 负向 + 2 跳过）全部通过。
+- **arch22（Atlas A2/A3 真机）**：ST 全量 123 OK + 3 SKIP（L2_001/L2_016/MultiDevice 单卡口径跳过）、Host UT 73 PASS + 1 SKIP、Python e2e 133/133、官方 ATK 精度 200/200。
+
+### arch35 测试结构
 
 | 文件 | 说明 |
 |------|------|
@@ -282,7 +304,7 @@ Dense matrix (4 x 4, row-major):
 | `arch35/sparse2dense_npu_wrapper.h` | NPU 输入生成 / 类型映射 / 执行封装 |
 | `arch35/sparse2dense_test.cpp` | GTest 主测试 |
 
-### L0/L1 正确性测试（32 条）
+### arch35 L0/L1 正确性测试（32 条）
 
 | 级别 | 覆盖维度 |
 |------|----------|
@@ -292,7 +314,7 @@ Dense matrix (4 x 4, row-major):
 | L1 | indexBase=1 覆盖 |
 | L1 | 三格式一致性（同矩阵 CSR/CSC/COO 输出必须一致） |
 
-### L2 负向测试（16 条）
+### arch35 L2 负向测试（16 条）
 
 | 测试类别 | 覆盖内容 |
 |----------|----------|
@@ -307,11 +329,22 @@ Dense matrix (4 x 4, row-major):
 | INT32 越界 | m > INT32_MAX |
 | 不支持索引类型 | I64 |
 
+### arch22 测试结构
+
+| 文件 | 说明 |
+|------|------|
+| `arch22/sparse2dense_test.cpp` | GTest 主测试（L0/L1/L2 + 多卡 + 坐标校验链负例） |
+| `arch22/sparse2dense_test.csv` | 三级用例单文件（L0 12 + L1 85 + L2 37 = 134 条，测试运行时装载；L2_001/016 为 mock-only SKIP；L2_029~037 为第十轮评审整改公开 API 双入口负例） |
+| `arch22/ut/` | Host 侧单元测试（含 aclrt mock） |
+| `python/test_sparse2dense_torch.py` | torch_extension 端到端（aten::_to_dense 接管/格式×dtype bit-wise/错误路径/多卡） |
+
 ## 支持芯片
 
 | 芯片 | 支持情况 |
 |------|----------|
 | Ascend 950PR / Ascend 950DT | 支持（arch35 / dav-3510） |
+| Atlas A2 训练系列（Ascend 910B3 / 910B4） | 支持（arch22 / dav-2201） |
+| Atlas A3 训练系列（Ascend 910_93） | 支持（arch22 / dav-2201） |
 
 ## PyTorch / Torch Extension
 

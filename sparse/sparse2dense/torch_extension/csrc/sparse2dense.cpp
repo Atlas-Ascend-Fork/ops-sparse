@@ -9,6 +9,13 @@
 // ----------------------------------------------------------------------------------------------------------
 
 // Sparse → dense C++ wrapper for aten::_to_dense (CSR / CSC / COO).
+//
+// arch22（Atlas A2/A3，910B/910_93）与 arch35（Ascend 950）经 aclsparseSparseToDense
+// 公开 API 按 SoC 分发，本 wrapper 两架构共用。python 适配层已在所有 SoC 上对未
+// coalesce COO 预归并（Tensor.to_dense 对重复坐标求和），经由此 wrapper 的 COO 为
+// coalesced；COO 路径仍取 _values()/_indices() 私有访问器以兼容直接调用（公开
+// .values()/.indices() 在未 coalesce 张量上直接 RuntimeError，torch 2.7 行为）——
+// 原生算子对重复坐标的契约为任一写入值（aclsparse API 层约定）。
 
 #include <limits>
 
@@ -127,9 +134,9 @@ void CreateSpMatFromSparse(ConstSpMatGuard &descriptor, const at::Tensor &sparse
     const int64_t rows = sparse.size(0);
     const int64_t cols = sparse.size(1);
     const int64_t nnz = sparse._nnz();
-    values = sparse.values().contiguous();
 
     if (sparse.layout() == at::kSparseCsr) {
+        values = sparse.values().contiguous();
         primary = ContiguousInt32(sparse.crow_indices());
         secondary = ContiguousInt32(sparse.col_indices());
         ACLSPARSE_CHECK(aclsparseCreateConstCsr(descriptor.address(), rows, cols, nnz,
@@ -139,6 +146,7 @@ void CreateSpMatFromSparse(ConstSpMatGuard &descriptor, const at::Tensor &sparse
     }
 
     if (sparse.layout() == at::kSparseCsc) {
+        values = sparse.values().contiguous();
         primary = ContiguousInt32(sparse.ccol_indices());
         secondary = ContiguousInt32(sparse.row_indices());
         ACLSPARSE_CHECK(aclsparseCreateConstCsc(descriptor.address(), rows, cols, nnz,
@@ -148,8 +156,13 @@ void CreateSpMatFromSparse(ConstSpMatGuard &descriptor, const at::Tensor &sparse
     }
 
     TORCH_CHECK(sparse.layout() == at::kSparse, "unsupported sparse layout ", sparse.layout());
-    TORCH_CHECK(sparse.is_coalesced(), "COO SparseToDense requires a coalesced tensor");
-    const at::Tensor indices = sparse.indices().to(at::kInt).contiguous();
+    // hybrid COO（dense_dim>0 → values 非 1-D）不支持，显式报错；未 coalesce COO
+    // 可接受（见文件头说明），公开访问器在未 coalesce 张量上不可用。
+    TORCH_CHECK(sparse.sparse_dim() == 2 && sparse.dense_dim() == 0,
+        "SparseToDense supports only plain 2-D COO tensors, but got sparse_dim=",
+        sparse.sparse_dim(), " dense_dim=", sparse.dense_dim());
+    values = sparse._values().contiguous();
+    const at::Tensor indices = sparse._indices().to(at::kInt).contiguous();
     primary = indices.select(0, 0).contiguous();
     secondary = indices.select(0, 1).contiguous();
     ACLSPARSE_CHECK(aclsparseCreateConstCoo(descriptor.address(), rows, cols, nnz, primary.const_data_ptr(),
@@ -173,6 +186,15 @@ at::Tensor SparseToDense(const at::Tensor &self)
         at::Tensor secondary;
         at::Tensor values;
         CreateSpMatFromSparse(spMat, self, valueType, primary, secondary, values);
+
+        // torch_npu 的 task-queue 模式（TASK_QUEUE_ENABLE=2 默认档）会延迟下发本线程
+        // 的 aclnn 算子——上方 ContiguousInt32 的 int64→int32 索引 cast 即经此路径。
+        // aclsparseSparseToDense（arch22）的校验链以原生 aclrt 时序同步读输入数组，
+        // 必须先确保这些算子已实际入队，否则 D2H 可能读到复用内存中的陈旧数据
+        //（CSR int32 直传正常、int64 输入触发 cast 后可能读到上一调用残留）。
+        // stream(true) 在返回 rtStream 前清空当前 stream 的 task queue（torch_npu
+        // NPUStream 语义），保证后续原生 aclrt 操作排在 cast 之后。
+        (void)c10_npu::getCurrentNPUStream().stream(true);
 
         // Kernel path clears dense then scatters nnz; prefer empty to avoid a
         // pre-fill zeros() racing / poisoning subsequent ACLSparse launches.

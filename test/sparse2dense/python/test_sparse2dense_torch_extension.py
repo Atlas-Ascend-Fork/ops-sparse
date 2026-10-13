@@ -26,7 +26,31 @@ torch_npu = pytest.importorskip("torch_npu")
 cann_ops_sparse = pytest.importorskip("cann_ops_sparse")
 
 DEVICE = "npu:0"
-VALUE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.complex64, torch.int8, torch.int32)
+
+# 值类型支持随架构不同：arch35（ascend950）含 int32；arch22（910B/A3）为
+# int8/float16/bfloat16/float32/complex64（无 int32）。int32 参数在 910B/A3 上跳过。
+_ARCH22_SOC_PREFIXES = ("Ascend910B", "Ascend910_93")
+
+
+def _on_arch22() -> bool:
+    try:
+        name = str(torch.npu.get_device_properties(0).name or "")
+    except (RuntimeError, TypeError, AssertionError):
+        return False
+    return name.startswith(_ARCH22_SOC_PREFIXES)
+
+
+_SKIP_INT32_ON_ARCH22 = pytest.mark.skipif(
+    _on_arch22(), reason="arch22 (910B/A3) sparse2dense has no int32 value dtype")
+
+VALUE_DTYPES = (
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+    torch.complex64,
+    torch.int8,
+    pytest.param(torch.int32, marks=_SKIP_INT32_ON_ARCH22),
+)
 
 
 def _has_npu() -> bool:
