@@ -19,7 +19,7 @@ $$
 
 本算子对标 cuSPARSE `cusparseSpMM()` Generic API 语义，主要特性：
 - **确定性（bit-wise 可重复）**：ALG1/ALG2 均保证
-- **行切分 + nTile=128**：每个 AIV 核心处理一组行，Vector 指令批量处理 128 列（DataCopyPad + Muls + Add）；ALG1 静态均匀行切分，ALG2 按 nnz 负载均衡切分
+- **行切分 + nTile=2048**：每个 AIV 核心处理一组行，每 tile 至多处理 2048 列；Vector 指令按 128 个元素分批执行（DataCopyPad + Muls + Add）；ALG1 静态均匀行切分，ALG2 按 nnz 负载均衡切分
 - **FP32 累加**：无论输入/输出 dtype，累加均在 FP32 完成
 - **FP16 饱和截断**：FP16 输出时截断到 ±65504，避免 Inf/NaN
 - **execute 异步执行**：execute 阶段 kernel 异步入队到 handle 关联的 stream，函数立即返回；ALG2 的 createDescr 预处理为 host-side 同步执行
@@ -317,7 +317,7 @@ ALG1 采用 host 侧均匀行切分策略，无预处理、无 workspace：
 
 1. host 侧计算 `useBlocks = min(aivCoreNum, ceil(m, 128))`，`rowsPerBlock = ceil(m, useBlocks)`。
 2. 每个 block 处理连续行区间 `[blockId × rowsPerBlock, min((blockId+1) × rowsPerBlock, m))`。
-3. kernel 采用 SIMD 模式（class-based），每个 AIV 核心顺序遍历所分行，对 n 维按 nTile=128 分 tile，每次用 `DataCopyPad` 将 B 行段从 GM 加载到 UB。
+3. kernel 采用 SIMD 模式（class-based），每个 AIV 核心顺序遍历所分行，对 n 维按 nTile=2048 分 tile，每次用 `DataCopyPad` 将 B 行段从 GM 加载到 UB。
 4. 对每行的 CSR 非零元素遍历，用 `Muls`（标量×向量）和 `Add`（向量累加）做 FP32 累加：`accBuf[0:nTile] += values[p] × bBuf[0:nTile]`。
 5. 累加完成后应用 `alpha`/`beta`：`Muls(outBuf, accBuf, alpha)` + `Add(outBuf, outBuf, beta×cOldBuf)`，写回 C。
 
@@ -346,7 +346,7 @@ execute 阶段，kernel 内 block `b` 处理行范围 `[binEdge[b], binEdge[b+1]
 
 | 项目 | 说明 |
 |------|------|
-| 累加精度 | FP32 累加（无论输入/输出 dtype）。每个 AIV 核心持有 128 个 `float` 累加器（nTile=128，存储在 UB LocalTensor 中）。默认朴素累加使用 `Muls` + `Add` 向量指令；`ALG1_HIGH_PRECISION` 使用向量化 Kahan 补偿求和（5 条向量指令：`Sub→Add→Sub→Sub→Copy`）以压制长行舍入与抵消误差。Kahan 路径仅 FP32 dtype 生效，FP16 静默忽略 |
+| 累加精度 | FP32 累加（无论输入/输出 dtype）。每个 AIV 核心持有 2048 个 `float` 累加器（nTile=2048，存储在 UB LocalTensor 中）。默认朴素累加使用 `Muls` + `Add` 向量指令；`ALG1_HIGH_PRECISION` 使用向量化 Kahan 补偿求和（5 条向量指令：`Sub→Add→Sub→Sub→Copy`）以压制长行舍入与抵消误差。Kahan 路径仅 FP32 dtype 生效，FP16 静默忽略 |
 | FP32 路径 | 输入 FP32 → FP32 累加 → 输出 FP32 |
 | FP16 路径 | 输入 FP16 → `Cast` 转 FP32 累加 → 输出时 `Mins`/`Maxs` 向量饱和截断到 ±65504 后 `Cast` 回 FP16，避免 Inf/NaN |
 | computeType | 固定 `ACL_FLOAT`（FP32），不可更改 |
