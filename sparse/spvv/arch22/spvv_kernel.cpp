@@ -88,7 +88,7 @@ public:
     }
 
 private:
-    // Load tile indices + x values; precompute idx*InputSz; FP16 cast xval.
+    // Load tile indices + x values and capture the y range; FP16 values are cast to FP32.
     // idxUb/xvalUb are pre-allocated; xvalFp32 is allocated here for FP16 only.
     __aicore__ inline void LoadTile(uint32_t ts, uint32_t tn,
         LocalTensor<int32_t>& idxUb, LocalTensor<InputT>& xvalUb,
@@ -97,7 +97,7 @@ private:
         DataCopyPadParams pad = { false, 0, 0, 0 };
         DataCopyParams dpI = { 1, static_cast<uint16_t>(tn * sizeof(int32_t)), 0, 0 };
         DataCopyPad(idxUb, idxGm_[nnzStart_ + ts], dpI, pad);
-        // Mark idxUb ready so V (Muls) can run while xvalUb's DMA is in flight.
+        // Ensure idxUb is ready before reading its bounds; xvalUb's DMA overlaps this wait.
         SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
 
         DataCopyParams dpV = { 1, static_cast<uint16_t>(tn * InputSz), 0, 0 };
@@ -110,11 +110,7 @@ private:
 
         yStart = idxUb.GetValue(0);
         yEnd = idxUb.GetValue(tn - 1);
-
-        // Precompute idx * InputSz once; per-segment offset is then a single Adds.
-        Muls(idxUb, idxUb, static_cast<int32_t>(InputSz), tn);
-        SetFlag<HardEvent::V_S>(EVENT_ID2);
-        WaitFlag<HardEvent::V_S>(EVENT_ID2);
+        // Keep indices in element units; absolute byte offsets can overflow signed 32-bit.
 
         // FP16: cast xval to FP32 now so it overlaps the y-load MTE2 work.
         if constexpr (InputSz == 2) {
@@ -130,29 +126,29 @@ private:
         LocalTensor<InputT>& yGathered)
     {
         DataCopyPadExtParams<InputT> padExt = { false, 0, 0, 0 };
-        uint32_t yLoadLen = static_cast<uint32_t>(yEnd - yStart + 1);
+        uint32_t yLoadLen = static_cast<uint32_t>(static_cast<int64_t>(yEnd) - yStart + 1);
         DataCopyExtParams dpY = { 1, yLoadLen * InputSz, 0, 0, 0 };
         DataCopyPad(ySliceUb, yGm_[yStart], dpY, padExt);
         SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
 
-        // byte offsets on idxUb[0..tn): (idx - yStart) * InputSz
-        Adds(idxUb, idxUb, -yStart * static_cast<int32_t>(InputSz), tn);
+        // Convert bounded element deltas to byte offsets for Gather.
+        Adds(idxUb, idxUb, -yStart, tn);
+        Muls(idxUb, idxUb, static_cast<int32_t>(InputSz), tn);
         LocalTensor<uint32_t> idxByteOff = idxUb.ReinterpretCast<uint32_t>();
 
         WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
         Gather(yGathered, ySliceUb, idxByteOff, 0, tn);
     }
 
-    // Binary search (upper bound): count indices in [nnzPos, tn) with
-    // scaled value <= segYEndScaled.
+    // Binary search (upper bound): count indices in [nnzPos, tn) <= segYEnd.
     __aicore__ inline uint32_t FindSegmentCount(LocalTensor<int32_t>& idxUb,
-        uint32_t nnzPos, uint32_t tn, int32_t segYEndScaled)
+        uint32_t nnzPos, uint32_t tn, int32_t segYEnd)
     {
         uint32_t lo = nnzPos;
         uint32_t hi = tn;
         while (lo < hi) {
             uint32_t mid = lo + (hi - lo) / 2;
-            if (idxUb.GetValue(mid) <= segYEndScaled) {
+            if (idxUb.GetValue(mid) <= segYEnd) {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -168,9 +164,10 @@ private:
     {
         uint32_t n = (nnzPos + ALIGN_ELEM > tn) ? (tn - nnzPos) : ALIGN_ELEM;
         for (uint32_t i = 0; i < n; i++) {
-            int32_t idx = idxUb.GetValue(nnzPos + i) / static_cast<int32_t>(InputSz);
-            // Range-check before yGm_ gather (issue #151).
-            if (idx < 0 || static_cast<uint32_t>(idx) >= yLen_) {
+            // idxUb retains element indices; vector offsets are scaled only after segmentation.
+            int32_t idx = idxUb.GetValue(nnzPos + i);
+            // Index addressing remains ACL_SPARSE_INDEX_32I; widen only for the yLen_ comparison.
+            if (idx < 0 || static_cast<uint64_t>(idx) >= yLen_) {
                 yGathered.SetValue(nnzPos + i, static_cast<InputT>(0));
             } else {
                 yGathered.SetValue(nnzPos + i, yGm_.GetValue(idx));
@@ -191,12 +188,12 @@ private:
         DataCopyPadExtParams<InputT> padExt = { false, 0, 0, 0 };
         uint32_t nnzPos = 0;   // index position == gather dst offset (aligned)
         while (nnzPos < tn) {
-            int32_t segYStart = idxUb.GetValue(nnzPos) / static_cast<int32_t>(InputSz);
-            int32_t segYEnd = segYStart + YSLICE_MAX - 1;
-            if (segYEnd > yEnd) { segYEnd = yEnd; }
-            int32_t segYEndScaled = segYEnd * static_cast<int32_t>(InputSz);
+            int32_t segYStart = idxUb.GetValue(nnzPos);
+            int64_t segYEndWide = static_cast<int64_t>(segYStart) + YSLICE_MAX - 1;
+            if (segYEndWide > yEnd) { segYEndWide = yEnd; }
+            int32_t segYEnd = static_cast<int32_t>(segYEndWide);
 
-            uint32_t count = FindSegmentCount(idxUb, nnzPos, tn, segYEndScaled);
+            uint32_t count = FindSegmentCount(idxUb, nnzPos, tn, segYEnd);
             bool isLast = (nnzPos + count >= tn);
 
             // Sparse segment: scalar-gather ALIGN_ELEM to keep nnzPos aligned.
@@ -212,18 +209,22 @@ private:
                 count = (count / ALIGN_ELEM) * ALIGN_ELEM;
             }
             // Trim segYEnd to the last actually-gathered index (smaller DMA).
-            segYEnd = idxUb.GetValue(nnzPos + count - 1) / static_cast<int32_t>(InputSz);
+            segYEnd = idxUb.GetValue(nnzPos + count - 1);
 
             uint32_t yLoadLen = static_cast<uint32_t>(segYEnd - segYStart + 1);
             DataCopyExtParams dpY = { 1, yLoadLen * InputSz, 0, 0, 0 };
             DataCopyPad(ySliceUb, yGm_[segYStart], dpY, padExt);
             SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
 
-            // byte offsets in-place on idxUb[nnzPos]: (idx - segYStart)*InputSz
+            // Convert bounded element deltas to byte offsets for Gather.
             LocalTensor<int32_t> idxSeg = idxUb[nnzPos];
-            Adds(idxSeg, idxSeg, -segYStart * static_cast<int32_t>(InputSz), count);
+            Adds(idxSeg, idxSeg, -segYStart, count);
+            Muls(idxSeg, idxSeg, static_cast<int32_t>(InputSz), count);
             LocalTensor<uint32_t> idxByteOff = idxSeg.ReinterpretCast<uint32_t>();
 
+            // The next segment boundary is read by the scalar unit from idxUb.
+            SetFlag<HardEvent::V_S>(EVENT_ID2);
+            WaitFlag<HardEvent::V_S>(EVENT_ID2);
             WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
             Gather(yGathered[nnzPos], ySliceUb, idxByteOff, 0, count);
 
@@ -272,7 +273,7 @@ private:
             LocalTensor<float> xvalFp32;
             LoadTile(ts, tn, idxUb, xvalUb, xvalFp32, yStart, yEnd);
 
-            if (yEnd - yStart + 1 <= static_cast<int32_t>(YSLICE_MAX)) {
+            if (static_cast<int64_t>(yEnd) - yStart + 1 <= YSLICE_MAX) {
                 FastGather(tn, yStart, yEnd, idxUb, ySliceUb, yGathered);
             } else {
                 SlowGather(tn, yEnd, idxUb, ySliceUb, yGathered);
@@ -309,7 +310,8 @@ private:
     TPipe pipe_;
 
     uint32_t blockIdx_;
-    uint32_t nnz_, yLen_;
+    uint32_t nnz_;
+    uint64_t yLen_;
     uint32_t nnzPerCore_;
     uint32_t nnzStart_, nnzCount_;
     float partialSum_;

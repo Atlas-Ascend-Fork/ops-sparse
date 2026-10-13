@@ -30,7 +30,7 @@
 // Tiling data passed directly as kernel parameter (no device buffer needed)
 struct SpvvTilingData {
     uint32_t nnz;
-    uint32_t yLen;
+    uint64_t yLen;
     uint32_t nnzPerCore;
 };
 

@@ -109,7 +109,7 @@ aclsparseStatus_t aclsparseSpvv(aclsparseHandle_t handle, aclsparseOperation_t o
     }
 
     uint32_t nnz = static_cast<uint32_t>(xInner->nnz);
-    uint32_t yLen = static_cast<uint32_t>(yInner->nums);
+    uint64_t yLen = yInner->nums;
 
     aclrtStream stream = nullptr;
     st = aclsparseGetStream(handle, &stream);
