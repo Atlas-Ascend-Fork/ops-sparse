@@ -97,7 +97,7 @@ python3 -m pip install --force-reinstall --no-deps build_out/cann_ops_sparse-*.w
 # 若已安装 run 包到 ${ASCEND_HOME_PATH}/lib64，则无需设置该变量。
 export OPS_SPARSE_LIB_DIR="$PWD/build"
 export TORCH_EXTENSIONS_DIR="$PWD/.torch_extensions"
-python3 -m pytest -q test/spgemm/test_torch_extension.py
+python3 -m pytest -q test/spgemm/python/test_spgemm_torch_extension.py
 ```
 
 以 `spgemm` 算子为例，测试用例调用 `torch.sparse.mm`，覆盖 CSR/COO、支持的数据类型、
