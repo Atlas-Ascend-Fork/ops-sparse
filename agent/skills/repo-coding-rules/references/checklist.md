@@ -17,7 +17,7 @@
 # 检查二进制文件
 find . \( -name "*.o" -o -name "*.so" -o -name "*.a" -o -name "*.exe" \) -type f
 # 检查无许可证头
-grep -L "Copyright (c)" $(find . -name "*.cpp" -o -name "*.h" -o -name "*.c")
+find . \( -name "*.cpp" -o -name "*.h" -o -name "*.c" \) -exec grep -L "Copyright (c)" {} +
 # 检查公网 URL（常见域名）
 grep -rE "(gitcode|gitee|github|google|huggingface)\.(com|cn)" .
 ```
@@ -34,12 +34,12 @@ grep -rE "(gitcode|gitee|github|google|huggingface)\.(com|cn)" .
 **快速检查命令**：
 ```bash
 # 检查 include 顺序（using 应在 include 之后）
-for f in $(find . -name "*.cpp" -o -name "*.h"); do
+while IFS= read -r -d '' f; do
   awk '/^using / {u=NR; next} /^#include / && u {print FILENAME ":" NR ": using before include"; exit}' "$f"
-done
+done < <(find . \( -name "*.cpp" -o -name "*.h" \) -print0)
 
 # 检查 extern "C" 中 #include
-grep -B5 "^#include" $(find . -name "*.cpp" -o -name "*.h") | grep -B5 'extern "C"'
+find . \( -name "*.cpp" -o -name "*.h" \) -exec grep -B5 "^#include" {} + | grep -B5 'extern "C"'
 ```
 
 ---
@@ -68,7 +68,7 @@ grep -B5 "^#include" $(find . -name "*.cpp" -o -name "*.h") | grep -B5 'extern "
 
 **grep 快速扫描**：
 ```bash
-grep -nE "[^a-zA-Z_](/|%)[ ]*[a-zA-Z_]+" $(find . -name "*.cpp") | grep -v "_s"
+find . -name "*.cpp" -exec grep -nE "[^a-zA-Z_](/|%)[ ]*[a-zA-Z_]+" {} + | grep -v "_s"
 ```
 
 ---
@@ -84,7 +84,7 @@ grep -nE "[^a-zA-Z_](/|%)[ ]*[a-zA-Z_]+" $(find . -name "*.cpp") | grep -v "_s"
 **快速检查命令**：
 ```bash
 # 检查是否使用了 realloc / alloca
-grep -rnE "\brealloc\b|\balloca\b" $(find . -name "*.cpp" -o -name "*.c")
+find . \( -name "*.cpp" -o -name "*.c" \) -exec grep -rnE "\brealloc\b|\balloca\b" {} +
 ```
 
 ---
@@ -109,7 +109,7 @@ grep -rnE "\brealloc\b|\balloca\b" $(find . -name "*.cpp" -o -name "*.c")
 
 **快速检查命令**：
 ```bash
-grep -rEn "\b(exit|_exit|abort|atexit|kill|TerminateProcess)\b" $(find . -name "*.cpp")
+find . -name "*.cpp" -exec grep -rEn "\b(exit|_exit|abort|atexit|kill|TerminateProcess)\b" {} +
 ```
 
 ---
