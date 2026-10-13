@@ -441,7 +441,7 @@ aclsparseStatus_t aclsparseLtMatmul(
 | handle | 输入 | aclsparseLtConstHandle_t | 库句柄的 const 指针，Host 内存 |
 | plan | 输入 | aclsparseLtConstMatmulPlan_t* | 执行计划，Host 内存 |
 | alpha | 输入 | const void* | 缩放因子。标量模式为 Host 端 float 指针（nullptr 按 1.0 处理）；向量缩放模式（启用 `ALPHA_VECTOR_SCALING`）为 Device 端 float[M] 指针（per-row，不可为 nullptr）。Host/Device 内存 |
-| matA | 输入 | const void* | 稀疏侧矩阵 A_pruned 的 Device 内存指针，须 16 字节对齐。A-sparse 时为 A_pruned（由 SpMMAPrune 产出）；B-sparse 时为稠密矩阵 A。为 nullptr 时回退使用 workspace 的 aPruned 区（调用方须已通过 SpMMAPrune 填充该区域），Device 内存 |
+| matA | 输入 | const void* | 稀疏侧矩阵 A_pruned 的 Device 内存指针，须 16 字节对齐。A-sparse 时为 A_pruned（由 SpMMAPrune 产出）；B-sparse 时为稠密矩阵 A。仅 sparse×dense 且 A-sparse 时，matA 为 nullptr 才回退使用 workspace 的 aPruned 区（调用方须已通过 SpMMAPrune 填充该区域）；B-sparse 与 dense×dense 路径须显式传入 matA。Device 内存 |
 | matB | 输入 | const void* | 稠密矩阵 B 的 Device 内存指针，须 16 字节对齐，不可为 nullptr。A-sparse 时为稠密矩阵 B；B-sparse 时为 B_pruned（由 SpMMAPrune 产出）。Device 内存 |
 | beta | 输入 | const void* | 缩放因子。标量模式为 Host 端 float 指针（nullptr 按 0.0 处理）；向量缩放模式（启用 `BETA_VECTOR_SCALING`）为 Device 端 float[M] 指针（per-row，不可为 nullptr）。Host/Device 内存 |
 | matC | 输入 | const void* | 稠密矩阵 C 的 Device 内存指针，须 16 字节对齐，不可为 nullptr，Device 内存。batch 模式下 C 按 `batchStrideC` 偏移排列 numBatches 个矩阵 |
