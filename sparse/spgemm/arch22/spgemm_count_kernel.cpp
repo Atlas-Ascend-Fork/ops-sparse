@@ -128,7 +128,8 @@ public:
         pipe_.InitBuffer(outQue_, 1, kOutTile * sizeof(int64_t));
         pipe_.InitBuffer(apQue_, 1, kOutTile * sizeof(int32_t));
         pipe_.InitBuffer(headQue_, 1, kOutTile * sizeof(int32_t));
-        pipe_.InitBuffer(syncQue_, 1, 8 * sizeof(int32_t));
+        // Software SyncAll stages a 32-byte flag slot for each participating core in local UB.
+        pipe_.InitBuffer(syncQue_, 1, blockDim * 8 * sizeof(int32_t));
         // 向量瓦片工作区。
         pipe_.InitBuffer(vecBuf_, kVecBufElems * sizeof(int32_t));
     }

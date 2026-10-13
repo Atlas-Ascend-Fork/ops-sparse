@@ -37,8 +37,6 @@
 // A2/A3 单核 UB 192KB，预留部分给编译器临时与栈。
 #define SPGEMM_ARCH22_UB_SIZE      (192 * 1024)
 #define SPGEMM_ARCH22_UB_OVERHEAD  (24 * 1024)
-// 核数兜底常量（实际值运行时查询，不写死，保证 A2 调好的实现在 A3 直接可用）。
-#define SPGEMM_ARCH22_FALLBACK_BLOCK_DIM 40
 // T1 归并路径支持的最大段数（= A 单行 nnz 上限）。超过则退化到 T3。
 #define SPGEMM_ARCH22_MAX_WAYS     64
 // 段首列索引描述符（bHead）在 SpgemmSegments 里的缓存长度。

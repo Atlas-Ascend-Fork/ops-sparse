@@ -26,6 +26,7 @@
 
 #include <acl/acl.h>
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
@@ -35,16 +36,27 @@ namespace {
 
 constexpr int64_t kInt32Max = 2147483647LL;
 
-// 运行时查询 AIV 核数，查询失败时回退到编译期常量。
-uint32_t GetSpgemmBlockDim()
+// 运行时查询 AIV 核数。查询失败时返回错误，避免使用错误的同步区大小。
+aclsparseStatus_t GetSpgemmBlockDim(uint32_t &blockDim)
 {
-    static uint32_t cached = 0;
-    static std::once_flag onceFlag;
-    std::call_once(onceFlag, [&]() {
-        uint32_t aiv = GetAivCoreCount();
-        cached = (aiv > 0) ? aiv : SPGEMM_ARCH22_FALLBACK_BLOCK_DIM;
-    });
-    return cached;
+    static std::atomic<uint32_t> cached{0};
+    static std::mutex queryMutex;
+    blockDim = cached.load(std::memory_order_acquire);
+    if (blockDim != 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    std::lock_guard<std::mutex> lock(queryMutex);
+    blockDim = cached.load(std::memory_order_relaxed);
+    if (blockDim != 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    blockDim = GetAivCoreCount();
+    if (blockDim == 0) {
+        OP_LOGE("aclsparseSpGEMMWorkEstimation", "GetAivCoreCount failed");
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    cached.store(blockDim, std::memory_order_release);
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 static std::mutex g_arch22CtxMutex;
@@ -675,9 +687,12 @@ aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
         return st;
     }
 
+    uint32_t blockDim = 0;
+    st = GetSpgemmBlockDim(blockDim);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
     SpgemmArch22Context &arch22ctx = GetOrCreateArch22Ctx(spgemmDescr);
-
-    const uint32_t blockDim = GetSpgemmBlockDim();
     const uint32_t M = static_cast<uint32_t>(ctx.a->rows);
     const uint32_t Kdim = static_cast<uint32_t>(ctx.a->cols);
     const SpgemmArch22Ws1Layout ws1 = SpgemmArch22ComputeWs1(M, Kdim, blockDim);
