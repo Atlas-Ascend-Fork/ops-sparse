@@ -457,9 +457,11 @@ aclsparseStatus_t aclsparseGather(
 
 **产品支持情况**：
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR / Ascend 950DT（arch35）：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品（arch22）：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品（arch22）：支持
+
+> 说明：arch22 与 arch35 支持的 dtype / 索引类型范围不同，详见 `sparse/gather/README.md`。
 
 **参数说明**：
 
@@ -472,8 +474,8 @@ aclsparseStatus_t aclsparseGather(
 - handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
 - vecY、vecX 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - vecX.valueType 与 vecY.valueType 必须一致
-- vecX.size（稀疏向量的稠密维度）<= vecY.size（稠密向量的大小）
-- vecX.indices 中每个索引值 `X.indices[i] - idxBase` 必须在 `[0, vecY.size)` 范围内（运行时不做边界检查，越界访问将导致未定义行为）
+- 基数约束：arch35（Ascend 950）要求 `vecX.size == vecY.size` 且 `0 <= nnz <= size`；arch22（Atlas A2/A3）不做基数约束，合法性取决于逐索引落点（`nnz` 可大于 `vecY.size`）
+- vecX.indices 中每个索引值 `X.indices[i] - idxBase` 必须在 `[0, vecY.size)` 范围内：arch22 在 Host 侧逐索引校验，越界显式返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；arch35 遵循异步错误协议，合法索引为调用方前置条件
 - 支持索引乱序（indices 不需要排序）
 - 支持 vecX.indices 中存在重复元素
 
