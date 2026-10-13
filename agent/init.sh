@@ -101,8 +101,8 @@ Options:
                                              - passed through to the base plugin
 
 Examples:
-  ./init.sh <target> --repo cannbot-skills:~/cannbot-skills
-  ./init.sh <target> --repo asc-devkit:~/asc-devkit --repo cann-samples:~/cann-samples
+  ./init.sh <target> --repo "cannbot-skills:\$HOME/cannbot-skills"
+  ./init.sh <target> --repo "asc-devkit:\$HOME/asc-devkit" --repo "cann-samples:\$HOME/cann-samples"
   (target = any tool in the list above, e.g. opencode)
 EOF
 }
