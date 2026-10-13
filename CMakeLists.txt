@@ -17,7 +17,7 @@ if(NOT DEFINED SOC_VERSION OR SOC_VERSION STREQUAL "")
   set(SOC_VERSION ascend910b3)
 endif()
 string(TOLOWER "${SOC_VERSION}" SOC_VERSION_LOWER)
-# SOC_VERSION -> NPU_ARCH 映射（ascend910b->dav-2201, ascend950->dav-3101）
+# SOC_VERSION -> NPU_ARCH 映射（ascend910b->dav-2201, ascend950->dav-3510）
 if(SOC_VERSION_LOWER MATCHES "^ascend910b")
   set(NPU_ARCH "dav-2201")
 elseif(SOC_VERSION_LOWER MATCHES "^ascend910_93")
