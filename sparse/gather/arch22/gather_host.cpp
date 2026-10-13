@@ -213,7 +213,7 @@ static aclsparseStatus_t ComputeGatherTiling(GatherTilingData &tiling, int64_t n
     tiling.tileNnAligned8 = tileNn * elemBytes;                 // 值缓冲字节数（8 字节对齐）
     tiling.tileNnAligned4 = tileNn * sizeof(int32_t);            // 索引缓冲字节数
     tiling.elemBytes      = elemBytes;
-    tiling.yElems         = static_cast<uint32_t>(y_len);
+    tiling.yElems         = static_cast<uint64_t>(y_len);
     tiling.idxBase        = (idxBase == ACL_SPARSE_INDEX_BASE_ONE) ? 1u : 0u;
 
     uint32_t off = 0;
@@ -261,8 +261,9 @@ static aclsparseStatus_t LaunchGatherKernelRaw(
     void *dIdx = const_cast<void *>(idx_ptr);         // indices 只读
 
     OP_LOGD("aclsparseGather",
-            "Tiling: nnz=%ld, idxBase=%u, elemBytes=%u, yElems=%u, blockNum=%u, tileNn=%u",
-            nnz, tiling.idxBase, tiling.elemBytes, tiling.yElems, tiling.blockNum, tiling.tileNn);
+            "Tiling: nnz=%ld, idxBase=%u, elemBytes=%u, yElems=%llu, blockNum=%u, tileNn=%u",
+            nnz, tiling.idxBase, tiling.elemBytes, static_cast<unsigned long long>(tiling.yElems),
+            tiling.blockNum, tiling.tileNn);
 
     gather_kernel_do(dIdx, const_cast<void *>(dY), dXVal, tiling, tiling.blockNum,
                      reinterpret_cast<aclsparseContext *>(handle)->stream);

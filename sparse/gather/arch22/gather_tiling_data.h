@@ -48,7 +48,7 @@ struct GatherTilingData {
     uint32_t tileNnAligned8; // 值缓冲字节数 = tileNn * elemBytes（天然 8 字节对齐）
     uint32_t tileNnAligned4; // 索引缓冲字节数 = tileNn * sizeof(int32_t)（4 字节对齐）
     uint32_t elemBytes;  // 值元素字节宽：f16/bf16=2，f32=4，c64=8
-    uint32_t yElems;     // 稠密向量 Y 的元素个数（用于 GM 边界）
+    uint64_t yElems;     // 稠密向量 Y 的元素个数（用于 GM 边界）
     uint32_t idxBase;    // 索引基址：0 或 1
     uint32_t coreNnzOffset[GATHER_MAX_CORE_NUM]; // 每核在 nnz 上的起始偏移
     uint32_t coreNnzCount[GATHER_MAX_CORE_NUM];  // 每核处理的元素个数

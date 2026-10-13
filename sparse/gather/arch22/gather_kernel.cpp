@@ -112,7 +112,7 @@ private:
     template <typename T>
     __aicore__ inline void ScatterPass(LocalTensor<uint8_t> yLocal, LocalTensor<uint8_t> outBuf,
                                        LocalTensor<int64_t> idxI64, uint32_t curTileNn,
-                                       uint32_t cstart, uint32_t cend)
+                                       uint64_t cstart, uint64_t cend)
     {
         auto yL = yLocal.ReinterpretCast<T>();
         auto oB = outBuf.ReinterpretCast<T>();
@@ -128,8 +128,9 @@ private:
             if (static_cast<uint32_t>(sa) >= yElems_) {
                 sa = static_cast<int32_t>(yElems_) - 1;
             }
-            if (static_cast<uint32_t>(sa) >= cstart && static_cast<uint32_t>(sa) < cend) {
-                oB.SetValue(j, yL.GetValue(static_cast<uint32_t>(sa) - cstart));
+            uint64_t posA = static_cast<uint32_t>(sa);
+            if (posA >= cstart && posA < cend) {
+                oB.SetValue(j, yL.GetValue(static_cast<uint32_t>(posA - cstart)));
             }
             sb -= static_cast<int32_t>(idxBase_);
             if (sb < 0) {
@@ -138,8 +139,9 @@ private:
             if (static_cast<uint32_t>(sb) >= yElems_) {
                 sb = static_cast<int32_t>(yElems_) - 1;
             }
-            if (static_cast<uint32_t>(sb) >= cstart && static_cast<uint32_t>(sb) < cend) {
-                oB.SetValue(j + 1, yL.GetValue(static_cast<uint32_t>(sb) - cstart));
+            uint64_t posB = static_cast<uint32_t>(sb);
+            if (posB >= cstart && posB < cend) {
+                oB.SetValue(j + 1, yL.GetValue(static_cast<uint32_t>(posB - cstart)));
             }
         }
         if (j < curTileNn) {
@@ -151,8 +153,9 @@ private:
             if (static_cast<uint32_t>(s) >= yElems_) {
                 s = static_cast<int32_t>(yElems_) - 1;
             }
-            if (static_cast<uint32_t>(s) >= cstart && static_cast<uint32_t>(s) < cend) {
-                oB.SetValue(j, yL.GetValue(static_cast<uint32_t>(s) - cstart));
+            uint64_t pos = static_cast<uint32_t>(s);
+            if (pos >= cstart && pos < cend) {
+                oB.SetValue(j, yL.GetValue(static_cast<uint32_t>(pos - cstart)));
             }
         }
     }
@@ -178,10 +181,10 @@ private:
     //      上限），此时两种语义完全等价；尾块起始偏移 = fullBlocks * blockLen 亦天然 32B 对齐。
     // 读满 (fullBlocks) 个对齐整块，再单独发一次精确长度的尾块（blockCount=1，长度不补齐，
     // 故绝不越界；UB 侧仅缓冲容量按 32B 对齐，见 Init 中的 yBytes）。
-    __aicore__ inline void LoadYChunk(LocalTensor<uint8_t> yLocal, uint32_t cstart, uint32_t cend)
+    __aicore__ inline void LoadYChunk(LocalTensor<uint8_t> yLocal, uint64_t cstart, uint64_t cend)
     {
-        uint32_t passElems = cend - cstart;
-        uint32_t passBytes = passElems * elemBytes_;
+        uint64_t passElems = cend - cstart;
+        uint32_t passBytes = static_cast<uint32_t>(passElems * elemBytes_);
         if (passBytes == 0U) {
             return;
         }
@@ -207,7 +210,7 @@ private:
     // 3) 块内 scatter：按元素字宽选择 ScatterPass 的原生标量视图
     __aicore__ inline void ScatterDispatch(LocalTensor<uint8_t> yLocal, LocalTensor<uint8_t> outBuf,
                                            LocalTensor<int64_t> idxI64, uint32_t curTileNn,
-                                           uint32_t cstart, uint32_t cend)
+                                           uint64_t cstart, uint64_t cend)
     {
         if (elemBytes_ == 2) {
             ScatterPass<int16_t>(yLocal, outBuf, idxI64, curTileNn, cstart, cend);
@@ -232,8 +235,8 @@ private:
         uint32_t outBytes = curTileNn * elemBytes_;
 
         // 2)+3) 分块读 Y 并在块内 scatter（idxLocal 在 ScatterPass 内减 base + clamp）
-        for (uint32_t cstart = 0; cstart < yElems_; cstart += ubCapElems_) {
-            uint32_t cend = cstart + ubCapElems_;
+        for (uint64_t cstart = 0; cstart < yElems_; cstart += ubCapElems_) {
+            uint64_t cend = cstart + ubCapElems_;
             if (cend > yElems_) {
                 cend = yElems_;
             }
@@ -266,7 +269,7 @@ private:
     uint32_t coreNnz_;
     uint32_t coreOffset_;
     uint32_t elemBytes_;
-    uint32_t yElems_;
+    uint64_t yElems_;
     uint32_t idxBase_;
     uint32_t tileNn_;
     uint32_t ubCapElems_;
