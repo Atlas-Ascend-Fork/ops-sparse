@@ -361,6 +361,9 @@ public:
     }
 
     void copyToHost(void* hostPtr, size_t size) const {
+        if (size == 0) {
+            return;
+        }
         auto ret = aclrtMemcpy(hostPtr, size, ptr_, size, ACL_MEMCPY_DEVICE_TO_HOST);
         if (ret != ACL_SUCCESS) throw std::runtime_error("aclrtMemcpy D2H failed");
     }
