@@ -56,10 +56,11 @@ cmake --build build --target spgemm_test spgemm_perf --parallel
 
 ## PyTorch端到端测试
 
-使用相互匹配的PyTorch和torch_npu环境。先构建并安装`cann_ops_sparse` wheel，
-再用pytest执行：
+使用相互匹配的PyTorch和torch_npu环境。先构建`libops_sparse.so`主库（`--torch_extension`流程只构建wheel，不编译主库），再构建并安装`cann_ops_sparse` wheel，
+最后用pytest执行：
 
 ```bash
+bash build.sh --ops=spgemm --soc=<SOC型号>
 bash build.sh --torch_extension --ops=spgemm
 python3 -m pip install build_out/cann_ops_sparse-*.whl --force-reinstall --no-deps
 
