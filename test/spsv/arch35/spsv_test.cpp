@@ -408,7 +408,7 @@ TEST_F(SpSVExceptionTest, L2_singular_matrix) {
         spHandle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, &alpha, matA.cget(),
         vecX.cget(), vecY.get(), ACL_FLOAT,
         ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get(), &bufSize);
-    if (ret != ACL_SPARSE_STATUS_SUCCESS) return;
+    ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS) << "bufferSize stage";
 
     DeviceBuffer dWs;
     if (bufSize > 0) dWs = DeviceBuffer::alloc(bufSize);
@@ -417,7 +417,7 @@ TEST_F(SpSVExceptionTest, L2_singular_matrix) {
         vecX.cget(), vecY.get(), ACL_FLOAT,
         ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get(),
         bufSize > 0 ? dWs.get() : nullptr);
-    if (ret != ACL_SPARSE_STATUS_SUCCESS) return;
+    ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS) << "analysis stage";
 
     ret = aclsparseSpSV_solve(
         spHandle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, &alpha, matA.cget(),
