@@ -35,6 +35,7 @@ ops-sparse/
         ├── torch_npu_sparse.py          # torch_npu.sparse façade 集中管理
         ├── op_builder/                  # 通用 JIT builder
         ├── ops/                         # 自动发现 wheel 中的算子
+        │   └── matmul/                  # 矩阵族路由、ATen 注册及 autograd
         └── docs/
             ├── torch_extension_guidelines.md
             └── zh/<op_api>.md           # 对外 API 文档
@@ -139,18 +140,168 @@ class SpMMOpBuilder(OpBuilder):
 
 ### 3.2 ATen dispatch 注册
 
-已有 ATen schema 使用 `torch.library.impl` 注册实现。以下以 `spmm` 算子为例：
+#### 3.2.1 普通单算子注册
+
+矩阵乘法族以外的算子继续在自己的 Python 模块中使用 `torch.library.impl`，
+为已有 ATen schema 注册 NPU 实现。以下以仓内 Gather 的 `aten::index_select` 为例：
 
 ```python
-@impl("aten::_sparse_addmm", "PrivateUse1")
-def _sparse_addmm_privateuse1(self, mat1, mat2, beta=1, alpha=1):
-    return _spmm_op_builder.load().sparse_addmm(self, mat1, mat2, beta, alpha)
+import torch
+from torch.library import impl
 
 
-@impl("aten::_sparse_addmm", "SparseCsrPrivateUse1")
-def _sparse_addmm_sparse_csr_privateuse1(self, mat1, mat2, beta=1, alpha=1):
-    return _spmm_op_builder.load().sparse_addmm(self, mat1, mat2, beta, alpha)
+@impl("aten::index_select", "PrivateUse1")
+def _index_select_privateuse1(self: torch.Tensor, dim: int,
+                             index: torch.Tensor) -> torch.Tensor:
+    if self.dim() != 1:
+        raise RuntimeError("aclsparseGather index_select requires a 1-D input")
+    if dim not in (0, -1):
+        raise IndexError(f"Dimension out of range for 1-D Gather input: {dim}")
+    return _gather_op_builder.load().index_select(self, index)
 ```
+
+`_gather_op_builder` 按 3.1 节定义，模块顶层仅实例化 builder。
+这里的 `PrivateUse1` 适用于该实现的稠密输入；其他算子若接受 COO/CSR 输入，
+应按自身 schema 和输入布局注册 `SparsePrivateUse1` / `SparseCsrPrivateUse1`，
+不能照搬 Gather 的 dispatch key。overload（如 `index_select.out`）需按其完整签名
+单独注册，不支持的 overload 不得注册占位实现。
+
+算子包的 `__init__.py` 显式导入注册模块，例如 `from . import gather`；框架自动发现
+并导入这个包时装配注册，首次实际调用才执行 JIT。普通算子不声明
+`MATMUL_CAPABILITIES`，也不通过矩阵统一路由调用。
+
+已有 ATen 自动求导规则会继续使用，但其依赖的 NPU 算子必须单独验证；注册一个
+前向 kernel 不等于支持反向。确需补充反向依赖时，按对应 ATen schema 注册，
+不能把普通算子的 backward 放入矩阵能力表。
+
+#### 3.2.2 矩阵乘法族统一注册
+
+矩阵乘法族的 ATen 注册由 `ops/matmul/registration.py` 唯一管理。算子包只声明
+`MATMUL_CAPABILITIES`，不得重复注册 `mm/addmm/_sparse_addmm/_sparse_sparse_matmul`
+及其 out overload。
+
+例如，后续 SpMM 包可声明：
+
+```python
+from ...matmul.dispatch import MatmulCapability
+
+
+def execute_spmm(request):
+    extension = _spmm_op_builder.load()
+    if request.out is not None:
+        raise RuntimeError("SpMM provider has no out= implementation")
+    if request.operation == "mm":
+        return extension.spmm(request.mat1, request.mat2)
+    return extension.sparse_addmm(request.self, request.mat1, request.mat2,
+                                  request.beta, request.alpha)
+
+
+MATMUL_CAPABILITIES = (
+    MatmulCapability(owner="spmm", route="spmm", forward=execute_spmm),
+)
+```
+
+此处 `spmm` / `sparse_addmm` 是待接入 provider 的 pybind 签名示例，须随其真实
+C++ 导出调整；本仓当前没有 SpMM provider。`forward` 接收 `MatmulRequest`：
+operation 为 `mm` 或 `addmm`，包含 mat1/mat2、可选 self/out 和 alpha/beta，并保留原始 ATen `schema`。
+SpMM 收到 CSR×dense 的规范化输入；dense×sparse 由框架用普通转置归约，
+COO coalesce 后转 CSR，CSC 转 CSR。provider 必须保持设备、dtype 和数值语义，
+out 实现负责写回并返回传入 out 对象，不支持的调用应明确报错。
+SpGEMM 接收匹配的 COO×COO（mm）或 CSR×CSR；CSR addmm 的 self 必须为 CSR。
+
+可通过 operations、dtypes、device_types 限定能力。重复 route/operation 注册会在
+导入时失败；缺失能力在调用时明确报错。包导入仅装配注册，不调用 JIT load。
+
+#### 3.2.3 矩阵算子反向接入参考
+
+可选 `backward` 接收原始 request 和 `grad_output`，返回
+`(grad_self, grad_mat1, grad_mat2)`；没有累加项或不需要梯度的输入返回 `None`。
+公共层为已声明 backward 的稀疏请求安装 `AutogradPrivateUse1` 实现，保存输入并
+调用该反向函数；其他请求继续分发到 ATen 的原有 autograd。
+
+VJP 是 **vector–Jacobian product（向量–雅可比乘积）**，指将上游梯度
+`grad_output` 通过算子的导数传播为各输入梯度。此处可以直接理解为“反向函数”，
+不需要显式构造雅可比矩阵。
+
+以未来 SpMM 的 `Y = beta * self + alpha * (A @ B)` 为例，设上游梯度为 `G`，
+稠密形式的反向公式为：
+
+```text
+grad_A    = conj(alpha) * G @ Bᴴ
+grad_B    = conj(alpha) * Aᴴ @ G
+grad_self = conj(beta) * G，再归约到 self 的原始 shape
+```
+
+`ᴴ` 表示共轭转置。这是通常的稠密公式；正式实现必须以原始 `request.schema`
+对应的 PyTorch 反向规则为准。PyTorch 2.10 的 `aten::_sparse_addmm` 对 self 和 mat1
+分别使用未共轭的 beta/alpha，mat2 使用 `conj(alpha)`；普通 `aten::addmm` 三项
+使用共轭标量。`aten::mm` 不做输入 pattern 投影，`aten::_sparse_sparse_matmul`
+按原生 `sparse_mask_like_grad` 分支处理结构。indices 不求导。
+下面给出有限数值、稠密上游的接入方式和数学参考实现，便于其他矩阵 provider 复用。
+它通过稠密化计算展示语义；非有限数值及稀疏上游还须对照原生稀疏结构和传播规则。
+正式 SpMM 实现应替换为自身的稀疏反向 kernel，以避免完整稠密矩阵的
+内存与计算开销；所用 `to_dense`、复数运算、`sparse_mask` 等 NPU 依赖需实际验证。
+
+```python
+import torch
+from ...matmul.dispatch import MatmulCapability
+
+
+def _as_dense(tensor):
+    return tensor if tensor.layout == torch.strided else tensor.to_dense()
+
+
+def _conjugate_scalar(value):
+    return value.conjugate() if isinstance(value, complex) else value
+
+
+def _input_gradient(dense_gradient, original):
+    if original.layout == torch.strided:
+        return dense_gradient.sum_to_size(original.shape)
+    return dense_gradient.sparse_mask(original)
+
+
+def backward_spmm(request, grad_output):
+    # backward 接收原始输入、原始 ATen schema 和上游梯度布局，
+    # 并非 forward 已转换为 CSR×dense 的 request。
+    a, b = request.mat1, request.mat2
+    g = _as_dense(grad_output)
+    alpha = _conjugate_scalar(request.alpha)
+    beta = _conjugate_scalar(request.beta)
+    alpha_a = request.alpha if request.schema == "aten::_sparse_addmm" else alpha
+    beta_self = request.beta if request.schema == "aten::_sparse_addmm" else beta
+    grad_a = grad_b = grad_self = None
+    if a.requires_grad:
+        dense_grad_a = alpha_a * torch.mm(g, _as_dense(b).mH)
+        grad_a = (_input_gradient(dense_grad_a, a)
+                  if request.schema == "aten::_sparse_addmm" else dense_grad_a)
+    if b.requires_grad:
+        grad_b = alpha * torch.mm(_as_dense(a).mH, g)
+    if request.self is not None and request.self.requires_grad:
+        grad_self = _input_gradient(beta_self * g, request.self)
+    return grad_self, grad_a, grad_b
+
+# execute_spmm 和 _spmm_op_builder 按上一节提供。
+# 用这个声明替换前向示例的 MATMUL_CAPABILITIES，而非再追加同一路由。
+MATMUL_CAPABILITIES = (
+    MatmulCapability(owner="spmm", route="spmm", forward=execute_spmm,
+                     backward=backward_spmm),
+)
+```
+
+反向实现负责共轭、广播归约及原输入的稀疏梯度结构。若正式实现复用 forward 的
+布局转换，必须自行将上游梯度和返回梯度变换回原输入布局；公共层不会自动执行
+反向的转置或投影。不得对零 alpha/beta 直接返回零梯度，否则会屏蔽原生的 NaN 传播。
+
+`backward_helpers` 可声明构造器反向或梯度累加所需的辅助实现，例如
+`(("sparse_mask", sparse_mask_impl),)`。当前公共层允许的 schema 为 `sparse_mask`、
+`add.out`、`add_.Tensor`，按公共层规定的 dispatch key 注册，不允许不同 provider
+重复声明同一个 helper；已有 helper 应复用，新增 helper 须同步扩展公共层并验证
+完整 ATen 语义。声明 helper 不会替代主算子的 `backward`。
+
+当前公共 autograd 包装器仅支持一阶反向，不支持二阶反向和 `out=` 自动求导。
+新增 provider 应覆盖两侧输入、累加项、广播、复数、原始稀疏布局和梯度累加，
+通过 NPU 验证后才能在支持列表中声明反向能力。
 
 注册时必须满足：
 
@@ -164,8 +315,7 @@ def _sparse_addmm_sparse_csr_privateuse1(self, mat1, mat2, beta=1, alpha=1):
 ### 3.3 算子包导入
 
 `sparse/<op>/torch_extension/__init__.py` 应显式导入承担注册的模块，使 wheel 中的自动
-发现能够触发注册。以 `spmm` 算子为例，导入其算子包仅触发自身注册；其他算子也应保持
-相同隔离性。内部注册模块不作为 public API 时，`__all__` 可保持为空；如确需导出 custom
+发现能够收集能力或触发非矩阵算子的注册。矩阵算子包只导出自身能力，不互相依赖。内部注册模块不作为 public API 时，`__all__` 可保持为空；如确需导出 custom
 API，应显式列入 `__all__`，禁止依赖通配符导入的偶然行为。
 
 ## 4. C++ 后端（C++ kernel wrapper）
@@ -255,7 +405,8 @@ Python façade，不应绕过 ATen dispatcher 直接调用 C++ wrapper。
 2. 仅当两者都未被占用时创建模块；若被第三方占用，必须明确报错，严禁覆盖；
 3. 仅允许本包通过 owner marker 识别并重复使用自己创建的同一模块；
 4. 算子注册模块通过 `TORCH_NPU_SPARSE_FACADE_APIS` 声明 `{名称: public PyTorch API}`
-   映射；`cann_ops_sparse.ops` 自动收集，安装时自动生成 `namespace.__all__`；
+   映射；矩阵乘法族由公共 `ops/matmul/registration.py` 统一声明该映射，算子包只声明能力。
+   `cann_ops_sparse.ops` 自动收集，安装时自动生成 `namespace.__all__`；
 5. 新增 façade 函数必须保证其签名和语义与对应 public PyTorch API 一致；
 6. 算子自身的 `__init__.py` 和注册模块不得直接修改 `torch_npu` 属性或 `sys.modules`。
 

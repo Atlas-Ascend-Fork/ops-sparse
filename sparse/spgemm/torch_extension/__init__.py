@@ -10,10 +10,10 @@
 
 """SpGEMM operator package.
 
-Importing this package triggers the SpGEMM ATen registrations only; no other
-operator is touched, and no JIT compilation happens until the first NPU call.
+Importing this package declares lazy SpGEMM capabilities. The shared framework
+owns ATen registrations; no JIT compilation happens until the first NPU call.
 """
 
 __all__ = []
 
-from .spgemm import TORCH_NPU_SPARSE_FACADE_APIS
+from .spgemm import MATMUL_CAPABILITIES

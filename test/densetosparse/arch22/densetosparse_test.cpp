@@ -693,6 +693,239 @@ TEST(ErrorPaths, InvalidArguments)
     }
 }
 
+// Real C-API stage-machine coverage.  In particular, Analysis writes the
+// compressed offsets but not the later-bound index/value payload.  Rebinding
+// that payload must retain the Analysis result; changing the offsets (or CSR
+// strides) changes the analysis contract and requires another Analysis.
+namespace {
+struct DenseToSparseStageMem {
+    void *dense = nullptr;
+    void *offsets = nullptr;
+    void *workspace = nullptr;
+    void *otherWorkspace = nullptr;
+    void *indices = nullptr;
+    void *values = nullptr;
+    void *otherOffsets = nullptr;
+    void *rows = nullptr;
+    void *cols = nullptr;
+    aclsparseDnMatDescr_t matA = nullptr;
+    aclsparseSpMatDescr_t matB = nullptr;
+
+    ~DenseToSparseStageMem()
+    {
+        if (matB) aclsparseDestroySpMat(matB);
+        if (matA) aclsparseDestroyDnMat(matA);
+        for (void *p : {cols, rows, otherOffsets, values, indices,
+                        otherWorkspace, workspace, offsets, dense}) {
+            if (p) aclrtFree(p);
+        }
+    }
+};
+
+bool PrepareStagePair(const CaseCfg &cfg, const Dense64 &dense,
+    const Golden &golden, DenseToSparseStageMem *mem, size_t *bufferSize)
+{
+    if (aclrtMalloc(&mem->dense, dense.bytes.size(),
+                    ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
+        aclrtMemcpy(mem->dense, dense.bytes.size(), dense.bytes.data(),
+                    dense.bytes.size(), ACL_MEMCPY_HOST_TO_DEVICE) !=
+            ACL_SUCCESS ||
+        aclsparseCreateDnMat(&mem->matA, cfg.rows, cfg.cols, dense.ld,
+                             mem->dense, cfg.dtype, cfg.order) !=
+            ACL_SPARSE_STATUS_SUCCESS ||
+        aclrtMalloc(&mem->offsets,
+                    static_cast<size_t>(golden.majorDim + 1) * sizeof(int32_t),
+                    ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+        return false;
+    }
+    const aclsparseStatus_t create = cfg.format == ACL_SPARSE_FORMAT_CSR
+        ? aclsparseCreateCsr(&mem->matB, cfg.rows, cfg.cols, 0, mem->offsets,
+                             nullptr, nullptr, ACL_SPARSE_INDEX_32I,
+                             ACL_SPARSE_INDEX_32I, cfg.base, cfg.dtype)
+        : aclsparseCreateCsc(&mem->matB, cfg.rows, cfg.cols, 0, mem->offsets,
+                             nullptr, nullptr, ACL_SPARSE_INDEX_32I,
+                             ACL_SPARSE_INDEX_32I, cfg.base, cfg.dtype);
+    if (create != ACL_SPARSE_STATUS_SUCCESS ||
+        aclsparseDenseToSparseGetBufferSize(
+            dts_handle, mem->matA, mem->matB,
+            ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT, bufferSize) !=
+            ACL_SPARSE_STATUS_SUCCESS ||
+        *bufferSize == 0 ||
+        aclrtMalloc(&mem->workspace, *bufferSize,
+                    ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
+        aclrtMalloc(&mem->otherWorkspace, *bufferSize,
+                    ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+        return false;
+    }
+    return true;
+}
+
+bool AllocateCompressedPayload(DenseToSparseStageMem *mem, int64_t nnz,
+    int elemBytes)
+{
+    return nnz > 0 &&
+           aclrtMalloc(&mem->indices, static_cast<size_t>(nnz) * sizeof(int32_t),
+                       ACL_MEM_MALLOC_HUGE_FIRST) == ACL_SUCCESS &&
+           aclrtMalloc(&mem->values, static_cast<size_t>(nnz) * elemBytes,
+                       ACL_MEM_MALLOC_HUGE_FIRST) == ACL_SUCCESS;
+}
+
+aclsparseStatus_t SetCompressedPayload(aclsparseFormat_t format,
+    aclsparseSpMatDescr_t mat, void *offsets, void *indices, void *values)
+{
+    return format == ACL_SPARSE_FORMAT_CSR
+        ? aclsparseCsrSetPointers(mat, offsets, indices, values)
+        : aclsparseCscSetPointers(mat, offsets, indices, values);
+}
+
+bool CheckStageCompressedResult(const CaseCfg &cfg, const Dense64 &dense,
+    const Golden &golden, const DenseToSparseStageMem &mem)
+{
+    return CheckCompressedResult(cfg, dense, golden, golden.nnz, mem.offsets,
+                                 mem.indices, nullptr, nullptr, mem.values);
+}
+CaseCfg MakeStageConfig(aclsparseFormat_t format, uint32_t seed)
+{
+    CaseCfg cfg{};
+    cfg.format = format;
+    cfg.dtype = ACL_FLOAT;
+    cfg.base = ACL_SPARSE_INDEX_BASE_ZERO;
+    cfg.order = ACL_SPARSE_ORDER_ROW;
+    cfg.rows = 4;
+    cfg.cols = 5;
+    cfg.seed = seed;
+    cfg.nnzPerRow = 3;
+    return cfg;
+}
+
+aclsparseStatus_t ConvertStage(const DenseToSparseStageMem &mem, void *workspace)
+{
+    return aclsparseDenseToSparseConvert(dts_handle, mem.matA, mem.matB,
+        ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT, workspace);
+}
+
+void AnalyzeStage(const DenseToSparseStageMem &mem)
+{
+    ASSERT_EQ(aclsparseDenseToSparseAnalysis(dts_handle, mem.matA, mem.matB,
+        ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT, mem.workspace), ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(aclrtSynchronizeStream(dts_stream), ACL_SUCCESS);
+}
+
+void ConvertStageAndSynchronize(const DenseToSparseStageMem &mem)
+{
+    ASSERT_EQ(ConvertStage(mem, mem.workspace), ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(aclrtSynchronizeStream(dts_stream), ACL_SUCCESS);
+}
+
+void RecoverInvalidatedStage(const DenseToSparseStageMem &mem)
+{
+    EXPECT_EQ(ConvertStage(mem, mem.workspace), ACL_SPARSE_STATUS_INVALID_VALUE);
+    ASSERT_NO_FATAL_FAILURE(AnalyzeStage(mem));
+    ASSERT_NO_FATAL_FAILURE(ConvertStageAndSynchronize(mem));
+}
+
+void CheckPayloadRebind(const CaseCfg &cfg, const Dense64 &dense,
+    const Golden &golden, DenseToSparseStageMem *mem)
+{
+    // Convert cannot consume an Analysis that has not succeeded.
+    EXPECT_EQ(ConvertStage(*mem, mem->workspace), ACL_SPARSE_STATUS_INVALID_VALUE);
+    ASSERT_NO_FATAL_FAILURE(AnalyzeStage(*mem));
+    ASSERT_TRUE(AllocateCompressedPayload(mem, golden.nnz, dense.elemBytes));
+    // Rebinding payload retains the offsets and successful Analysis state.
+    ASSERT_EQ(SetCompressedPayload(cfg.format, mem->matB, mem->offsets,
+        mem->indices, mem->values), ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(ConvertStage(*mem, mem->otherWorkspace), ACL_SPARSE_STATUS_INVALID_VALUE);
+    ASSERT_NO_FATAL_FAILURE(ConvertStageAndSynchronize(*mem));
+    EXPECT_TRUE(CheckStageCompressedResult(cfg, dense, golden, *mem));
+}
+
+void CheckCompressedInvalidation(const CaseCfg &cfg, const Dense64 &dense,
+    const Golden &golden, DenseToSparseStageMem *mem)
+{
+    const size_t offsetsBytes = static_cast<size_t>(golden.majorDim + 1) * sizeof(int32_t);
+    ASSERT_EQ(aclrtMalloc(&mem->otherOffsets, offsetsBytes,
+        ACL_MEM_MALLOC_HUGE_FIRST), ACL_SUCCESS);
+    ASSERT_EQ(aclrtMemcpy(mem->otherOffsets, offsetsBytes, mem->offsets,
+        offsetsBytes, ACL_MEMCPY_DEVICE_TO_DEVICE), ACL_SUCCESS);
+    ASSERT_EQ(SetCompressedPayload(cfg.format, mem->matB, mem->otherOffsets,
+        mem->indices, mem->values), ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_NO_FATAL_FAILURE(RecoverInvalidatedStage(*mem));
+    // Re-analysis writes the replacement offsets, not mem->offsets.
+    EXPECT_TRUE(CheckCompressedResult(cfg, dense, golden, golden.nnz,
+        mem->otherOffsets, mem->indices, nullptr, nullptr, mem->values));
+    if (cfg.format == ACL_SPARSE_FORMAT_CSR) {
+        ASSERT_EQ(aclsparseCsrSetStrides(mem->matB, 1, 1, 1), ACL_SPARSE_STATUS_SUCCESS);
+        ASSERT_NO_FATAL_FAILURE(RecoverInvalidatedStage(*mem));
+        EXPECT_TRUE(CheckCompressedResult(cfg, dense, golden, golden.nnz,
+            mem->otherOffsets, mem->indices, nullptr, nullptr, mem->values));
+    }
+}
+
+bool PrepareCooStagePair(const CaseCfg &cfg, const Dense64 &dense,
+    DenseToSparseStageMem *mem)
+{
+    if (aclrtMalloc(&mem->dense, dense.bytes.size(), ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
+        aclrtMemcpy(mem->dense, dense.bytes.size(), dense.bytes.data(),
+            dense.bytes.size(), ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS ||
+        aclsparseCreateDnMat(&mem->matA, cfg.rows, cfg.cols, dense.ld,
+            mem->dense, cfg.dtype, cfg.order) != ACL_SPARSE_STATUS_SUCCESS ||
+        aclsparseCreateCoo(&mem->matB, cfg.rows, cfg.cols, 0, nullptr, nullptr,
+            nullptr, ACL_SPARSE_INDEX_32I, cfg.base, cfg.dtype) != ACL_SPARSE_STATUS_SUCCESS) {
+        return false;
+    }
+    size_t bufferSize = 0;
+    return aclsparseDenseToSparseGetBufferSize(dts_handle, mem->matA, mem->matB,
+               ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT, &bufferSize) == ACL_SPARSE_STATUS_SUCCESS &&
+           bufferSize > 0 &&
+           aclrtMalloc(&mem->workspace, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST) == ACL_SUCCESS;
+}
+
+void BindCooPayload(const Dense64 &dense, const Golden &golden, DenseToSparseStageMem *mem)
+{
+    const size_t indexBytes = static_cast<size_t>(golden.nnz) * sizeof(int32_t);
+    ASSERT_EQ(aclrtMalloc(&mem->rows, indexBytes, ACL_MEM_MALLOC_HUGE_FIRST), ACL_SUCCESS);
+    ASSERT_EQ(aclrtMalloc(&mem->cols, indexBytes, ACL_MEM_MALLOC_HUGE_FIRST), ACL_SUCCESS);
+    ASSERT_EQ(aclrtMalloc(&mem->values, static_cast<size_t>(golden.nnz) * dense.elemBytes,
+        ACL_MEM_MALLOC_HUGE_FIRST), ACL_SUCCESS);
+    ASSERT_EQ(aclsparseCooSetPointers(mem->matB, mem->rows, mem->cols,
+        mem->values), ACL_SPARSE_STATUS_SUCCESS);
+}
+} // namespace
+
+TEST(DenseToSparseStage, CompressedPayloadRebindAndInvalidation)
+{
+    const aclsparseFormat_t formats[] = {ACL_SPARSE_FORMAT_CSR, ACL_SPARSE_FORMAT_CSC};
+    for (const aclsparseFormat_t format : formats) {
+        SCOPED_TRACE(FmtName(format));
+        const CaseCfg cfg = MakeStageConfig(format, 20261012u);
+        std::mt19937 rng(cfg.seed);
+        const Dense64 dense = MakeDense(cfg, rng);
+        const Golden golden = MakeGolden(cfg, dense);
+        ASSERT_GT(golden.nnz, 0);
+        DenseToSparseStageMem mem;
+        size_t bufferSize = 0;
+        ASSERT_TRUE(PrepareStagePair(cfg, dense, golden, &mem, &bufferSize));
+        ASSERT_NO_FATAL_FAILURE(CheckPayloadRebind(cfg, dense, golden, &mem));
+        ASSERT_NO_FATAL_FAILURE(CheckCompressedInvalidation(cfg, dense, golden, &mem));
+    }
+}
+
+TEST(DenseToSparseStage, CooPayloadRebindKeepsAnalysis)
+{
+    const CaseCfg cfg = MakeStageConfig(ACL_SPARSE_FORMAT_COO, 20261013u);
+    std::mt19937 rng(cfg.seed);
+    const Dense64 dense = MakeDense(cfg, rng);
+    const Golden golden = MakeGolden(cfg, dense);
+    ASSERT_GT(golden.nnz, 0);
+    DenseToSparseStageMem mem;
+    ASSERT_TRUE(PrepareCooStagePair(cfg, dense, &mem));
+    ASSERT_NO_FATAL_FAILURE(AnalyzeStage(mem));
+    ASSERT_NO_FATAL_FAILURE(BindCooPayload(dense, golden, &mem));
+    ASSERT_NO_FATAL_FAILURE(ConvertStageAndSynchronize(mem));
+    EXPECT_TRUE(CheckCompressedResult(cfg, dense, golden, golden.nnz,
+        nullptr, nullptr, mem.rows, mem.cols, mem.values));
+}
+
 // ===================== guard 区（金丝雀边界）检查（任务书 §3.5） =====================
 // 全部 device 缓冲（输入 dense、workspace、CSR/CSC offsets、indices、values、
 // BELL pattern/values）前后各 512B 金丝雀（0xA5）填充，完整三阶段执行后逐字节

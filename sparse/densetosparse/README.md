@@ -285,6 +285,14 @@ complex64 是交织的 `(实部, 虚部)` 两个 FP32，按 8 字节整体搬运
 描述符上登记，跨缓冲或未执行 Analysis 的 Convert 调用返回参数错误），仅写
 payload 不重扫结构；指针、容量和生命周期均由调用者保证。
 
+arch22 使用独立的 DenseToSparse Analysis 状态，CSR/CSC 在保留原 offsets
+指针时可重新绑定输出 indices/values，COO 可重新绑定行列索引及 values；这些
+绑定保留同一 workspace 的 Analysis 结果。更换 CSR/CSC offsets 指针或调用
+`aclsparseCsrSetStrides` 后，需重新执行 Analysis。其它算子的预处理缓存仍由
+指针绑定按原规则失效。非 BELL 的 Convert 在未成功执行 Analysis 或使用不同
+workspace 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+
+
 
 - workspace 仅按 `GetBufferSize` 查询值分配，Analysis 与 Convert 复用同一块
   workspace（arch22 协议：Analysis 在描述符上登记所用 workspace，Convert 使用

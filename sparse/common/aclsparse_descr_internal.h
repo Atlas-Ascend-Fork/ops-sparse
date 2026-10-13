@@ -94,6 +94,11 @@ struct aclsparseSpMatDescr {
     // Keep a dedicated marker so a buffer reused by another operator is never mistaken
     // for valid CSR-to-CSC metadata.
     const void *activeSpmvBuffer = nullptr;
+    // DenseToSparse discovers nnz/offsets before callers allocate its output
+    // payload. Rebinding indices/values must not discard that analysis, while
+    // generic SpMM/SDDMM and SpMV preprocess caches still require invalidation.
+    const void *activeDenseToSparseBuffer = nullptr;
+    bool denseToSparseAnalysisReady = false;
     int32_t cInDataValid = 0;
     // 旧三阶段 SpGEMM 接口复用新多阶段实现时保存的内部描述符及 workspace。
     // 生命周期随 matC 结束，避免旧接口额外暴露描述符管理要求。

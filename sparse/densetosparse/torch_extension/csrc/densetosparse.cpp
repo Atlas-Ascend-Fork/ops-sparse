@@ -230,8 +230,16 @@ TriOut RunCompressed(aclsparseFormat_t fmt, const DenseOperand &d,
     auto u8 = torch::TensorOptions().dtype(torch::kUInt8).device(dev);
     const int64_t rows = d.rows, cols = d.cols;
     const int64_t E = like.element_size();
+    const int64_t majorDim = (fmt == ACL_SPARSE_FORMAT_CSC) ? cols : rows;
 
     return RunAclSparse(like, [&](AclSparseContext &ctx) {
+        if (rows == 0 || cols == 0) {
+            // Empty Torch storage has a null data pointer, which the DnMat
+            // constructor rejects. The sparse shape/empty payload are known
+            // directly; assemble them under the normal device guard.
+            torch::Tensor offs, rowsT, colsT, valsT;
+            return AssembleTriOut(fmt, like, majorDim, 0, E, valsT, rowsT, colsT, offs);
+        }
         const aclsparseHandle_t handle = ctx.handle();
         aclsparseDnMatDescr_t dd = nullptr;
         ACLSPARSE_CHECK(aclsparseCreateDnMat(
@@ -240,7 +248,6 @@ TriOut RunCompressed(aclsparseFormat_t fmt, const DenseOperand &d,
         guard.AdoptDn(dd);
         torch::Tensor offs, rowsT, colsT, valsT;
         const int64_t cap = rows * cols;
-        const int64_t majorDim = (fmt == ACL_SPARSE_FORMAT_CSC) ? cols : rows;
         aclsparseSpMatDescr_t sp = CreateCompressedSpMat(
             fmt, rows, cols, cap, majorDim, ToAclType(like), i32, u8, offs,
             rowsT, colsT, valsT);

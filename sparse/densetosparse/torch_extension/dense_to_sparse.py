@@ -73,6 +73,15 @@ def _dense_operand(t: torch.Tensor) -> torch.Tensor:
     return t.contiguous()
 
 
+def _select_rows(tensor: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+    # Use multidimensional/int64 indexing independently of Gather's narrower
+    # aten::index_select contract when both operator packages are installed.
+    if tensor.is_complex():
+        planes = torch.view_as_real(tensor.resolve_conj())
+        return torch.view_as_complex(planes[rows].contiguous())
+    return tensor[rows]
+
+
 def _to_csr(self: torch.Tensor, dense_dim: Optional[int] = None) -> torch.Tensor:
     _check_dense(self)
     if dense_dim not in (None, 0):
@@ -122,7 +131,7 @@ def _to_coo(self: torch.Tensor, sparse_dim: int, dense_dim: int) -> torch.Tensor
     # Hybrid (1, 1): one entry per row that contains any nonzero; the
     # values are the full rows.
     rows = d.ne(0).any(dim=1).nonzero(as_tuple=True)[0]
-    vals = d.index_select(0, rows)
+    vals = _select_rows(d, rows)
     ind = rows.reshape(1, -1)
     t = torch.sparse_coo_tensor(ind, vals, self.shape, device=self.device)
     return _mark_coalesced(t)
@@ -166,7 +175,7 @@ def _to_bsr(self: torch.Tensor, blocksize, dense_dim: Optional[int] = None) -> t
     # complex64 support): flatten (br, width) slots and index them.
     flat = values.reshape(-1, b, b)
     slot_ids = mask.reshape(-1).nonzero(as_tuple=True)[0]
-    blocks = flat.index_select(0, slot_ids)
+    blocks = _select_rows(flat, slot_ids)
     return torch.sparse_bsr_tensor(crow, col, blocks, self.shape,
                                     device=self.device)
 

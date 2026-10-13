@@ -45,8 +45,21 @@ torch.index_select(input: Tensor, dim: int, index: Tensor, *, out: Tensor | None
 - `index`（IN）：与 `input` 位于同一 NPU 的一维连续 `torch.int32` Tensor；支持乱序和重复，
   长度可以超过 `input.numel()`，每个元素必须位于 `[0, input.numel())`。
 
-PyTorch 公开入口使用零基索引。底层 `aclsparseGather` C API 仍同时支持
-`ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`。
+`torch.index_select` 使用零基索引。迁移后的自定义接口支持两种基数：
+
+```python
+torch.ops.ops_sparse.gather(values: Tensor, indices: Tensor, base: int = 0) -> Tensor
+
+from cann_ops_sparse.ops.sparse.gather import gather, index_select_npu
+```
+
+`gather(values, indices, base)` 转发自定义接口；`index_select_npu(values, dim, indices)`
+转发 `torch.index_select`，仅接受 NPU 输入。`base=0` 时索引范围为
+`[0, values.numel())`，`base=1` 时为 `[1, values.numel()+1)`；其他 base 报错。
+两种基数共用同一 JIT builder、描述符和当前 NPU stream，支持重复索引、分段输出及空输出。
+自定义接口提供 Meta/FakeTensor 实现，推断输出的 shape、dtype 和 device 时不启动 JIT。
+原 `python/ops_sparse` 的独立 ctypes 包已删除；导入入口统一为 `cann_ops_sparse`，
+原 `torch.ops.ops_sparse.gather` schema 保留，不再需要配置 `PYTHONPATH=.../python`。
 
 ## 输出
 
@@ -65,7 +78,8 @@ PyTorch 公开入口使用零基索引。底层 `aclsparseGather` C API 仍同�
 - 公开 PyTorch 入口在下发 Gather Kernel 前于 NPU 上归约索引范围；若存在负索引或索引值不小于
   `input.numel()`，同步抛出 `IndexError`，不启动 Gather Kernel。底层 C API 仍遵循异步接口约定，
   合法索引是其调用方前置条件。重复使用同一未修改索引 Tensor 和相同输入长度时，适配层根据
-  Tensor 弱引用与版本计数复用已验证结果；原地修改索引或改变输入长度后会重新校验。
+  Tensor 弱引用、版本计数、输入长度和 base 复用已验证结果；原地修改索引、改变输入长度
+  或切换 base 后会重新校验。
 - C++ wrapper 首次 NPU 调用时通过 JIT 编译；导入 `cann_ops_sparse` 不触发编译。
 
 ## 调用示例
@@ -79,4 +93,11 @@ source = torch.tensor([10, 20, 30, 40, 50], dtype=torch.float32, device="npu:0")
 index = torch.tensor([4, 0, 2, 2], dtype=torch.int32, device="npu:0")
 output = torch.index_select(source, 0, index)
 print(output)  # [50, 10, 30, 30]
+```
+
+
+```python
+one_based = torch.tensor([5, 1, 3, 3], dtype=torch.int32, device="npu:0")
+output = torch.ops.ops_sparse.gather(source, one_based, base=1)
+# 与上面的 torch.index_select 示例输出相同
 ```

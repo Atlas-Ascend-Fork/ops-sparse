@@ -625,7 +625,6 @@ aclsparseStatus_t AnalysisEmptyMatrix(const aclsparseDnMatDescr *dense,
     aclsparseSpMatDescr *sparse, void *buffer, aclsparseHandle_t handle)
 {
     sparse->nnz = 0;
-    sparse->activeBuffer = buffer;
     if (sparse->format != ACL_SPARSE_FORMAT_COO) {
         const uint32_t blocks = GetLaunchBlocks(1);
         if (blocks == 0) {
@@ -692,8 +691,6 @@ aclsparseStatus_t LaunchAnalysis(aclsparseHandle_t handle,
         return status;
     }
     sparse->nnz = actualNnz;
-    // Same-buffer protocol: Convert requires this exact workspace.
-    sparse->activeBuffer = buffer;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -704,11 +701,11 @@ aclsparseStatus_t LaunchConvert(aclsparseHandle_t handle,
     const auto *dense = matA;
     auto *sparse = matB;
     if (sparse->format != ACL_SPARSE_FORMAT_BLOCKED_ELL &&
-        sparse->activeBuffer != buffer) {
+        (!sparse->denseToSparseAnalysisReady || sparse->activeDenseToSparseBuffer != buffer)) {
         OP_LOGE(kApi,
                 "workspace buffer mismatch: Convert requires the same buffer "
-                "registered by Analysis (active=%p, buffer=%p)",
-                sparse->activeBuffer, buffer);
+                "registered by a successful Analysis (active=%p, buffer=%p)",
+                sparse->activeDenseToSparseBuffer, buffer);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     uint64_t logical = 0;
@@ -784,7 +781,18 @@ aclsparseStatus_t aclsparseDenseToSparseAnalysis(
         OP_LOGE(kApi, "buffer is nullptr while required size=%zu", required);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    return LaunchAnalysis(handle, matA, matB, buffer);
+    // Analysis rewrites the sparse structure; other preprocess metadata can
+    // no longer be reused even when their workspace address happens to match.
+    matB->activeBuffer = nullptr;
+    matB->activeSpmvBuffer = nullptr;
+    matB->activeDenseToSparseBuffer = nullptr;
+    matB->denseToSparseAnalysisReady = false;
+    status = LaunchAnalysis(handle, matA, matB, buffer);
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        matB->activeDenseToSparseBuffer = buffer;
+        matB->denseToSparseAnalysisReady = true;
+    }
+    return status;
 }
 
 aclsparseStatus_t aclsparseDenseToSparseConvert(

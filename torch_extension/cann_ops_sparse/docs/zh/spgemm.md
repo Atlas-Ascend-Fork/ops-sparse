@@ -31,10 +31,11 @@ C = beta * self + alpha * (mat1 @ mat2)
 | public PyTorch API | `torch.sparse.mm` / `torch.sparse.addmm` |
 | ATen schema | `aten::_sparse_addmm(Tensor self, Tensor mat1, Tensor mat2, *, Scalar beta=1, Scalar alpha=1) -> Tensor` |
 | ATen schema | `aten::_sparse_sparse_matmul(Tensor self, Tensor other) -> Tensor` |
-| 分发键 | `SparseCsrPrivateUse1`（两个 schema）、`SparsePrivateUse1`（`_sparse_sparse_matmul`） |
+| 分发键 | 公共路由统一注册 `SparseCsrPrivateUse1` / `SparsePrivateUse1`，按布局和能力选择实现 |
 | 底层 ACLSparse 接口 | `aclsparseSpGEMMCreateDescr` / `aclsparseSpGEMMWorkEstimation` / `aclsparseSpGEMMCompute` / `aclsparseSpMatGetSize` / `aclsparseCsrSetPointers` / `aclsparseSpGEMMCopy` / `aclsparseSpGEMMDestroyDescr` |
 | `torch_npu.sparse` façade | `torch_npu.sparse.mm` / `torch_npu.sparse.addmm` |
 
+ATen 注册与矩阵乘法 façade 由公共框架统一管理，SpGEMM 包仅声明执行能力。
 façade 直接转发同名 public PyTorch API，不绕过 ATen 分发器，因此两种写法语义完全一致。
 
 `torch.sparse.mm(csr, csr)` 由 PyTorch 以 `beta=0, alpha=1` 路由到 `aten::_sparse_addmm`；
@@ -107,7 +108,7 @@ WorkEstimation / Compute / Copy 各阶段——ACLSparse 会逐位比较各阶�
 **layout**
 
 - `mat1`、`mat2` 必须同为稀疏（CSR 或 COO）。稀疏 × 稠密不走本算子，
-  由 `aten::addmm.out` 承接，本算子不注册该路径。
+  由公共框架选择 SpMM 能力；当前未提供该能力时明确报错。
 - 传入 strided（稠密）Tensor 会抛 `RuntimeError`。
 
 **transpose**
@@ -135,19 +136,75 @@ WorkEstimation / Compute / Copy 各阶段——ACLSparse 会逐位比较各阶�
 之前完成；ACLSparse 返回非 `SUCCESS` 时同样抛 `RuntimeError`，消息中带
 `ACLSparse status` 及状态码。
 
-**stream 与同步（重要）**
+**一阶反向支持**
+
+| 接口 | 输入布局 | 已验证的 value dtype |
+| :--- | :--- | :--- |
+| `torch.mm` / `torch.sparse.mm` | CSR×CSR、COO×COO | float16、bfloat16、float32、complex64 |
+| `torch.addmm` / `torch.sparse.addmm` | CSR self、CSR×CSR | float16、bfloat16、float32、complex64 |
+| `torch_npu.sparse.mm/addmm` | 与对应 `torch.sparse` 接口相同 | 同上 |
+
+反向计算两侧输入及累加项的梯度，indices 不求导；梯度布局和稀疏结构按对应 ATen
+入口处理，不能统一强制为原输入 pattern。支持稠密或稀疏上游梯度及复数，浮点 CSR/COO
+构造器的 values 求导链路也已验证；complex64 验证的是稀疏 Tensor 叶节点的梯度。
+COO 梯度可为未 coalesce 的表示，结构与数值比较可将其分量复制到 CPU 后 coalesce。
+已验证共享输入（如 `mm(A, A)`）及多次 backward 的梯度累加。CSR 梯度累加、
+COO 梯度结构投影、稀疏源的 `sparse_mask`，以及 `torch.mm` 的稠密上游
+反向目前通过 CPU 完成，包含设备间数据复制。后者保留稠密零值与 NaN/Inf 的原生传播；
+CPU 不支持的 float16/bfloat16 稀疏计算使用 float32 累加后转回原 dtype。
+当前支持一阶反向；二阶反向及 `out=` 的自动求导不支持。
+
+COO 反向的结构投影依赖 PyTorch 原生 `aten::_sparse_mask_projection`。运行版本缺少
+该算子时，相关反向会明确报告兼容性错误；`sparse_mask` 的结构语义不同，不能作为
+等价替代。升级 PyTorch 后应重新运行原生梯度结构、布局和数值对照测试。
+
+**PyTorch 2.10 反向规则与扩展支持**
+
+公共路由保存原始 ATen schema，按入口分别执行反向，而非把所有接口视为同一个公式：
+
+| 入口 | 反向规则 |
+| :--- | :--- |
+| `torch.mm(COO, COO)`、`torch.mm(CSR, CSR)` / `aten::mm` | 返回完整乘积梯度，不投影到输入 pattern；稠密上游返回稠密梯度；稀疏上游返回完整稀疏乘积；CSR 输入和 CSR 上游返回 CSR，COO 上游返回 COO |
+| `torch.sparse.mm(COO, COO)` / `aten::_sparse_sparse_matmul` | 用原生 `sparse_mask_like_grad(..., false)` 的分支处理稀疏结构及重复坐标 |
+| `torch.addmm` / `aten::addmm` | self 直接缩放上游、保留其布局和坐标，使用 `conj(beta)`；两侧返回完整乘积梯度，不投影到输入 pattern，使用 `conj(alpha)`；稠密上游保留显式零并返回稠密梯度；CSR 输入和 CSR 上游返回 CSR，COO 上游返回 COO |
+| `torch.sparse.addmm` / `aten::_sparse_addmm` | 按该 schema 的原生规则：self 直接缩放上游、保留其布局和坐标，使用 beta；mat1 使用 alpha，mat2 使用 `conj(alpha)` |
+
+alpha/beta 为零时仍按对应原生计算再缩放，保留 `NaN * 0`，不直接返回零梯度。
+COO 的上述规则已与本地 PyTorch 2.10 CPU 原生接口对照结构、布局和数值；稠密上游
+还覆盖零值与稀疏 operand 中 NaN/Inf 的传播。
+
+额外支持包括 CSR×CSR 一阶反向、原生稀疏乘法不接受的稠密上游，以及部分 dtype /
+上游布局组合。`aten::_sparse_addmm` 的 CSR 矩阵梯度保留输入
+CSR pattern；`aten::mm` / `aten::addmm` 的矩阵梯度及所有入口的 self 梯度不作输入 pattern 裁剪。
+这些扩展不意味着 PyTorch 2.10 原生支持相同输入域。SpGEMM addmm 的 self 仍要求同形 CSR，不扩展原生 SpMM 的广播域。
+
+本地 CPU 构建缺少 MKL，无法运行原生 CSR×CSR forward；相关注册回调的回归
+使用相同 `aten::mm` 的原生 COO 输入，以及原生 addmm 的 COO×dense 输入作对照。
+实际 NPU 公共入口的 CSR 用例另列于端到端测试中。
+
+对照依据为 PyTorch v2.10.0 的
+[derivatives.yaml](https://github.com/pytorch/pytorch/blob/v2.10.0/tools/autograd/derivatives.yaml)
+和 [FunctionsManual.cpp](https://github.com/pytorch/pytorch/blob/v2.10.0/torch/csrc/autograd/FunctionsManual.cpp)。
+CSR 上游的矩阵梯度布局依据
+[SparseCsrTensorMath.cpp](https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/sparse/SparseCsrTensorMath.cpp)
+的 `_sparse_csr_mm`：CSR/CSC 两侧乘积返回 CSR；内部 COO 计算完成后恢复该布局。
+
+本地验证环境为 CANN 9.1.0、torch 2.10.0、torch_npu 2.10.0，使用与仓库头文件匹配的
+arch22 算子库。
+
+**stream 与同步**
 
 - 适配层绑定 PyTorch 当前 NPU stream（`c10_npu::getCurrentNPUStream`），
   支持非默认 stream 与非默认 device；所有输出/workspace 张量都做了
   `recordStream`，可安全参与 caching allocator 的复用。
-- 调用开始处会提交（submit）torch_npu 异步任务队列中已排队的工作
-  （`NPUStream::stream(true)`）。这**不是** device 同步，只保证适配层内部为
-  ACLSparse 做的索引窄化在库读取之前已下发。
+- 适配层仅提交 torch_npu 队列，不主动等待设备。arch22 的 CSR 校验使用
+  `aclrtMemcpyAsync` 将索引复制排到 handle stream，并在 CPU 校验前等待复制完成，
+  确保索引转换与读取有序；A/B 共用一次等待，非零 beta 的累加项另行校验。
 - **本算子的执行路径含固有的阻塞同步**：SpGEMM 是两趟算法，host 需要读回
   中间统计量才能继续——
-  - `sparse/spgemm/arch22/spgemm_host.cpp:445`：读回 `rowProducts` 做行装箱；
-  - `sparse/spgemm/arch22/spgemm_host.cpp:571`：读回 `nnz(C)` 以确定输出规模；
-  - `aclsparseSpGEMMWorkEstimation` 执行阶段还会阻塞读回 `crow_indices` 做结构校验。
+  - `sparse/spgemm/arch22/spgemm_host.cpp:455`：读回 `rowProducts` 做行装箱；
+  - `sparse/spgemm/arch22/spgemm_host.cpp:581`：读回 `nnz(C)` 以确定输出规模；
+  - `aclsparseSpGEMMWorkEstimation` 执行阶段等待 CSR 索引的 stream 有序 D2H 复制完成后做结构校验。
 
   这是「输出 `nnz` 在计算前未知」这一算法本质带来的，无法在适配层消除，
   因此本算子**不满足**"执行路径无主动同步"这一通用要求。调用方应预期

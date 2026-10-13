@@ -61,10 +61,13 @@ out = torch.sparse.mm(matrix, matrix)
 out = torch_npu.sparse.mm(matrix, matrix)
 ```
 
-导入 `cann_ops_sparse` 时会为 `aten::_sparse_sparse_matmul` 注册
-`SparseCsrPrivateUse1` 与 `SparsePrivateUse1` 实现，并为 CSR 内部路径注册
-`aten::_sparse_addmm` 的 `SparseCsrPrivateUse1` 实现，同时安装 `torch_npu.sparse`
-façade。首次以 NPU 稀疏 Tensor 调用 `torch.sparse.mm` 时才会 JIT 编译相应的 C++ wrapper。
+导入 `cann_ops_sparse` 时，公共框架收集算子声明的 `MATMUL_CAPABILITIES`，统一注册
+`mm`、`mm.out`、`addmm`、`addmm.out`、`_sparse_addmm`、`_sparse_sparse_matmul`
+的 `SparsePrivateUse1` / `SparseCsrPrivateUse1` 实现。dense×dense 保持现有稠密后端；
+sparse×dense 选择 SpMM；dense×sparse 普通转置后复用 SpMM；sparse×sparse 选择 SpGEMM。
+算子包不重复注册这些入口，`torch_npu.sparse.mm/addmm` 由公共框架统一声明。
+
+请求未注册的算子能力时，统一路由会明确报错。
 
 以 `spgemm` 算子构建的 wheel 包含其 Torch Extension 源码。首次 NPU 调用
 `torch.sparse.mm` 时会触发 JIT 编译并加载 NPU 实现。运行前须先构建包含 `spgemm`
@@ -146,3 +149,10 @@ ops-sparse/
 | `OpBuilder` | 使用 JIT/ninja 编译和加载 C++ wrapper。 |
 | ATen Dispatch | 将 `torch.sparse.addmm` 路由到 NPU 的 `aten::_sparse_addmm` 实现。 |
 | PrivateUse1 | PyTorch 将 NPU Tensor 分发到自定义后端的 dispatch key。 |
+
+
+Gather 的旧 `python/ops_sparse` 适配器已并入本框架，注册和 JIT 加载由
+`sparse/gather/torch_extension` 管理。导入 `cann_ops_sparse` 后可调用
+`torch.index_select` 或保留的 `torch.ops.ops_sparse.gather(values, indices, base=0)`；
+后者支持 base=0/1。便捷函数从 `cann_ops_sparse.ops.sparse.gather` 导入。
+不再需要旧 Python 目录的 `PYTHONPATH`，测试统一位于 `test/gather/python/`。

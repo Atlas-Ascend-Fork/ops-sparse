@@ -12,10 +12,11 @@
 
 from __future__ import annotations
 
-__all__ = []
+__all__ = ["gather", "index_select_npu"]
 
 import torch
-from torch.library import impl
+from torch.library import define, impl, register_fake
+from torch import _check as check_shape
 
 from ....op_builder.builder import OpBuilder
 
@@ -45,5 +46,47 @@ def _index_select_privateuse1(self: torch.Tensor, dim: int, index: torch.Tensor)
     return _gather_op_builder.load().index_select(self, index)
 
 
-# Gather uses torch.index_select directly and does not add an unrelated sparse façade.
+define("ops_sparse::gather", "(Tensor values, Tensor indices, int base=0) -> Tensor")
+
+
+@impl("ops_sparse::gather", "PrivateUse1")
+def _gather_privateuse1(values: torch.Tensor, indices: torch.Tensor, base: int = 0) -> torch.Tensor:
+    return _gather_op_builder.load().gather(values, indices, base)
+
+
+@register_fake("ops_sparse::gather")
+def _gather_meta(values: torch.Tensor, indices: torch.Tensor, base: int = 0) -> torch.Tensor:
+    if base not in (0, 1):
+        raise RuntimeError("aclsparseGather base must be 0 or 1")
+    if values.dim() != 1 or indices.dim() != 1:
+        raise RuntimeError("aclsparseGather requires one-dimensional values and indices")
+    if values.layout != torch.strided or indices.layout != torch.strided:
+        raise RuntimeError("aclsparseGather requires strided values and indices")
+    if values.device != indices.device:
+        raise RuntimeError("aclsparseGather values and indices must be on the same device")
+    if not values.is_contiguous() or not indices.is_contiguous():
+        raise RuntimeError("aclsparseGather values and indices must be contiguous")
+    if indices.dtype != torch.int32:
+        raise RuntimeError("aclsparseGather indices must use int32")
+    if values.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.complex64):
+        raise RuntimeError("aclsparseGather values have unsupported dtype")
+    if values.requires_grad:
+        raise RuntimeError("aclsparseGather is forward-only and does not support autograd")
+    check_shape((values.numel() > 0) | (indices.numel() == 0))
+    return values.new_empty(indices.shape)
+
+
+def gather(values: torch.Tensor, indices: torch.Tensor, base: int = 0) -> torch.Tensor:
+    """Gather a one-dimensional NPU source using zero-based or one-based indices."""
+    return torch.ops.ops_sparse.gather(values, indices, base)
+
+
+def index_select_npu(tensor: torch.Tensor, dim: int, index: torch.Tensor) -> torch.Tensor:
+    """Call the registered one-dimensional NPU index_select implementation."""
+    if tensor.device.type != "npu":
+        raise NotImplementedError("aclsparseGather index_select_npu requires an NPU input")
+    return torch.index_select(tensor, dim, index)
+
+
+# Gather exposes standard index_select and its base-aware custom schema; no sparse façade.
 TORCH_NPU_SPARSE_FACADE_APIS = {}

@@ -8,7 +8,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 // ----------------------------------------------------------------------------------------------------------
 
-// One-dimensional aten::index_select wrapper backed by aclsparseGather.
+// One-dimensional Gather and aten::index_select wrappers backed by aclsparseGather.
 
 #include <algorithm>
 #include <optional>
@@ -93,10 +93,11 @@ private:
 
 class SpVecGuard {
 public:
-    SpVecGuard(int64_t size, int64_t nnz, void *indices, void *values, aclDataType valueType)
+    SpVecGuard(int64_t size, int64_t nnz, void *indices, void *values, aclDataType valueType,
+        aclsparseIndexBase_t indexBase)
     {
         ACLSPARSE_CHECK(aclsparseCreateSpVec(&value_, size, nnz, indices, values, ACL_SPARSE_INDEX_32I,
-            ACL_SPARSE_INDEX_BASE_ZERO, valueType));
+            indexBase, valueType));
     }
 
     ~SpVecGuard()
@@ -119,10 +120,10 @@ private:
 };
 
 void GatherSlice(AclSparseContext &context, aclsparseConstDnVecDescr_t dense, int64_t inputSize,
-    const at::Tensor &index, at::Tensor &output, aclDataType valueType)
+    const at::Tensor &index, at::Tensor &output, aclDataType valueType, aclsparseIndexBase_t indexBase)
 {
     SpVecGuard sparse(inputSize, index.numel(), const_cast<void *>(index.const_data_ptr()),
-        output.mutable_data_ptr(), valueType);
+        output.mutable_data_ptr(), valueType, indexBase);
     ACLSPARSE_CHECK(aclsparseGather(context.handle(), dense, sparse.get()));
 }
 
@@ -130,18 +131,21 @@ using IndexImplWeakPtr = c10::weak_intrusive_ptr<c10::TensorImpl, c10::Undefined
 
 class ValidatedIndexBoundsCache {
 public:
-    bool Matches(const at::Tensor &index, int64_t inputSize) const
+    bool Matches(const at::Tensor &index, int64_t inputSize, int64_t base) const
     {
         const c10::TensorImpl *impl = index.unsafeGetTensorImpl();
         const auto &versionCounter = impl->version_counter();
-        if (!indexImpl_.has_value() || !versionCounter.enabled() || inputSize_ != inputSize) {
+        if (inputSize_ != inputSize || base_ != base) {
+            return false;
+        }
+        if (!indexImpl_.has_value() || !versionCounter.enabled()) {
             return false;
         }
         const auto cachedImpl = indexImpl_->lock();
         return cachedImpl && cachedImpl.get() == impl && version_ == versionCounter.current_version();
     }
 
-    void Store(const at::Tensor &index, int64_t inputSize)
+    void Store(const at::Tensor &index, int64_t inputSize, int64_t base)
     {
         const c10::TensorImpl *impl = index.unsafeGetTensorImpl();
         const auto &versionCounter = impl->version_counter();
@@ -152,20 +156,22 @@ public:
         indexImpl_.emplace(index.getIntrusivePtr());
         version_ = versionCounter.current_version();
         inputSize_ = inputSize;
+        base_ = base;
     }
 
 private:
     std::optional<IndexImplWeakPtr> indexImpl_;
     uint32_t version_ = 0;
     int64_t inputSize_ = 0;
+    int64_t base_ = 0;
 };
 
-void CheckIndexBounds(const at::Tensor &index, int64_t inputSize)
+void CheckIndexBounds(const at::Tensor &index, int64_t inputSize, int64_t base)
 {
     // A weak, versioned single-entry cache avoids retaining device storage while
     // eliding repeated reductions for an unchanged index tensor on this thread.
     thread_local ValidatedIndexBoundsCache cache;
-    if (cache.Matches(index, inputSize)) {
+    if (cache.Matches(index, inputSize, base)) {
         return;
     }
     // The index tensor stays on NPU. Reading the scalar reduction results is
@@ -173,22 +179,24 @@ void CheckIndexBounds(const at::Tensor &index, int64_t inputSize)
     const auto indexRange = at::aminmax(index);
     const int64_t minIndex = std::get<0>(indexRange).item<int64_t>();
     const int64_t maxIndex = std::get<1>(indexRange).item<int64_t>();
-    TORCH_CHECK_INDEX(minIndex >= 0 && maxIndex < inputSize,
-        "index out of range in self; expected every index to be in [0, ", inputSize,
+    TORCH_CHECK_INDEX(minIndex >= base && maxIndex - base < inputSize,
+        "index out of range in self; expected every index to be in [", base, ", ", inputSize + base,
         "), but found range [", minIndex, ", ", maxIndex, "]");
-    cache.Store(index, inputSize);
+    cache.Store(index, inputSize, base);
 }
 
-at::Tensor IndexSelect(const at::Tensor &input, const at::Tensor &index)
+at::Tensor Gather(const at::Tensor &input, const at::Tensor &index, int64_t base)
 {
+    TORCH_CHECK(base == 0 || base == 1, "aclsparseGather base must be 0 or 1, but got ", base);
     CheckTensorContract(input, index);
+    const auto indexBase = base == 0 ? ACL_SPARSE_INDEX_BASE_ZERO : ACL_SPARSE_INDEX_BASE_ONE;
     return RunAclSparse(input, [&](AclSparseContext &context) {
         at::Tensor output = at::empty({index.numel()}, input.options());
         if (index.numel() == 0) {
             return output;
         }
 
-        CheckIndexBounds(index, input.numel());
+        CheckIndexBounds(index, input.numel(), base);
         const aclDataType valueType = ToAclDataType(input.scalar_type());
         ConstDnVecGuard dense(input.numel(), input.const_data_ptr(), valueType);
         // Record the shared storage before any launch, including exceptional multi-launch paths.
@@ -196,7 +204,7 @@ at::Tensor IndexSelect(const at::Tensor &input, const at::Tensor &index)
         // Submit queued torch_npu work before directly launching on the same current stream.
         (void)c10_npu::getCurrentNPUStream(input.device().index()).stream(true);
         if (index.numel() <= input.numel()) {
-            GatherSlice(context, dense.get(), input.numel(), index, output, valueType);
+            GatherSlice(context, dense.get(), input.numel(), index, output, valueType, indexBase);
         } else {
             // index_select allows repeated indices and an output longer than the input.
             // Keep the shared SpVec contract (nnz <= size) using zero-copy tensor views.
@@ -204,7 +212,7 @@ at::Tensor IndexSelect(const at::Tensor &input, const at::Tensor &index)
                 const int64_t count = std::min(input.numel(), index.numel() - offset);
                 const at::Tensor indexSlice = index.narrow(0, offset, count);
                 at::Tensor outputSlice = output.narrow(0, offset, count);
-                GatherSlice(context, dense.get(), input.numel(), indexSlice, outputSlice, valueType);
+                GatherSlice(context, dense.get(), input.numel(), indexSlice, outputSlice, valueType, indexBase);
                 offset += count;
             }
         }
@@ -212,9 +220,15 @@ at::Tensor IndexSelect(const at::Tensor &input, const at::Tensor &index)
     });
 }
 
+at::Tensor IndexSelect(const at::Tensor &input, const at::Tensor &index)
+{
+    return Gather(input, index, 0);
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module)
 {
+    module.def("gather", &Gather, "NPU Gather with zero-based or one-based indices");
     module.def("index_select", &IndexSelect, "One-dimensional NPU index_select backed by aclsparseGather");
 }

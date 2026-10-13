@@ -572,6 +572,12 @@ static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
         (descr->nnz > 0 && (indices == nullptr || values == nullptr))) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    // Analysis already wrote these offsets. A new offsets allocation requires
+    // re-analysis; freshly allocated output indices/values do not.
+    if (descr->ptrs != offsets) {
+        descr->activeDenseToSparseBuffer = nullptr;
+        descr->denseToSparseAnalysisReady = false;
+    }
     descr->ptrs = offsets;
     descr->idxs = indices;
     descr->values = values;
@@ -599,6 +605,8 @@ aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
     descr->ptrStride = rowOffsetsStride;
     descr->idxStride = colIndStride;
     descr->valueStride = valuesStride;
+    descr->activeDenseToSparseBuffer = nullptr;
+    descr->denseToSparseAnalysisReady = false;
     descr->activeBuffer = nullptr;
     descr->activeSpmvBuffer = nullptr;
     return ACL_SPARSE_STATUS_SUCCESS;

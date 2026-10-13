@@ -13,8 +13,13 @@
 import importlib
 import os
 
+from .matmul.dispatch import MatmulRegistry
+from .matmul.registration import TORCH_NPU_SPARSE_FACADE_APIS as _MATMUL_FACADE_APIS
+from .matmul.registration import register_aten
 
 TORCH_NPU_SPARSE_FACADE_APIS = {}
+MATMUL_REGISTRY = MatmulRegistry()
+_has_matmul_capabilities = False
 
 
 def _collect_facade_apis(operator_module):
@@ -43,6 +48,16 @@ for _category in sorted(os.listdir(os.path.dirname(__file__))):
             continue
         _operator_module = importlib.import_module("{}.{}.{}".format(__name__, _category, _op_name))
         _collect_facade_apis(_operator_module)
+        for _capability in getattr(_operator_module, "MATMUL_CAPABILITIES", ()):
+            MATMUL_REGISTRY.register(_capability)
+            _has_matmul_capabilities = True
+
+if _has_matmul_capabilities:
+    for _name, _function in _MATMUL_FACADE_APIS.items():
+        if _name in TORCH_NPU_SPARSE_FACADE_APIS:
+            raise RuntimeError("matrix fa\u00e7ade APIs must be declared by the shared framework")
+        TORCH_NPU_SPARSE_FACADE_APIS[_name] = _function
+    _MATMUL_LIBRARY = register_aten(MATMUL_REGISTRY)
 
 try:
     del _category, _category_path, _op_name, _op_path, _operator_module

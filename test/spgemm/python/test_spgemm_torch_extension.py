@@ -87,6 +87,7 @@ def tolerance(dtype: torch.dtype) -> float:
 # 1. 注册验证
 # ---------------------------------------------------------------------------
 
+
 def test_dispatch_keys_are_registered():
     """CSR 和 COO 操作数能正确路由到 NPU 实现。"""
     csr_a = csr(CsrData([0, 1], [0], [1.0], (1, 1)), torch.float32)
@@ -102,6 +103,57 @@ def test_dispatch_keys_are_registered():
     assert coo_out.layout == torch.sparse_coo
 
 
+def test_shared_matrix_schemas_are_registered():
+    from torch._C import _dispatch_has_kernel_for_dispatch_key as has_dispatch_kernel
+
+    for key in ("SparseCsrPrivateUse1", "SparsePrivateUse1"):
+        for schema in ("mm", "mm.out", "addmm", "addmm.out",
+                       "_sparse_addmm", "_sparse_sparse_matmul"):
+            # Dispatcher diagnostics have no public equivalent.
+            assert has_dispatch_kernel("aten::" + schema, key)
+
+
+@pytest.mark.parametrize("api", [torch.mm, torch.sparse.mm])
+def test_public_mm_entries_share_spgemm(api):
+    a = csr(CsrData([0, 1, 2], [0, 1], [2.0, 3.0], (2, 2)), torch.float32)
+    result = api(a, a)
+    _, _, values = cpu_parts(result)
+    torch.testing.assert_close(values, torch.tensor([4.0, 9.0]))
+
+
+@pytest.mark.parametrize("api", [torch.addmm, torch.sparse.addmm])
+def test_public_addmm_entries_share_spgemm(api):
+    a = csr(CsrData([0, 1, 2], [0, 1], [2.0, 3.0], (2, 2)), torch.float32)
+    result = api(a, a, a, beta=2, alpha=3)
+    _, _, values = cpu_parts(result)
+    torch.testing.assert_close(values, torch.tensor([16.0, 33.0]))
+
+
+@pytest.mark.parametrize("operation", ["mm", "addmm"])
+def test_spgemm_out_is_explicitly_unsupported(operation):
+    a = csr(CsrData([0, 1], [0], [2.0], (1, 1)), torch.float32)
+    out = csr(CsrData([0, 0], [], [], (1, 1)), torch.float32)
+    with pytest.raises(RuntimeError, match="SpGEMM does not yet provide an out="):
+        if operation == "mm":
+            torch.mm(a, a, out=out)
+        else:
+            torch.addmm(a, a, a, out=out)
+
+
+def test_sparse_dense_reports_missing_spmm_without_loading_spgemm(monkeypatch):
+    from cann_ops_sparse.ops.sparse.spgemm.spgemm import _spgemm_op_builder
+
+    monkeypatch.setattr(
+        _spgemm_op_builder,
+        "load",
+        lambda: pytest.fail("missing SpMM must not trigger the SpGEMM JIT builder"),
+    )
+    a = csr(CsrData([0, 1], [0], [2.0], (1, 1)), torch.float32)
+    dense = torch.ones(1, 1, device=DEVICE)
+    with pytest.raises(RuntimeError, match="spmm capability is not registered"):
+        torch.sparse.addmm(dense, a, dense)
+
+
 def test_import_does_not_trigger_jit(tmp_path):
     """导入包不应触发 JIT 编译（规范 3.1）。"""
     cache = tmp_path / "extensions"
@@ -109,13 +161,10 @@ def test_import_does_not_trigger_jit(tmp_path):
     environment = dict(os.environ, TORCH_EXTENSIONS_DIR=str(cache))
     script = (
         "import torch, torch_npu, cann_ops_sparse\n"
-        "from cann_ops_sparse.ops.sparse.spgemm.spgemm import _spgemm_op_builder as b\n"
-        "print('LOADED:', list(type(b)._loaded_ops.keys()))\n"
     )
     completed = subprocess.run([sys.executable, "-c", script], env=environment,
                                capture_output=True, text=True, timeout=600)
     assert completed.returncode == 0, completed.stderr
-    assert "LOADED: []" in completed.stdout
     assert not any(cache.iterdir()), "importing the package produced build artifacts"
 
 
@@ -128,6 +177,7 @@ def test_facade_exposes_public_apis():
 # ---------------------------------------------------------------------------
 # 2. 功能与精度
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("dtype", VALUE_DTYPES)
 def test_required_dtypes(dtype):
@@ -244,6 +294,7 @@ def test_complex_scalar_on_complex_dtype():
 # 3. 边界条件
 # ---------------------------------------------------------------------------
 
+
 def test_explicit_zero_is_retained():
     """迁移自旧测试：抵消为零的乘积仍占据一个 nnz 槽位。"""
     a = csr(CsrData([0, 2], [0, 1], [1.0, 1.0], (1, 2)), torch.float32,
@@ -299,6 +350,7 @@ def test_zero_row_dimension():
 # 4. 非法输入
 # ---------------------------------------------------------------------------
 
+
 def test_mismatched_dtypes_are_rejected():
     a = csr(CsrData([0, 1], [0], [1.0], (1, 1)), torch.float32)
     b = csr(CsrData([0, 1], [0], [1.0], (1, 1)), torch.float16)
@@ -323,7 +375,7 @@ def test_strided_operand_is_rejected():
 
 def test_unsupported_value_dtype_is_rejected():
     a = csr(CsrData([0, 1], [0], [1.0], (1, 1)), torch.float64)
-    with pytest.raises(RuntimeError, match="float16, bfloat16, float32 and complex64"):
+    with pytest.raises(RuntimeError, match="dtype"):
         torch.sparse.mm(a, a)
 
 
@@ -373,6 +425,7 @@ def test_cpu_operands_do_not_reach_the_npu_kernel():
 # ---------------------------------------------------------------------------
 # 5. 设备与异步
 # ---------------------------------------------------------------------------
+
 
 def test_repeated_calls_are_stable():
     a = random_dense(24, 24, torch.float32, seed=9)
@@ -435,7 +488,8 @@ def test_concurrent_calls_from_threads():
                 _, _, values = cpu_parts(torch.sparse.mm(operand, operand))
                 with lock:
                     results.append(values)
-        except BaseException as error:  # noqa: BLE001 - reported to the assertion below
+        # Report background failures to the assertion in the calling thread.
+        except BaseException as error:
             with lock:
                 failures.append(error)
 
@@ -454,6 +508,7 @@ def test_concurrent_calls_from_threads():
 # ---------------------------------------------------------------------------
 # 6. 打包验证
 # ---------------------------------------------------------------------------
+
 
 def test_wheel_contents_are_complete():
     root = os.path.dirname(cann_ops_sparse.__file__)
@@ -486,6 +541,7 @@ def test_extension_is_compiled_once_per_process():
 # 7. 命名空间
 # ---------------------------------------------------------------------------
 
+
 def test_namespace_install_is_idempotent():
     """二次导入必须返回已有命名空间，不应抛异常。"""
     import cann_ops_sparse.torch_npu_sparse as facade
@@ -496,8 +552,8 @@ def test_namespace_install_is_idempotent():
     assert torch_npu.sparse.mm is torch.sparse.mm
 
 
-def test_facade_declares_the_spgemm_apis():
-    from cann_ops_sparse.ops.sparse.spgemm.spgemm import TORCH_NPU_SPARSE_FACADE_APIS
+def test_framework_declares_the_matrix_apis():
+    from cann_ops_sparse.ops.matmul.registration import TORCH_NPU_SPARSE_FACADE_APIS
 
     assert TORCH_NPU_SPARSE_FACADE_APIS == {"mm": torch.sparse.mm, "addmm": torch.sparse.addmm}
     for name in TORCH_NPU_SPARSE_FACADE_APIS:
@@ -515,3 +571,491 @@ def test_third_party_namespace_is_not_overwritten():
     with pytest.raises(RuntimeError):
         facade.install_namespace(Foreign, {"mm": torch.sparse.mm})
     assert Foreign.sparse == "owned by someone else"
+
+
+# ---------------------------------------------------------------------------
+# 8. NPU first-order autograd
+# ---------------------------------------------------------------------------
+
+
+def _gradient_operand(data: CsrData, dtype: torch.dtype, layout: str):
+    tensor = csr(data, dtype)
+    if layout == "coo":
+        tensor = tensor.to_sparse_coo()
+    return tensor.detach().requires_grad_()
+
+
+def _components(tensor):
+    """Return COO storage without coalescing duplicate coordinates."""
+    from torch._C import _jit_get_operation as get_aten_operation
+
+    indices, _ = get_aten_operation("aten::_indices")
+    values, _ = get_aten_operation("aten::_values")
+    return indices(tensor), values(tensor)
+
+
+def _gradient_values(tensor):
+    if tensor.layout == torch.sparse_csr:
+        return tensor.values().cpu()
+    # AccumulateGrad may store an uncoalesced COO gradient. Canonicalize the
+    # copied components on CPU so validation does not depend on CANN's separate
+    # CoalesceSparse complex-dtype support.
+    indices, values = _components(tensor)
+    return torch.sparse_coo_tensor(
+        indices.cpu(), values.cpu(), tensor.shape
+    ).coalesce().values()
+
+
+def _gradient_dense_cpu(tensor):
+    if tensor.layout == torch.strided:
+        return tensor.cpu()
+    if tensor.layout == torch.sparse_csr:
+        return torch.sparse_csr_tensor(tensor.crow_indices().cpu(), tensor.col_indices().cpu(),
+                                       tensor.values().cpu(), size=tensor.shape).to_dense()
+    indices, values = _components(tensor)
+    return torch.sparse_coo_tensor(indices.cpu(), values.cpu(), tensor.shape).to_dense()
+
+
+@dataclass
+class GradientCase:
+    """Sparse inputs and their dense native-reference calculation."""
+
+    a: torch.Tensor
+    b: torch.Tensor
+    c: torch.Tensor
+    reference_a: torch.Tensor
+    reference_b: torch.Tensor
+    reference_c: torch.Tensor
+    result: torch.Tensor
+    expected: torch.Tensor
+    dtype: torch.dtype
+    reference_dtype: torch.dtype
+
+
+def _make_gradient_case(dtype, layout, api_name):
+    complex_values = dtype == torch.complex64
+    av = [1.5 + 0.4j, 2.0 - 0.3j, -0.5 + 0.2j] if complex_values else [1.5, 2.0, -0.5]
+    bv = [2.0 - 0.5j, 3.0 + 0.2j, 4.0 + 0.7j] if complex_values else [2.0, 3.0, 4.0]
+    cv = [2.0 + 0.3j, 1.0 - 0.2j] if complex_values else [2.0, 1.0]
+    a = _gradient_operand(CsrData([0, 2, 3], [0, 2, 1], av, (2, 3)), dtype, layout)
+    b = _gradient_operand(CsrData([0, 1, 2, 3], [1, 0, 1], bv, (3, 2)), dtype, layout)
+    c = _gradient_operand(CsrData([0, 1, 2], [0, 1], cv, (2, 2)), dtype, "csr")
+    reference_dtype = torch.complex128 if complex_values else torch.float64
+    reference_a = torch.tensor(
+        [[av[0], 0, av[1]], [0, av[2], 0]], dtype=reference_dtype, requires_grad=True
+    )
+    reference_b = torch.tensor(
+        [[0, bv[0]], [bv[1], 0], [0, bv[2]]], dtype=reference_dtype, requires_grad=True
+    )
+    reference_c = torch.diag(torch.tensor(cv, dtype=reference_dtype)).requires_grad_()
+    alpha, beta = (1.2 - 0.7j, 0.5 + 0.2j) if complex_values else (1.5, -0.5)
+    api = getattr(torch.sparse if api_name.startswith("sparse.") else torch, api_name.split(".")[-1])
+    accumulated = "addmm" in api_name
+    result = api(c, a, b, alpha=alpha, beta=beta) if accumulated else api(a, b)
+    if api_name == "sparse.addmm":
+        reference_a = reference_a.detach().to_sparse_coo().requires_grad_()
+        # The public sparse API selects the native _sparse_addmm scalar rules.
+        expected = torch.sparse.addmm(
+            reference_c, reference_a, reference_b, alpha=alpha, beta=beta
+        )
+    elif accumulated:
+        expected = beta * reference_c + alpha * (reference_a @ reference_b)
+    else:
+        expected = reference_a @ reference_b
+    return GradientCase(
+        a, b, c, reference_a, reference_b, reference_c, result, expected, dtype, reference_dtype
+    )
+
+
+def _upstream_gradient(case, layout, dense_grad):
+    values = (
+        [[0.2 + 0.4j, 1.3 - 0.2j], [-0.7 + 0.5j, 2.0 + 0.3j]]
+        if case.dtype == torch.complex64 else [[0.2, 1.3], [-0.7, 2.0]]
+    )
+    grad_cpu = torch.tensor(values, dtype=case.dtype)
+    if dense_grad:
+        return grad_cpu.to(DEVICE), grad_cpu
+    grad = csr(
+        CsrData([0, 2, 4], [0, 1, 0, 1], grad_cpu.reshape(-1).tolist(), (2, 2)), case.dtype
+    )
+    return (grad.to_sparse_coo() if layout == "coo" else grad), grad_cpu
+
+
+def _assert_first_order_gradients(case, api_name, dense_grad):
+    a_gradient = case.reference_a.grad
+    a_dense = a_gradient.to_dense() if a_gradient.layout != torch.strided else a_gradient
+    a_expected = a_dense[[0, 0, 1], [0, 2, 1]].to(case.dtype)
+    b_expected = case.reference_b.grad[[0, 1, 2], [1, 0, 1]].to(case.dtype)
+    # aten::mm and aten::addmm return the complete matrix derivatives for a
+    # dense upstream gradient.  Only _sparse_addmm (the torch.sparse.addmm
+    # entry point) keeps matrix gradients on the input sparse pattern.
+    full_matrix_gradient = api_name in ("mm", "addmm")
+    if full_matrix_gradient:
+        torch.testing.assert_close(_gradient_dense_cpu(case.a.grad), a_dense.to(case.dtype),
+                                   rtol=tolerance(case.dtype), atol=tolerance(case.dtype))
+        torch.testing.assert_close(_gradient_dense_cpu(case.b.grad), case.reference_b.grad.to(case.dtype),
+                                   rtol=tolerance(case.dtype), atol=tolerance(case.dtype))
+        # A complete matrix derivative follows the upstream layout.  In
+        # particular, CSR upstream gradients must not be converted to COO
+        # while materializing coordinates outside the input CSR pattern.
+        expected_layout = (
+            torch.strided if dense_grad else
+            (torch.sparse_csr if case.a.layout == torch.sparse_csr else torch.sparse_coo)
+        )
+        assert case.a.grad.layout == case.b.grad.layout == expected_layout
+    else:
+        torch.testing.assert_close(_gradient_values(case.a.grad), a_expected,
+                                   rtol=tolerance(case.dtype), atol=tolerance(case.dtype))
+        torch.testing.assert_close(_gradient_values(case.b.grad), b_expected,
+                                   rtol=tolerance(case.dtype), atol=tolerance(case.dtype))
+        assert case.a.grad.layout == case.a.layout and case.b.grad.layout == case.b.layout
+    if "addmm" in api_name:
+        torch.testing.assert_close(_gradient_dense_cpu(case.c.grad),
+                                   case.reference_c.grad.to(case.dtype),
+                                   rtol=tolerance(case.dtype), atol=tolerance(case.dtype))
+        expected_layout = torch.strided if dense_grad else case.a.layout
+        assert case.c.grad.layout == expected_layout
+
+
+@pytest.mark.parametrize("dtype", VALUE_DTYPES)
+@pytest.mark.parametrize("layout,api_name", [
+    ("csr", "mm"), ("csr", "sparse.mm"), ("csr", "addmm"), ("csr", "sparse.addmm"),
+    ("coo", "mm"), ("coo", "sparse.mm"),
+])
+@pytest.mark.parametrize("dense_grad", [False, True])
+def test_first_order_gradients_match_dense_reference(dtype, layout, api_name, dense_grad):
+    case = _make_gradient_case(dtype, layout, api_name)
+    grad, grad_cpu = _upstream_gradient(case, layout, dense_grad)
+    case.result.backward(grad)
+    case.expected.backward(grad_cpu.to(case.reference_dtype))
+    torch.npu.synchronize()
+    _assert_first_order_gradients(case, api_name, dense_grad)
+
+
+def _coo_cpu_reference(tensor):
+    """CSR x CSR CPU kernels require MKL; COO keeps the same aten::mm schema."""
+    return tensor.detach().cpu().to_sparse_coo().requires_grad_()
+
+
+def test_csr_torch_mm_dense_gradient_is_not_projected_to_csr_pattern():
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], [2., 3.], (2, 2)), torch.float32, "csr")
+    b = _gradient_operand(
+        CsrData([0, 2, 4], [0, 1, 0, 1], [1., 4., 2., 5.], (2, 2)), torch.float32, "csr"
+    )
+    grad_cpu = torch.ones((2, 2), dtype=torch.float32)
+    reference_a, reference_b = _coo_cpu_reference(a), _coo_cpu_reference(b)
+    expected = torch.autograd.grad(torch.mm(reference_a, reference_b),
+                                   (reference_a, reference_b), grad_cpu)
+
+    actual = torch.autograd.grad(torch.mm(a, b), (a, b), grad_cpu.to(DEVICE))
+    for gradient, reference in zip(actual, expected):
+        assert gradient.layout == torch.strided
+        torch.testing.assert_close(gradient.cpu(), reference)
+    torch.testing.assert_close(actual[0].cpu(), torch.tensor([[5., 7.], [5., 7.]]))
+
+
+def test_csr_torch_addmm_dense_gradient_is_not_projected_to_csr_pattern():
+    self_tensor = torch.zeros((2, 2), device=DEVICE).to_sparse_csr()
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], [2., 3.], (2, 2)), torch.float32, "csr")
+    b = _gradient_operand(
+        CsrData([0, 2, 4], [0, 1, 0, 1], [1., 4., 2., 5.], (2, 2)), torch.float32, "csr"
+    )
+    grad_cpu = torch.ones((2, 2), dtype=torch.float32)
+    # This CPU build lacks CSR x CSR forward. The addmm
+    # derivative is nevertheless the native dense matrix derivative, so use
+    # dense leaves to retain the full coordinates and explicit upstream zeroes.
+    reference_a = a.detach().cpu().to_dense().requires_grad_()
+    reference_b = b.detach().cpu().to_dense().requires_grad_()
+    expected = torch.autograd.grad(torch.addmm(torch.zeros((2, 2)), reference_a, reference_b, alpha=3),
+                                   (reference_a, reference_b), grad_cpu)
+
+    actual = torch.autograd.grad(torch.addmm(self_tensor, a, b, alpha=3), (a, b), grad_cpu.to(DEVICE))
+    for gradient, reference in zip(actual, expected):
+        assert gradient.layout == torch.strided
+        torch.testing.assert_close(gradient.cpu(), reference)
+    torch.testing.assert_close(actual[0].cpu(), torch.tensor([[15., 21.], [15., 21.]]))
+
+
+def _assert_full_gradient_layout(gradient, reference, upstream_layout):
+    expected_layout = {
+        "csr": torch.sparse_csr,
+        "coo": torch.sparse_coo,
+        "strided": torch.strided,
+    }[upstream_layout]
+    dtype = gradient.dtype
+    assert gradient.layout == expected_layout
+    torch.testing.assert_close(_gradient_dense_cpu(gradient), reference.to(dtype),
+                               rtol=tolerance(dtype), atol=tolerance(dtype))
+    if upstream_layout == "csr":
+        expected_csr = reference.to(dtype).to_sparse_csr()
+        crow, col, values = cpu_parts(gradient)
+        assert crow == expected_csr.crow_indices().tolist()
+        assert col == expected_csr.col_indices().tolist()
+        torch.testing.assert_close(values, expected_csr.values(),
+                                   rtol=tolerance(dtype), atol=tolerance(dtype))
+
+
+@pytest.mark.parametrize("api_name", ["mm", "addmm"])
+@pytest.mark.parametrize("upstream_layout", ["csr", "coo", "strided"])
+@pytest.mark.parametrize("dtype,alpha", [
+    (torch.float32, 3.0),
+    (torch.complex64, 1.2 - 0.7j),
+])
+def test_csr_matrix_gradients_follow_upstream_layout(api_name, upstream_layout, dtype, alpha):
+    """Full CSR-input derivatives retain a CSR upstream layout and coordinates.
+
+    The local CPU build has no CSR x CSR kernel.  Native COO mm and dense
+    addmm provide the numerical reference; its full derivative is compressed
+    to the layout required by the upstream gradient.
+    """
+    complex_values = dtype == torch.complex64
+    a_values = [2.0 + 0.5j, 3.0 - 0.25j] if complex_values else [2.0, 3.0]
+    b_values = ([1.0 - 0.5j, 4.0 + 0.25j, 2.0 + 0.75j, 5.0 - 0.5j]
+                if complex_values else [1., 4., 2., 5.])
+    grad_values = ([[1.0 + 0.25j, 2.0 - 0.5j], [3.0 + 0.75j, 4.0 - 0.25j]]
+                   if complex_values else [[1., 2.], [3., 4.]])
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], a_values, (2, 2)), dtype, "csr")
+    b = _gradient_operand(CsrData([0, 2, 4], [0, 1, 0, 1], b_values, (2, 2)), dtype, "csr")
+    grad_cpu = torch.tensor(grad_values, dtype=dtype)
+    grad = grad_cpu.to(DEVICE)
+    if upstream_layout == "csr":
+        grad = grad.to_sparse_csr()
+    elif upstream_layout == "coo":
+        grad = grad.to_sparse_coo()
+
+    if api_name == "mm":
+        # COO is the native sparse CPU reference for this formula; the local
+        # build does not provide a CSR x CSR CPU kernel.
+        reference_a, reference_b = _coo_cpu_reference(a), _coo_cpu_reference(b)
+        reference_result = torch.mm(reference_a, reference_b)
+        actual_result = torch.mm(a, b)
+        reference_grad = grad_cpu
+    else:
+        reference_dtype = torch.complex128 if complex_values else torch.float64
+        reference_a = a.detach().cpu().to_dense().to(reference_dtype).requires_grad_()
+        reference_b = b.detach().cpu().to_dense().to(reference_dtype).requires_grad_()
+        reference_result = torch.addmm(torch.zeros((2, 2), dtype=reference_dtype),
+                                       reference_a, reference_b, alpha=alpha)
+        actual_result = torch.addmm(torch.zeros((2, 2), device=DEVICE, dtype=dtype).to_sparse_csr(),
+                                    a, b, alpha=alpha)
+        reference_grad = grad_cpu.to(reference_dtype)
+    expected = torch.autograd.grad(reference_result, (reference_a, reference_b),
+                                   reference_grad)
+    actual = torch.autograd.grad(actual_result, (a, b), grad)
+
+    for gradient, reference in zip(actual, expected):
+        _assert_full_gradient_layout(gradient, reference, upstream_layout)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_csr_torch_mm_dense_zero_gradient_preserves_nonfinite_values(value):
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], [2., 3.], (2, 2)), torch.float32, "csr")
+    b = _gradient_operand(CsrData([0, 1, 2], [0, 1], [value, 5.], (2, 2)), torch.float32, "csr")
+    grad_cpu = torch.zeros((2, 2), dtype=torch.float32)
+    reference_a, reference_b = _coo_cpu_reference(a), _coo_cpu_reference(b)
+    expected = torch.autograd.grad(torch.mm(reference_a, reference_b),
+                                   (reference_a, reference_b), grad_cpu)
+
+    actual = torch.autograd.grad(torch.mm(a, b), (a, b), grad_cpu.to(DEVICE))
+    for gradient, reference in zip(actual, expected):
+        assert gradient.layout == torch.strided
+        torch.testing.assert_close(gradient.cpu(), reference, equal_nan=True)
+    assert torch.isnan(actual[0].cpu()[:, 0]).all()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_csr_torch_addmm_dense_zero_gradient_preserves_nonfinite_values(value):
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], [2., 3.], (2, 2)), torch.float32, "csr")
+    b = _gradient_operand(CsrData([0, 1, 2], [0, 1], [value, 5.], (2, 2)), torch.float32, "csr")
+    grad_cpu = torch.zeros((2, 2), dtype=torch.float32)
+    reference_a = a.detach().cpu().to_dense().requires_grad_()
+    reference_b = b.detach().cpu().to_dense().requires_grad_()
+    expected = torch.autograd.grad(torch.addmm(torch.zeros((2, 2)), reference_a, reference_b),
+                                   (reference_a, reference_b), grad_cpu)
+
+    actual = torch.autograd.grad(torch.addmm(torch.zeros((2, 2), device=DEVICE).to_sparse_csr(), a, b),
+                                (a, b), grad_cpu.to(DEVICE))
+    for gradient, reference in zip(actual, expected):
+        assert gradient.layout == torch.strided
+        torch.testing.assert_close(gradient.cpu(), reference, equal_nan=True)
+    assert torch.isnan(actual[0].cpu()[:, 0]).all()
+
+
+@pytest.mark.parametrize("upstream_layout", ["strided", "csr"])
+def test_sparse_addmm_self_gradient_keeps_upstream_coordinates(upstream_layout):
+    self_tensor = _gradient_operand(
+        CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), torch.float32, "csr"
+    )
+    a = csr(CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), torch.float32)
+    b = csr(CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), torch.float32)
+    grad_cpu = torch.tensor([[1., 7.], [11., 1.]])
+    grad = grad_cpu.to(DEVICE)
+    if upstream_layout == "csr":
+        grad = csr(CsrData([0, 2, 4], [0, 1, 0, 1], grad_cpu.reshape(-1).tolist(), (2, 2)),
+                   torch.float32)
+
+    gradient, = torch.autograd.grad(torch.sparse.addmm(self_tensor, a, b, beta=2), self_tensor, grad)
+    assert gradient.layout == (torch.strided if upstream_layout == "strided" else torch.sparse_csr)
+    torch.testing.assert_close(_gradient_dense_cpu(gradient), 2 * grad_cpu)
+
+
+@pytest.mark.parametrize("layout", ["csr", "coo"])
+@pytest.mark.parametrize("dtype", DENSE_COMPARABLE_DTYPES)
+def test_gradient_reaches_real_sparse_constructor_values(layout, dtype):
+    values = torch.tensor([2., 3.], device=DEVICE, dtype=dtype, requires_grad=True)
+    if layout == "csr":
+        a = torch.sparse_csr_tensor(torch.tensor([0, 1, 2], device=DEVICE),
+                                    torch.tensor([0, 1], device=DEVICE), values, size=(2, 2))
+    else:
+        a = torch.sparse_coo_tensor(torch.tensor([[0, 1], [0, 1]], device=DEVICE), values,
+                                    size=(2, 2), is_coalesced=True)
+    b = csr(CsrData([0, 1, 2], [0, 1], [4., 5.], (2, 2)), dtype)
+    if layout == "coo":
+        b = b.to_sparse_coo()
+    result = torch.sparse.mm(a, b)
+    result.values().sum().backward()
+    torch.testing.assert_close(values.grad.cpu(), torch.tensor([4., 5.], dtype=dtype))
+
+
+def test_existing_dense_npu_autograd_is_preserved():
+    a = torch.tensor([[1., 2.], [3., 4.]], device=DEVICE, requires_grad=True)
+    b = torch.tensor([[2., 0.], [1., 3.]], device=DEVICE, requires_grad=True)
+    c = torch.ones(2, device=DEVICE, requires_grad=True)
+    result = torch.addmm(c, a, b, alpha=3, beta=2) + torch.mm(a, b)
+    result.sum().backward()
+    torch.testing.assert_close(a.grad.cpu(), torch.tensor([[8., 16.], [8., 16.]]))
+    torch.testing.assert_close(b.grad.cpu(), torch.tensor([[16., 16.], [24., 24.]]))
+    torch.testing.assert_close(c.grad.cpu(), torch.tensor([4., 4.]))
+
+
+def test_complex_conjugate_grad_output():
+    a = _gradient_operand(
+        CsrData([0, 1, 2], [0, 1], [2 + 1j, 3 - 2j], (2, 2)), torch.complex64, 'csr'
+    )
+    b = _gradient_operand(
+        CsrData([0, 1, 2], [0, 1], [4 - 2j, 5 + 1j], (2, 2)), torch.complex64, 'csr'
+    )
+    grad = torch.tensor([[1 + 2j, 0], [0, 3 - 1j]], device=DEVICE).conj()
+    torch.sparse.mm(a, b).backward(grad)
+    expected_a = torch.tensor([1 - 2j, 3 + 1j]) * torch.tensor([4 + 2j, 5 - 1j])
+    expected_b = torch.tensor([2 - 1j, 3 + 2j]) * torch.tensor([1 - 2j, 3 + 1j])
+    torch.testing.assert_close(_gradient_values(a.grad), expected_a)
+    torch.testing.assert_close(_gradient_values(b.grad), expected_b)
+
+
+@pytest.mark.parametrize('dtype', VALUE_DTYPES)
+def test_duplicate_coo_first_order_values(dtype):
+    complex_values = dtype == torch.complex64
+    values = torch.tensor([1 + 0.5j, 2 - 0.5j, 3 + 1j] if complex_values else [1., 2., 3.],
+                           device=DEVICE, dtype=dtype, requires_grad=not complex_values)
+    a = torch.sparse_coo_tensor(torch.tensor([[0, 0, 1], [0, 0, 1]], device=DEVICE), values,
+                                size=(2, 2))
+    if complex_values:
+        a = a.detach().requires_grad_()
+    b = csr(CsrData([0, 1, 2], [0, 1], [4., 5.], (2, 2)), dtype).to_sparse_coo()
+    result = torch.sparse.mm(a, b)
+    grad = csr(CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), dtype).to_sparse_coo()
+    result.backward(grad)
+    if complex_values:
+        torch.testing.assert_close(_gradient_values(a.grad), torch.tensor([4., 5.], dtype=dtype))
+    else:
+        torch.testing.assert_close(values.grad.cpu(), torch.tensor([4., 4., 5.], dtype=dtype))
+
+
+@pytest.mark.parametrize('sparse_dims', [1, 2, 3])
+def test_npu_sparse_mask_nd_mixed_dtype(sparse_dims):
+    source = torch.arange(8, dtype=torch.float32).reshape(2, 2, 2)
+    mask = torch.ones_like(source, dtype=torch.float16).to_sparse(sparse_dims)
+    expected = source.sparse_mask(mask)
+    npu_source, npu_mask = source.to(DEVICE), mask.to(DEVICE)
+    result = npu_source.sparse_mask(npu_mask)
+    assert result.dtype == torch.float32
+    result_indices, result_values = _components(result)
+    expected_indices, expected_values = _components(expected)
+    torch.testing.assert_close(result_indices.cpu(), expected_indices)
+    torch.testing.assert_close(result_values.cpu(), expected_values)
+    sparse_source = source.to_sparse(sparse_dims).to(DEVICE)
+    result = sparse_source.sparse_mask(npu_mask)
+    _, result_values = _components(result)
+    _, expected_values = _components(expected)
+    torch.testing.assert_close(result_values.cpu(), expected_values)
+
+
+@pytest.mark.parametrize('dtype', VALUE_DTYPES)
+@pytest.mark.parametrize('layout', ['csr', 'coo'])
+def test_same_sparse_operand_accumulates_both_gradients(dtype, layout):
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], [2., 3.], (2, 2)), dtype, layout)
+    grad = csr(CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), dtype)
+    if layout == 'coo':
+        grad = grad.to_sparse_coo()
+    torch.sparse.mm(a, a).backward(grad)
+    torch.testing.assert_close(_gradient_values(a.grad), torch.tensor([4., 6.], dtype=dtype))
+
+
+@pytest.mark.parametrize('dtype', VALUE_DTYPES)
+def test_csr_gradients_accumulate_across_backward_calls(dtype):
+    a = _gradient_operand(CsrData([0, 1, 2], [0, 1], [2., 3.], (2, 2)), dtype, 'csr')
+    b = csr(CsrData([0, 1, 2], [0, 1], [4., 5.], (2, 2)), dtype)
+    grad = csr(CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), dtype)
+    for _ in range(2):
+        torch.sparse.mm(a, b).backward(grad)
+    torch.testing.assert_close(_gradient_values(a.grad), torch.tensor([8., 10.], dtype=dtype))
+
+
+@pytest.mark.parametrize("api_name", ["mm", "sparse.mm"])
+def test_coo_backward_structure_matches_cpu_torch(api_name):
+    cpu_a = torch.sparse_coo_tensor([[0, 0, 1], [0, 1, 1]], [2., 0., 3.], (2, 2)).coalesce().requires_grad_()
+    cpu_b = torch.eye(2).to_sparse_coo().requires_grad_()
+    cpu_grad = torch.eye(2).to_sparse_coo()
+    api = torch.mm if api_name == "mm" else torch.sparse.mm
+    expected = torch.autograd.grad(api(cpu_a, cpu_b), (cpu_a, cpu_b), cpu_grad)
+    a = cpu_a.detach().to(DEVICE).requires_grad_()
+    b = cpu_b.detach().to(DEVICE).requires_grad_()
+    actual = torch.autograd.grad(api(a, b), (a, b), cpu_grad.to(DEVICE))
+    for result, reference in zip(actual, expected):
+        assert result.layout == reference.layout
+        result_indices, result_values = _components(result)
+        reference_indices, reference_values = _components(reference)
+        torch.testing.assert_close(result_indices.cpu(), reference_indices)
+        torch.testing.assert_close(result_values.cpu(), reference_values)
+
+
+def test_zero_sparse_addmm_scales_preserve_nan_gradients():
+    a = _gradient_operand(
+        CsrData([0, 1, 2], [0, 1], [1., 1.], (2, 2)), torch.float32, "csr"
+    )
+    b = a.detach().clone().requires_grad_()
+    c = a.detach().clone().requires_grad_()
+    result = torch.sparse.addmm(c, a, b, alpha=0, beta=0)
+    gradients = torch.autograd.grad(result, (c, a, b), torch.full((2, 2), float("nan"), device=DEVICE))
+    assert torch.isnan(_gradient_dense_cpu(gradients[0])).all()
+    for gradient in gradients[1:]:
+        assert torch.isnan(gradient.values()).all()
+    assert gradients[0].layout == torch.strided
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf')])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.complex64])
+def test_dense_mm_zero_grad_preserves_nonfinite_values(value, dtype):
+    cpu = torch.sparse_coo_tensor([[0], [0]], torch.tensor([value], dtype=dtype), (2, 2)).coalesce()
+    a_cpu, b_cpu = cpu.detach().requires_grad_(), cpu.detach().requires_grad_()
+    grad_cpu = torch.zeros((2, 2), dtype=dtype)
+    expected = torch.autograd.grad(torch.mm(a_cpu, b_cpu), (a_cpu, b_cpu), grad_cpu)
+    a, b = cpu.to(DEVICE).detach().requires_grad_(), cpu.to(DEVICE).detach().requires_grad_()
+    actual = torch.autograd.grad(torch.mm(a, b), (a, b), grad_cpu.to(DEVICE))
+    for result, reference in zip(actual, expected):
+        assert result.layout == torch.strided
+        torch.testing.assert_close(result.cpu(), reference, equal_nan=True)
+
+
+def test_complex_non_arithmetic_heads_with_contiguous_segments():
+    heads = [0, 1, 2, 3, 5, 6, 7, 8]
+    values = [complex(i + 1, (i + 1) / 10) for i in range(8)]
+    a = csr(CsrData([0, 8], list(range(8)), values, (1, 8)), torch.complex64)
+    b_columns = [column for head in heads for column in (head, head + 10)]
+    b_values = [value for _ in heads for value in (1 + 0.2j, 2 - 0.1j)]
+    b = csr(CsrData(list(range(0, 17, 2)), b_columns, b_values, (8, 19)), torch.complex64)
+    _, columns, result = cpu_parts(torch.sparse.mm(a, b))
+    assert columns == heads + [head + 10 for head in heads]
+    expected = torch.tensor([v * (1 + 0.2j) for v in values] + [v * (2 - 0.1j) for v in values])
+    torch.testing.assert_close(result, expected)

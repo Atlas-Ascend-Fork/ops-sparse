@@ -11,9 +11,10 @@
 """Gather operator package.
 
 Importing this package registers the one-dimensional NPU implementation of
-``aten::index_select``. JIT compilation is deferred until the first NPU call.
+``aten::index_select`` and the base-aware ``ops_sparse::gather``. JIT compilation is deferred until the first NPU call.
 """
 
-__all__ = []
+__all__ = ["gather", "index_select_npu"]
 
 from .gather import TORCH_NPU_SPARSE_FACADE_APIS as TORCH_NPU_SPARSE_FACADE_APIS
+from .gather import gather as gather, index_select_npu as index_select_npu

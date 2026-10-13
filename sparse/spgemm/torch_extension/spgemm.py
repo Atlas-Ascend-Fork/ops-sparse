@@ -8,31 +8,21 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-"""SpGEMM（稀疏×稀疏）torch_npu 后端的 ATen 注册。
+"""Lazy SpGEMM implementation capabilities for the shared matrix router.
 
-稀疏-稀疏矩阵乘法涉及两个已有 ATen 算子：
-
-- ``aten::_sparse_addmm`` 为 CSR 操作数提供 ``torch.sparse.mm``/``torch.sparse.addmm``。
-  ``torch.sparse.mm(csr, csr)`` 以 ``beta=0, alpha=1`` 进入。
-- ``aten::_sparse_sparse_matmul`` 为 COO 操作数提供 ``torch.sparse.mm``，
-  同时也为 CSR 注册，因为两种布局都可能路由到此处。
-
-此处不定义 schema，仅注册 NPU 后端实现。
-``aten::_sparse_addmm`` 已有 CompositeExplicitAutograd 内核，无需添加 Meta 实现。
+The framework owns ATen registrations and the public sparse facade. This
+operator package only supplies its CSR/COO computation wrappers.
 """
 
 __all__ = []
 
-from typing import List, Union
+from typing import List
 
 import torch
-from torch.library import impl
 
 from ....op_builder.builder import OpBuilder
-
-# ATen schema 中 beta/alpha 类型为 Scalar，此处接受 complex
-# 是因为 complex64 是支持的 value dtype 之一。
-Scalar = Union[bool, int, float, complex]
+from ...matmul.dispatch import MatmulCapability
+from .spgemm_backward import as_coo, sparse_add_inplace, sparse_add_out, sparse_mask, spgemm_backward
 
 
 class SpGemmOpBuilder(OpBuilder):
@@ -48,28 +38,28 @@ class SpGemmOpBuilder(OpBuilder):
 _spgemm_op_builder = SpGemmOpBuilder()
 
 
-# ``load()`` 在每次分发时调用，而非导入时调用，
-# 这样导入包既不需要编译器也不会产生构建产物。
-# 以下每个签名严格对应其 ATen schema，包括 ``_sparse_addmm`` 的仅关键字参数 beta/alpha。
-@impl("aten::_sparse_addmm", "SparseCsrPrivateUse1")
-def _sparse_addmm_sparse_csr_privateuse1(self: torch.Tensor, mat1: torch.Tensor, mat2: torch.Tensor,
-                                         *, beta: Scalar = 1, alpha: Scalar = 1) -> torch.Tensor:
-    return _spgemm_op_builder.load().sparse_addmm(self, mat1, mat2, beta, alpha)
+def _execute_spgemm(request):
+    # Load only after shared routing has selected a supported sparse product.
+    if request.out is not None:
+        raise RuntimeError("SpGEMM does not yet provide an out= implementation")
+    extension = _spgemm_op_builder.load()
+    if request.operation == "addmm":
+        return extension.sparse_addmm(request.self, request.mat1, request.mat2,
+                                      request.beta, request.alpha)
+    if request.mat1.layout == torch.sparse_coo:
+        return extension.sparse_sparse_matmul_coo(as_coo(request.mat1), as_coo(request.mat2))
+    return extension.sparse_sparse_matmul_csr(request.mat1, request.mat2)
 
 
-@impl("aten::_sparse_sparse_matmul", "SparseCsrPrivateUse1")
-def _sparse_sparse_matmul_sparse_csr_privateuse1(mat1: torch.Tensor, mat2: torch.Tensor) -> torch.Tensor:
-    return _spgemm_op_builder.load().sparse_sparse_matmul_csr(mat1, mat2)
+def _backward_spgemm(request, grad_output):
+    return spgemm_backward(request, grad_output, _execute_spgemm)
 
 
-@impl("aten::_sparse_sparse_matmul", "SparsePrivateUse1")
-def _sparse_sparse_matmul_sparse_privateuse1(mat1: torch.Tensor, mat2: torch.Tensor) -> torch.Tensor:
-    return _spgemm_op_builder.load().sparse_sparse_matmul_coo(mat1, mat2)
-
-
-# façade 重新导出这些注册所服务的 PyTorch 公共 API，
-# 使 ``torch_npu.sparse.mm`` 仍经由 ATen dispatcher 路由。
-TORCH_NPU_SPARSE_FACADE_APIS = {
-    "mm": torch.sparse.mm,
-    "addmm": torch.sparse.addmm,
-}
+MATMUL_CAPABILITIES = (
+    MatmulCapability(owner="spgemm", route="spgemm", forward=_execute_spgemm,
+                     backward=_backward_spgemm,
+                     backward_helpers=(("sparse_mask", sparse_mask), ("add.out", sparse_add_out),
+                                       ("add_.Tensor", sparse_add_inplace)),
+                     dtypes=(torch.float16, torch.bfloat16, torch.float32, torch.complex64),
+                     device_types=("npu", "privateuseone")),
+)

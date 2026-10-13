@@ -70,6 +70,7 @@ def test_import_does_not_trigger_jit(tmp_path):
     script = (
         "import torch, torch_npu, cann_ops_sparse\n"
         "from cann_ops_sparse.ops.sparse.gather.gather import _gather_op_builder as b\n"
+        "print('HAS_CUSTOM_SCHEMA:', hasattr(torch.ops.ops_sparse, 'gather'))\n"
         "print('LOADED:', list(type(b)._loaded_ops.keys()))\n"
     )
     completed = subprocess.run(
@@ -77,8 +78,21 @@ def test_import_does_not_trigger_jit(tmp_path):
         timeout=600, check=False
     )
     assert completed.returncode == 0, completed.stderr
+    assert "HAS_CUSTOM_SCHEMA: True" in completed.stdout
     assert "LOADED: []" in completed.stdout
     assert not any(cache.iterdir()), "importing the package produced build artifacts"
+
+
+def custom_gather(values: torch.Tensor, indices: torch.Tensor, base: int = 0) -> torch.Tensor:
+    """Call the public custom schema rather than the ATen index_select adapter."""
+    return torch.ops.ops_sparse.gather(values, indices, base=base)
+
+
+def gather_facade():
+    """Import the public convenience APIs after package registration is complete."""
+    from cann_ops_sparse.ops.sparse.gather import gather, index_select_npu
+
+    return gather, index_select_npu
 
 
 @pytest.mark.parametrize("dtype", VALUE_DTYPES)
@@ -101,6 +115,64 @@ def test_required_dtypes_are_bit_exact(dtype):
     assert torch.equal(index.cpu(), index_before)
     assert output.data_ptr() != source.data_ptr()
     assert output.data_ptr() != index.data_ptr()
+
+
+@pytest.mark.parametrize("dtype", VALUE_DTYPES)
+@pytest.mark.parametrize("base", (0, 1))
+def test_custom_gather_and_convenience_api_are_bit_exact(dtype, base):
+    source_cpu = task_distribution(16, dtype, 20261012)
+    indices_cpu = torch.tensor([15, 0, 7, 7, 1, 14, 3, 15], dtype=torch.int32)
+    if base:
+        indices_cpu = indices_cpu + base
+    source = source_cpu.to(DEVICE)
+    indices = indices_cpu.to(DEVICE)
+    gather, index_select_npu = gather_facade()
+
+    custom = custom_gather(source, indices, base)
+    convenience = gather(source, indices, base=base)
+    selected = index_select_npu(source, 0, indices - base)
+    torch.npu.synchronize()
+    expected = torch.index_select(source_cpu, 0, (indices_cpu - base).to(torch.int64))
+
+    assert_bit_exact(custom, expected)
+    assert_bit_exact(convenience, expected)
+    assert_bit_exact(selected, expected)
+    assert custom.dtype == source.dtype
+    assert custom.device == source.device
+    assert custom.shape == indices.shape
+
+
+def test_custom_gather_base_one_segments_and_preserves_stream_ordering():
+    stream = torch.npu.Stream()
+    with torch.npu.stream(stream):
+        source = torch.arange(3, dtype=torch.float32, device=DEVICE) * 3.0 + 1.0
+        # The output is longer than source, so Gather must launch contiguous segments.
+        indices = torch.tensor([3, 1, 3, 2, 1, 3, 3, 2], dtype=torch.int32, device=DEVICE)
+        output = custom_gather(source, indices, base=1)
+        following = output + 2.0
+    stream.synchronize()
+    assert_bit_exact(output, torch.tensor([7.0, 1.0, 7.0, 4.0, 1.0, 7.0, 7.0, 4.0]))
+    assert_bit_exact(following, torch.tensor([9.0, 3.0, 9.0, 6.0, 3.0, 9.0, 9.0, 6.0]))
+
+
+def test_custom_gather_empty_and_meta_are_lazy(monkeypatch):
+    source = torch.arange(16, dtype=torch.float32, device=DEVICE)
+    indices = torch.empty(0, dtype=torch.int32, device=DEVICE)
+    output = custom_gather(source, indices)
+    torch.npu.synchronize()
+    assert output.shape == (0,)
+    assert output.dtype == source.dtype
+    assert output.device == source.device
+
+    from cann_ops_sparse.ops.sparse.gather.gather import _gather_op_builder
+
+    monkeypatch.setattr(_gather_op_builder, "load", lambda: pytest.fail("Meta must not trigger JIT"))
+    meta_source = torch.empty(16, dtype=torch.complex64, device="meta")
+    meta_indices = torch.empty(9, dtype=torch.int32, device="meta")
+    meta_output = custom_gather(meta_source, meta_indices, base=1)
+    assert meta_output.shape == (9,)
+    assert meta_output.dtype == meta_source.dtype
+    assert meta_output.device.type == "meta"
 
 
 @pytest.mark.parametrize(
@@ -193,6 +265,56 @@ def test_bounds_cache_tracks_index_mutation_and_input_size():
         torch.index_select(source[:3], 0, index)
 
 
+def test_custom_gather_bounds_cache_includes_base():
+    source = torch.arange(4, dtype=torch.float32, device=DEVICE)
+    index = torch.tensor([0], dtype=torch.int32, device=DEVICE)
+    assert_bit_exact(custom_gather(source, index, base=0), torch.tensor([0.0]))
+    with pytest.raises(IndexError, match="index out of range"):
+        custom_gather(source, index, base=1)
+
+    index.fill_(source.numel())
+    assert_bit_exact(custom_gather(source, index, base=1), torch.tensor([3.0]))
+    with pytest.raises(IndexError, match="index out of range"):
+        custom_gather(source, index, base=0)
+
+
+@pytest.mark.parametrize("base", (-1, 2))
+def test_custom_gather_rejects_invalid_base(base):
+    source = torch.arange(4, dtype=torch.float32, device=DEVICE)
+    index = torch.tensor([0], dtype=torch.int32, device=DEVICE)
+    with pytest.raises((RuntimeError, ValueError), match="base"):
+        custom_gather(source, index, base=base)
+
+
+def test_custom_gather_rejects_cpu_tensors():
+    source = torch.arange(4, dtype=torch.float32)
+    index = torch.tensor([0], dtype=torch.int32)
+    gather, _ = gather_facade()
+    for call in (
+        lambda: custom_gather(source, index),
+        lambda: gather(source, index),
+    ):
+        with pytest.raises((RuntimeError, NotImplementedError)):
+            call()
+
+
+def test_custom_gather_rejects_unsupported_contracts():
+    source = torch.arange(16, dtype=torch.float32, device=DEVICE)
+    index = torch.tensor([0, 1, 2], dtype=torch.int32, device=DEVICE)
+    invalid_calls = (
+        lambda: custom_gather(source.reshape(4, 4), index),
+        lambda: custom_gather(source, index.reshape(1, 3)),
+        lambda: custom_gather(source, index.to(torch.int64)),
+        lambda: custom_gather(source.to(torch.int32), index),
+        lambda: custom_gather(source[::2], index),
+        lambda: custom_gather(source.requires_grad_(True), index),
+        lambda: custom_gather(source[:0], index),
+    )
+    for call in invalid_calls:
+        with pytest.raises(RuntimeError):
+            call()
+
+
 def test_rejects_unsupported_contracts_without_cpu_fallback():
     source = torch.arange(16, dtype=torch.float32, device=DEVICE)
     index = torch.tensor([0, 1, 2], dtype=torch.int32, device=DEVICE)
@@ -210,3 +332,43 @@ def test_rejects_unsupported_contracts_without_cpu_fallback():
     for call in invalid_calls:
         with pytest.raises((RuntimeError, IndexError)):
             call()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.complex64])
+def test_gather_and_spgemm_registrations_coexist(dtype):
+    if ("spgemm", "mm") not in cann_ops_sparse.ops.MATMUL_REGISTRY.capabilities:
+        pytest.skip("requires a wheel containing both Gather and SpGEMM")
+    source = torch.tensor([2., 3.], dtype=dtype, device=DEVICE)
+    index = torch.tensor([2, 1], dtype=torch.int32, device=DEVICE)
+    assert_bit_exact(custom_gather(source, index, base=1), torch.tensor([3., 2.], dtype=dtype))
+    a_cpu = torch.diag(torch.tensor([2., 3.], dtype=dtype))
+    b_cpu = torch.diag(torch.tensor([4., 5.], dtype=dtype))
+    a = a_cpu.to_sparse_csr().to(DEVICE).detach().requires_grad_()
+    b = b_cpu.to_sparse_csr().to(DEVICE).detach().requires_grad_()
+    gradient = torch.ones((2, 2), dtype=dtype).to(DEVICE)
+    torch.sparse.mm(a, b).backward(gradient)
+    torch.testing.assert_close(a.grad.values().cpu(), torch.tensor([4., 5.], dtype=dtype))
+    torch.testing.assert_close(b.grad.values().cpu(), torch.tensor([2., 3.], dtype=dtype))
+
+
+@pytest.mark.parametrize("layout", ["hybrid", "bsr"])
+def test_gather_and_densetosparse_registrations_coexist(layout):
+    try:
+        from cann_ops_sparse.ops.sparse.densetosparse import dense_to_sparse
+    except ImportError:
+        pytest.skip("requires a wheel containing both Gather and DenseToSparse")
+    assert dense_to_sparse.dense_to_sparse_op_builder is not None
+    source_cpu = torch.tensor([[1., 0., 2., 0.], [0., 0., 0., 0.],
+                               [0., 3., 0., 4.], [5., 0., 0., 0.]])
+    source = source_cpu.to(DEVICE)
+    vector = torch.tensor([7., 11.], device=DEVICE)
+    index = torch.tensor([2, 1], dtype=torch.int32, device=DEVICE)
+    assert_bit_exact(custom_gather(vector, index, base=1), torch.tensor([11., 7.]))
+    if layout == "hybrid":
+        result, reference = source.to_sparse(1), source_cpu.to_sparse(1)
+        torch.testing.assert_close(result.indices().cpu(), reference.indices())
+    else:
+        result, reference = source.to_sparse_bsr((2, 2)), source_cpu.to_sparse_bsr((2, 2))
+        torch.testing.assert_close(result.crow_indices().cpu(), reference.crow_indices())
+        torch.testing.assert_close(result.col_indices().cpu().to(torch.int64), reference.col_indices())
+    torch.testing.assert_close(result.values().cpu(), reference.values())

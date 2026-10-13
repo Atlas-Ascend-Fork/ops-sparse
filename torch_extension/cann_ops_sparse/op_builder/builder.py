@@ -45,7 +45,10 @@ class OpBuilder(ABC):
         flags = []
         for directory in library_dirs:
             flags.extend(["-L{}".format(directory), "-Wl,-rpath,{}".format(directory)])
-        return flags + ["-lops_sparse", "-ltorch_npu"]
+        # Wrappers call securec functions directly (for example memcpy_s in
+        # SpGEMM).  Declare the dependency instead of relying on another loaded
+        # CANN library to expose its symbols transitively.
+        return flags + ["-lops_sparse", "-ltorch_npu", "-lc_sec"]
 
     @abstractmethod
     def sources(self) -> List[str]:
