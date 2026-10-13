@@ -100,23 +100,23 @@ docker run --name cann_container --device /dev/davinci0 --device /dev/davinci_ma
 
         - 安装CANN toolkit包
 
-            ```bash
+             ```bash
             # 确保安装包具有可执行权限
             chmod +x Ascend-cann-toolkit_${cann_version}_linux-${arch}.run
             # 安装命令
-           ./Ascend-cann-toolkit_${cann_version}_linux-${arch}.run --install --quiet --install-path=${install_path}
-           ```
+            ./Ascend-cann-toolkit_${cann_version}_linux-${arch}.run --install --quiet --install-path=${install_path}
+            ```
 
         - 安装CANN ops包（运行态依赖）
 
             ops包是运行态依赖，若仅编译算子，可不安装此包。
 
-            ```bash
+             ```bash
             # 确保安装包具有可执行权限
             chmod +x Ascend-cann-${soc_name}-ops_${cann_version}_linux-${arch}.run
             # 安装命令
             ./Ascend-cann-${soc_name}-ops_${cann_version}_linux-${arch}.run --install --quiet --install-path=${install_path}
-           ```
+            ```
 
             - \$\{cann\_version\}：表示CANN包版本号。
             - \$\{arch\}：表示CPU架构，如aarch64、x86_64。
@@ -128,7 +128,7 @@ docker run --name cann_container --device /dev/davinci0 --device /dev/davinci_ma
     请访问[CANN官网下载中心](https://www.hiascend.com/cann/download)，选择发布版本（仅支持CANN 9.0.0及后续版本），并根据产品型号和环境架构下载对应包，最后参考网页提供的命令完成安装。
 
 #### 安装基础依赖
- 	 
+
 本项目基础依赖如下，注意满足版本号要求。
 
 - python >= 3.7.0（建议版本 <= 3.10）
