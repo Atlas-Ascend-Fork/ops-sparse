@@ -48,9 +48,10 @@
     ${install_path}/cann/
     ├── include/
     │   ├── cann_ops_sparse.h
-    │   └── cann_ops_sparse_common.h
+    │   └── cann_ops_sparseLt.h
     └── lib64/
-        └── libops_sparse.so
+        ├── libops_sparse.so
+        └── libops_sparseLt.so
     ```
 
 ## 步骤二：准备示例代码
