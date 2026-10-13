@@ -27,7 +27,7 @@
   - 格式（`format`）：确认描述符的稀疏格式与算子支持的格式匹配（如 CSR/COO/CSC）
   - 维度（`rows`/`cols`/`nnz`）：确认维度合法且与算子预期一致
   - 数据类型（`valueType`）：确认数据类型被算子支持
-- 校验失败时返回 `ACL_SPARSE_STATUS_INVALID_VALUE` 并通过 `OP_LOGE` 记录原因
+- 空指针、非法维度等无效输入校验失败时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；不支持的稀疏格式或数据类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（具体见状态码表）。校验失败时通过 `OP_LOGE` 记录原因
 - const 描述符的 `const_cast` 必须在 `ToMatInner`/`ToVecInner`/`ToDnMatInner` 等统一函数中完成，禁止在业务代码中直接 cast
 
 **示例**：
