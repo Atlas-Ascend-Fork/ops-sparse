@@ -906,7 +906,11 @@ aclsparseStatus_t aclsparseSDDMM(
 // ============================================================================
 // Generic SpSM (Sparse Triangular Solve with Multiple Right-Hand Sides)
 // 对标 cuSPARSE Generic API cusparseSpSM。三阶段: BufferSize → Analysis → Solve。
-// 求解 op(A) * X = alpha * op(B)，支持 CSR/CSC/COO、FP32/complex64。
+// 求解 op(A) * X = alpha * op(B), A 为稀疏三角矩阵 (UNIT/NON_UNIT diagonal, m×m)。
+// 支持 CSR/CSC/COO 稀疏格式及 FP32/complex64 数据类型。
+// A2/A3 contract and known limitations: sparse/spsm/arch22/spsm_host.cpp interface comments.
+// The Host does not detect destroyed handles or matrix descriptors, nor arrays
+// shorter than the lengths described by their descriptors.
 // ============================================================================
 
 // SpSM 算法枚举。
@@ -914,19 +918,33 @@ typedef enum aclsparseSpSMAlg_t {
     ACL_SPARSE_SPSM_ALG_DEFAULT = 0
 } aclsparseSpSMAlg_t;
 
+/** Numeric update selection; A2/A3 takes a full nnz array in the original entry order. */
 typedef enum aclsparseSpSMUpdate_t {
     ACL_SPARSE_SPSM_UPDATE_GENERAL = 0,
     ACL_SPARSE_SPSM_UPDATE_DIAGONAL = 1
 } aclsparseSpSMUpdate_t;
 
 /**
- * @brief Update numerical values of an analyzed SpSM plan without changing its pattern.
- * @param newValues Device array: nnz entries in original storage order for GENERAL;
- *                  m diagonal entries in original A order for DIAGONAL.
- * A failed numerical validation preserves the previous plan. UNIT ignores diagonal values.
+ * @brief Update numerical values on the Analysis-bound stream and workspace.
+ * @note A2/A3: newValues holds nnz(A) values of the Analysis compute type in the
+ *       storage order of matA's value array (before sorting or duplicate
+ *       summation). It must be 4-byte aligned Device memory on the current
+ *       device and must not overlap the workspace. For opA=H pass A's values.
+ * @note GENERAL replaces all values. DIAGONAL reads the same full array but takes
+ *       only entries with row == col; other entries keep the plan's current
+ *       values, not the contents of matA's value array.
+ * @note Handle, pointer mode, stream, device, descriptors and their metadata must
+ *       match Analysis and remain alive. newValues, A index arrays and workspace
+ *       must stay valid until the stream completes. Structural changes require
+ *       Analysis again. A Host-side rejection enqueues nothing. A2/A3 waits for
+ *       numerical validation; failed Device validation invalidates this plan.
+ * @note arch35: GENERAL takes nnz entries; DIAGONAL takes m diagonal entries.
+ *       Failed numerical validation preserves the previous plan on arch35.
+ *       UNIT ignores supplied diagonal values.
  */
 aclsparseStatus_t aclsparseSpSMUpdateMatrix(aclsparseHandle_t handle,
     aclsparseSpSMDescr_t spsmDescr, const void *newValues, aclsparseSpSMUpdate_t updatePart);
+
 
 /**
  * @brief 创建 SpSM 描述符 (跨三阶段共享)。
@@ -935,13 +953,18 @@ aclsparseStatus_t aclsparseSpSMCreateDescr(aclsparseSpSMDescr_t *spsmDescr);
 
 /**
  * @brief 销毁 SpSM 描述符。
+ * @note Does not wait for enqueued tasks. Caller-owned inputs, outputs, Device-mode alpha
+ *       and workspace used by those tasks must stay valid until stream completion.
  */
 aclsparseStatus_t aclsparseSpSMDestroyDescr(aclsparseSpSMDescr_t spsmDescr);
 
 /**
- * @brief 查询 SpSM 所需 workspace 字节数。数学公式: op(A) * C = alpha * op(B)。
- * @note A/B 支持 N/T/H；B/C 独立 ROW/COL 布局；alpha 支持 HOST/DEVICE。
- *       m=0 或 nrhs=0 时返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ * @brief 查询 SpSM 所需 workspace 字节数。数学公式: op(A) * X = alpha * op(B)。
+ * @note A2/A3 supports CSR/CSC/COO, FP32/complex64 and N/T/H for both operands.
+ *       arch35 also supports CSR/CSC/COO, FP32/complex64 and N/T/H.
+ *       Zero dimensions are accepted on A2/A3 but rejected on arch35.
+ * @note A2/A3: B/C values may be NULL. The size depends on the current device;
+ *       query and analyze on the same device. On failure *bufferSize is unchanged.
  */
 aclsparseStatus_t aclsparseSpSMBufferSize(
     aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
@@ -951,11 +974,26 @@ aclsparseStatus_t aclsparseSpSMBufferSize(
     aclsparseSpSMDescr_t spsmDescr, size_t *bufferSize);
 
 /**
- * @brief 在 NPU 上规范化格式、校验索引与对角线，并构建依赖层次。
- *        等待 handle stream 并回读 64 字节状态；不回读矩阵数组。
- *        数学公式: op(A) * C = alpha * op(B)。
- * @note A/B 支持 N/T/H；B/C 独立 ROW/COL 布局；alpha 支持 HOST/DEVICE。buffer 为空时
- *       使用 handle 当前的 workspace；m=0 或 nrhs=0 时返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ * @brief Analyze SpSM and bind descriptors, stream and external workspace.
+ *        A2/A3 enqueues Device normalization; Solve reuses that representation.
+ *        数学公式: op(A) * X = alpha * op(B)。
+ * @note Operand support depends on architecture; see aclsparseSpSMBufferSize.
+ * @note A2/A3 binds handle, pointer mode, stream, device, descriptors, their
+ *       metadata and workspace; any change requires Analysis again. workspace
+ *       must be 64-byte aligned Device memory on the current device, at least
+ *       bufferSize bytes, and disjoint from A, B and C. A index and value arrays
+ *       must be 4-byte aligned Device memory. alpha placement is validated but
+ *       its value is not read.
+ * @note B/C values may be NULL and set later with aclsparseDnMatSetValues.
+ *       Non-NULL values are fixed by Analysis; NULL values are fixed by the first
+ *       successful Solve. Other values need Analysis again.
+ * @note UNIT ignores stored diagonal entries and uses one. NON_UNIT sums
+ *       duplicate diagonal entries.
+ * @note A Host-side rejection enqueues nothing and keeps any previous plan
+ *       unchanged; its resources must remain valid if it is used again. Success
+ *       includes completion of Device numerical validation.
+ * @note arch35 can use handle workspace when buffer is NULL. Analysis waits for
+ *       Device validation and reads back status, not matrix arrays.
  */
 aclsparseStatus_t aclsparseSpSMAnalysis(
     aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
@@ -967,7 +1005,14 @@ aclsparseStatus_t aclsparseSpSMAnalysis(
 /**
  * @brief SpSM 求解阶段: 异步执行三角求解 op(A) * C = alpha * op(B)。
  *        复用 Analysis 绑定的 active buffer。禁止 host 侧 stream 同步。
- * @note A/B 支持 N/T/H；B/C 独立 ROW/COL 布局；alpha 支持 HOST/DEVICE。
+ * @note Operand support depends on architecture; see aclsparseSpSMBufferSize.
+ * @note A2/A3: Host-mode alpha is copied during this call. Device-mode alpha must
+ *       be 4-byte aligned on the current device, disjoint from the workspace and
+ *       valid until the stream completes. When m and rhs are nonzero, B/C values
+ *       must be 4-byte aligned Device memory; C may equal B exactly but must not
+ *       partially overlap B or overlap A. B, C, A arrays and workspace must stay
+ *       valid until the stream completes. A Host-side rejection enqueues nothing
+ *       and keeps the plan unchanged. Success means enqueued only.
  */
 aclsparseStatus_t aclsparseSpSM(
     aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
