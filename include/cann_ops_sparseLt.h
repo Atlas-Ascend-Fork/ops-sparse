@@ -476,6 +476,44 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
     aclrtStream stream);
 
 /**
+ * @brief 校验矩阵是否满足 2:4 结构化稀疏条件（对齐 cuSPARSELt cusparseLtSpMMAPruneCheck）。
+ *
+ * 逐分组统计非零元素个数（±0 按零、NaN/非规格数按非零，位级判零），与保留上限比较：
+ * 全部分组满足条件时 d_valid=0（correct），任一分组超限时 d_valid=1（wrong）。
+ * 校验对象与分组方向由 Matmul 描述符中稀疏侧（matA/matB 须恰有一个 isStructured）
+ * 的 order 与 op 联合决定，与 aclsparseLtSpMMAPrune 的剪枝方向推导一致。
+ * 支持多 batch（经 aclsparseLtMatDescSetAttribute 设置稀疏侧
+ * ACLSPARSELT_MAT_NUM_BATCHES / ACLSPARSELT_MAT_BATCH_STRIDE）：d_valid 为全部
+ * batch 判定结果的按位或——任一 batch 存在违规分组 → 1，全部 batch 合法 → 0；
+ * numBatches=1（默认）时为单 batch 判定。
+ * 经 aclsparseLtSpMMAPrune 剪枝产出的数据保证通过本检查。
+ * 算子异步启动，内部不执行 stream 同步，调用方如需读取 d_valid 须自行同步。
+ *
+ * @param handle       IN,  HOST, aclsparseLt 库句柄的 const 指针，不可为 nullptr。
+ * @param matmulDescr  IN,  HOST, Matmul 操作描述符，matA/matB 须恰有一个结构化稀疏侧。
+ * @param d_in         IN,  DEVICE, 待校验矩阵的指针，行主序存储，须 32 字节对齐（实现要求：
+ *                    d_in 作为 DataCopyPad 的 GM 源地址，硬件要求 32 字节对齐，严于官方 16 字节惯例），
+ *                    不可为 nullptr。
+ * @param d_valid      OUT, DEVICE, 校验结果 int 标量（0 满足条件，1 不满足），不可为 nullptr。
+ * @param stream       IN,  HOST, ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为 nullptr
+ *         ACL_SPARSE_STATUS_INVALID_VALUE matmulDescr/matA/matB/d_in/d_valid 为 nullptr、
+ *                d_in 未 32 字节对齐、维度/ld 非法、批量参数非法（numBatches<1，或
+ *                numBatches>1 时 batchStride≤0 / 非 32B 对齐）或扫描跨度溢出
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED matA/matB 无唯一稀疏侧、
+ *                数据类型非 FP32/FP16/BF16/INT8
+ *         ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES 平台核数/UB 资源不足
+ *         ACL_SPARSE_STATUS_EXECUTION_FAILED d_valid 预清零或 kernel 启动失败
+ */
+aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
+    const void* d_in,
+    int* d_valid,
+    aclrtStream stream);
+
+/**
  * @brief 查询结构化稀疏压缩的输出和临时区大小（Ascend950）。
  *
  * @param handle             IN,  HOST, 有效的库句柄，不可为 nullptr。

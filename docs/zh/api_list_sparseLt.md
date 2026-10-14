@@ -38,7 +38,7 @@
 | [aclsparseLtMatmul](#aclsparseltmatmul) | 执行结构化稀疏矩阵乘法 |
 | [aclsparseLtMatmulSearch](#aclsparseltmatmulsearch) | 搜索最优 matmul 算法（**暂未支持**） |
 | [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
-| [aclsparseLtSpMMAPruneCheck](#aclsparseltspmmaprunecheck) | 校验稠密矩阵是否已满足 2:4 结构化稀疏约束（**暂未支持**） |
+| [aclsparseLtSpMMAPruneCheck](#aclsparseltspmmaprunecheck) | 校验稠密矩阵是否已满足 2:4 结构化稀疏约束 |
 | [aclsparseLtSpMMACompressedSize](#aclsparseltspmmacompressedsize) | 查询压缩后矩阵及临时空间所需存储大小（Ascend950） |
 | [aclsparseLtSpMMACompress](#aclsparseltspmmacompress) | 将结构化稀疏矩阵压缩为紧凑存储（Ascend950） |
 
@@ -791,8 +791,6 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 
 ### aclsparseLtSpMMAPruneCheck
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
     aclsparseLtConstHandle_t handle,
@@ -802,21 +800,157 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
     aclrtStream stream);
 ```
 
-**功能**：校验稠密矩阵是否已满足 2:4 结构化稀疏约束。经 `aclsparseLtSpMMAPrune` 剪枝的结果保证正确，可跳过本接口；仅用于校验自定义剪枝结果的合法性。
+**功能**：校验稠密矩阵是否满足 2:4 结构化稀疏条件。沿校验方向将矩阵划分为固定大小分组，逐组统计非零元素个数并与保留上限比较：全部分组不超过上限时写入 `d_valid = 0`（满足，correct），任一分组超限时写入 `d_valid = 1`（不满足，wrong）。校验条件为组级基本条件，与剪枝算法（TILE/STRIP）无关；经 `aclsparseLtSpMMAPrune` 剪枝产出的数据保证通过本检查，可跳过本接口，仅用于校验自定义剪枝结果的合法性。本接口直接接收 Matmul 描述符，校验对象（A/B 中的稀疏侧，须恰有一侧为结构化稀疏描述符）、维度、数据类型、order 与 op 均从描述符派生，派生口径与 `aclsparseLtSpMMAPrune` 一致。支持多 batch（经 `aclsparseLtMatDescSetAttribute` 设置稀疏侧 `ACLSPARSELT_MAT_NUM_BATCHES`/`ACLSPARSELT_MAT_BATCH_STRIDE`）：`d_valid` 为全部 batch 判定结果的按位或——任一 batch 存在违规分组 → 1，全部 batch 合法 → 0；`numBatches=1`（默认）时为单 batch 判定，单 batch 判定逻辑不变。算子异步执行，无需额外存储（no extra storage），结果确定（deterministic）；内部不执行 stream 同步，调用方读取 `d_valid` 前须自行同步。
 
-**参数说明**：
+**校验规则**：
 
-- `handle`（IN）：HOST，aclsparseLt 库句柄。
-- `matmulDescr`（IN）：HOST，Matmul 操作描述符，从中读取矩阵 A 的维度、数据类型、order 与 opA。
-- `d_in`（IN）：DEVICE，待校验的矩阵指针。
-- `d_valid`（OUT）：DEVICE，校验结果（`0` 表示满足约束，`1` 表示不满足）。
-- `stream`（IN）：HOST，ACL 流，可为 nullptr（表示使用默认流）。
+| 数据类型 | 分组大小 | 每组保留上限 | 稀疏模式 |
+|----------|---------|--------------|----------|
+| FP16（ACL_FLOAT16） | 4 | 2 | 2:4 |
+| BF16（ACL_BF16） | 4 | 2 | 2:4 |
+| INT8（ACL_INT8） | 4 | 2 | 2:4 |
+| FP32（ACL_FLOAT） | 2 | 1 | 1:2（等价 2:4 密度） |
+
+判零语义：`±0` 均按零处理；NaN、`±inf` 与非规格数（subnormal）按非零处理（位级判零，与 `x != 0` 的 IEEE 语义逐位等价）。
+
+校验方向由稀疏侧矩阵描述符的 order 与 Matmul 描述符的 op 联合决定，与 `aclsparseLtSpMMAPrune` 的剪枝方向推导一致：
+
+| op（稀疏侧） | order | 校验方向 |
+|-----|-------|---------|
+| NON_TRANSPOSE | ROW | 沿行（每组为行内 g 个连续元素） |
+| NON_TRANSPOSE | COL | 沿列（每组为同列 g 个相邻元素） |
+| TRANSPOSE | ROW | 沿列 |
+| TRANSPOSE | COL | 沿行 |
+
+`d_in` 一律按行主序物理存储解释，行步长为稀疏侧描述符的 ld（元素数）；order 仅决定校验方向，不改变内存访问模式。ld 大于物理行长时，padding 区数据不参与判定。
+
+**产品支持情况**：
+
+| 产品 | 是否支持 |
+| :----------------------------------------- | :------:|
+| <term>Ascend 950PR/Ascend 950DT</term> | √ |
+| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
+| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
+
+> 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
+
+**参数说明**（与 `cusparseLtSpMMAPruneCheck` 逐参对齐：`const cusparseLtHandle_t*` → `aclsparseLtConstHandle_t`，`const cusparseLtMatmulDescriptor_t*` → `aclsparseLtConstMatmulDescriptor_t*`，`cudaStream_t` → `aclrtStream`，返回 `cusparseStatus_t` → `aclsparseStatus_t`；`d_in`/`d_valid` 语义一致）：
+
+- `handle`（IN）：HOST，aclsparseLt 库句柄的 const 指针。
+- `matmulDescr`（IN）：HOST，Matmul 操作描述符，校验对象（稀疏侧）、维度、数据类型、order 与 op 从中派生；matA/matB 须恰有一个为结构化稀疏描述符。
+- `d_in`（IN）：DEVICE，待校验矩阵的指针，行主序存储，须 32 字节对齐。
+- `d_valid`（OUT）：DEVICE，校验结果 int 标量（`0` 表示满足约束，`1` 表示不满足）。
+- `stream`（IN）：HOST，ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流）。
+
+**约束说明**：
+
+- `handle` 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
+- `matmulDescr` 不可为 nullptr，且其绑定的 matA/matB 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- **唯一稀疏侧**：matA 与 matB 须恰有一个为结构化稀疏描述符（经 `aclsparseLtStructuredDescriptorInit` 创建）；两者均非稀疏或均为稀疏时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- **批量约束**：稀疏侧 numBatches 须 ≥ 1（默认 1；经 `aclsparseLtMatDescSetAttribute` 的 `ACLSPARSELT_MAT_NUM_BATCHES` 设置，A/B/C/D 四侧须一致，由 Matmul 描述符初始化校验）。numBatches > 1 时为批量校验（`d_valid` = 全部 batch 判定的 OR，batch b 基址 = `d_in + b×batchStride` 元素），batchStride（`ACLSPARSELT_MAT_BATCH_STRIDE`，元素数）须 > 0 且为 32 字节/元素字节数的整数倍（FP32 为 8、FP16/BF16 为 16、INT8 为 32 的倍数，与 ld 同款对齐），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；全量跨度 `(numBatches−1)×batchStride + (rows−1)×ld + cols` 换算字节后溢出时同样返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。numBatches = 1 时 batchStride 不参与判定。
+- **数据类型**：稀疏侧支持 `ACL_FLOAT`（FP32）/ `ACL_FLOAT16`（FP16）/ `ACL_BF16`（BF16）/ `ACL_INT8`（INT8），其他类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- `d_in` 须 32 字节对齐（作为 DataCopy 搬运源地址的硬件对齐要求，严于 cuSPARSELt 的 16 字节惯例）且不可为 nullptr，`d_valid` 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- **维度约束**：扫描维度与 ld 须为 32 字节/元素字节数的整数倍（结构化描述符初始化保证：FP32 为 8、FP16/BF16 为 16、INT8 为 32）；rows/cols/ld 须非 0 且不超过 INT32_MAX（2147483647，超长 ld 属防御性拦截，防止内部行偏移地址运算溢出）；ld 须不小于物理行长（沿行校验时为行长维度、沿列校验时为列数）。违反时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；ld 大于物理行长时 padding 区数据不参与判定。
+- **内存布局**：`d_in` 按行主序物理存储解释（行步长为稀疏侧描述符 ld），order 仅决定校验方向。
+- **异步执行**：算子内部先在同 stream 上将 `d_valid` 预清零，再启动校验 kernel；内部不执行 `aclrtSynchronizeStream`，调用方读取 `d_valid` 前须自行同步 stream。
+- `stream` 可为 nullptr（表示使用默认流）。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、d_in 为空、d_valid 为空
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/matB/d_in/d_valid 为 nullptr、d_in 未 32 字节对齐、维度/ld 非法、批量参数非法（numBatches<1，或 numBatches>1 时 batchStride≤0/非 32B 对齐）、扫描跨度溢出
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：matA/matB 无唯一稀疏侧、数据类型非 FP32/FP16/BF16/INT8
+- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：平台核数/UB 资源不足
+- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：d_valid 预清零或 kernel 启动失败
+
+**调用示例**：
+
+```cpp
+#include "acl/acl.h"
+#include "cann_ops_sparseLt.h"
+
+#define CHECK_RET(cond, action) \
+    do {                        \
+        if (!(cond)) {          \
+            action;             \
+            goto cleanup;       \
+        }                       \
+    } while (0)
+
+// 校验 m×k 的 FP32 矩阵 A 是否满足 1:2 结构化稀疏条件（每 2 个元素至多 1 个非零）
+int PruneCheckExample()
+{
+    // 变量声明须位于首个 goto cleanup 之前：C++ 禁止 goto 跨越带初始化的变量声明
+    int32_t deviceId = 0;
+    aclrtStream stream = nullptr;
+    aclsparseLtHandle_t handle = nullptr;
+    aclsparseLtMatDescriptor_t matA = nullptr, matB = nullptr, matC = nullptr, matD = nullptr;
+    aclsparseLtMatmulDescriptor_t matmulDesc = nullptr;
+    void *dA = nullptr;     // Device 侧待校验矩阵（m×k FP32，行主序，32 字节对齐）
+    int *dValid = nullptr;  // Device 侧校验结果 int 标量
+    int hValid = -1;        // Host 侧校验结果
+    int ret = 0;
+    int64_t m = 16, k = 32, n = 128;  // k 须为 8 的倍数（FP32 结构化描述符对齐要求）
+
+    CHECK_RET(aclInit(nullptr) == ACL_SUCCESS, return -1);
+    CHECK_RET(aclrtSetDevice(deviceId) == ACL_SUCCESS, aclFinalize(); return -1);
+    CHECK_RET(aclrtCreateStream(&stream) == ACL_SUCCESS, aclrtResetDevice(deviceId); aclFinalize(); return -1);
+    CHECK_RET(aclsparseLtInit(&handle) == ACL_SPARSE_STATUS_SUCCESS, ret = -1);
+
+    // 分配 Device 内存，并将待校验数据从 Host 拷入 dA（aclrtMemcpy H2D，此处略）
+    CHECK_RET(aclrtMalloc(&dA, static_cast<size_t>(m) * k * sizeof(float),
+                          ACL_MEM_MALLOC_HUGE_FIRST) == ACL_SUCCESS, ret = -1);
+    CHECK_RET(aclrtMalloc(reinterpret_cast<void**>(&dValid), sizeof(int),
+                          ACL_MEM_MALLOC_HUGE_FIRST) == ACL_SUCCESS, ret = -1);
+
+    // 1. 构建描述符：A 为结构化稀疏（FP32 下分组为 1:2，即每 2 个元素至多 1 个非零）；
+    //    B/C/D 为占位稠密描述符——仅执行校验时 B/C/D 数据不被消费，
+    //    但 Matmul 描述符初始化须绑定四个矩阵，维度须与 A 一致（B: k×n，C/D: m×n）
+    aclsparseLtStructuredDescriptorInit(&handle, &matA, m, k, k, 16,
+        ACL_FLOAT, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
+    aclsparseLtDenseDescriptorInit(&handle, &matB, k, n, n, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    aclsparseLtDenseDescriptorInit(&handle, &matC, m, n, n, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    aclsparseLtDenseDescriptorInit(&handle, &matD, m, n, n, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+
+    // 2. 构建 Matmul 描述符（opA=NON_TRANSPOSE + ROW → 沿行方向校验）
+    aclsparseLtMatmulDescriptorInit(&handle, &matmulDesc,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &matA, &matB, &matC, &matD, ACL_SPARSE_COMPUTE_32F);
+
+    // 3. 执行校验：dA -> dValid
+    //    第二参为 const 描述符指针的指针（aclsparseLtConstMatmulDescriptor_t*）：
+    //    先声明 const 版本描述符再传地址即可自然匹配类型
+    {
+        aclsparseLtConstMatmulDescriptor_t constMatmulDesc = matmulDesc;
+        CHECK_RET(aclsparseLtSpMMAPruneCheck(&handle, &constMatmulDesc, dA, dValid, stream)
+                      == ACL_SPARSE_STATUS_SUCCESS, ret = -1);
+    }
+
+    // 4. 读取 d_valid 前须同步 stream（算子内部不同步，调用方负责）
+    CHECK_RET(aclrtSynchronizeStream(stream) == ACL_SUCCESS, ret = -1);
+    CHECK_RET(aclrtMemcpy(&hValid, sizeof(int), dValid, sizeof(int),
+                          ACL_MEMCPY_DEVICE_TO_HOST) == ACL_SUCCESS, ret = -1);
+    // hValid == 0：满足 1:2 结构化稀疏约束；hValid == 1：不满足
+
+cleanup:
+    // 5. 清理资源（按依赖逆序销毁，异常路径与正常路径统一从此处释放）
+    if (matmulDesc != nullptr) { aclsparseLtMatmulDescriptorDestroy(&matmulDesc); }
+    if (matA != nullptr) { aclsparseLtMatDescriptorDestroy(&matA); }
+    if (matB != nullptr) { aclsparseLtMatDescriptorDestroy(&matB); }
+    if (matC != nullptr) { aclsparseLtMatDescriptorDestroy(&matC); }
+    if (matD != nullptr) { aclsparseLtMatDescriptorDestroy(&matD); }
+    if (handle != nullptr) { aclsparseLtDestroy(&handle); }
+    if (dA != nullptr) { aclrtFree(dA); }
+    if (dValid != nullptr) { aclrtFree(dValid); }
+    if (stream != nullptr) { aclrtDestroyStream(stream); }
+    aclrtResetDevice(deviceId);
+    aclFinalize();
+    return ret;
+}
+```
+
+完整约束说明、数学原理与完整可编译调用示例见 [PruneCheck 算子说明](../../sparseLt/prune_check/README.md)。
 
 ---
 
@@ -996,7 +1130,7 @@ aclsparseLt 矩阵乘法的工作流分为初始化、描述符构建、计划�
 2. 对稀疏侧矩阵（A 或 B）调用 `aclsparseLtStructuredDescriptorInit` 创建结构化描述符，对稠密侧矩阵调用 `aclsparseLtDenseDescriptorInit` 创建稠密描述符。如需 batch 批量计算，通过 `aclsparseLtMatDescSetAttribute` 设置 `NUM_BATCHES` / `BATCH_STRIDE`（须在步骤 3 之前）。
 3. 调用 `aclsparseLtMatmulDescriptorInit` 构建 Matmul 描述符，传入 opA/opB、四个矩阵描述符（matA/matB/matC/matD）与 computeType（Init 时校验 A/B/C/D 四个矩阵 numBatches 一致性）。
 4. （可选）通过 `aclsparseLtMatmulDescSetAttribute` 设置 bias（`BIAS_POINTER` / `BIAS_STRIDE`）、activation（`ACTIVATION_RELU` / `RELU_UPPERBOUND` / `RELU_THRESHOLD` / `ACTIVATION_GELU` / `GELU_SCALING`）、向量缩放（`ALPHA_VECTOR_SCALING` / `BETA_VECTOR_SCALING`）。须在 PlanInit 之前设置。
-5. （可选）调用 `aclsparseLtSpMMAPrune` 对稠密矩阵执行 2:4 剪枝，生成稀疏侧输入。
+5. （可选）调用 `aclsparseLtSpMMAPrune` 对稠密矩阵执行 2:4 剪枝，生成稀疏侧输入。自行实现剪枝的输入（未经 `aclsparseLtSpMMAPrune` 产出）可调用 `aclsparseLtSpMMAPruneCheck` 校验是否满足 2:4 约束（`aclsparseLtSpMMAPrune` 的产出保证通过该检查，无需重复校验）。
 6. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
 7. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划（读取上述全部属性计算 tiling）。
 8. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
