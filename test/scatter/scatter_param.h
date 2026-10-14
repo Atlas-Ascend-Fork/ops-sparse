@@ -33,7 +33,7 @@ struct ScatterParam : public SparseTestParamBase {
     int64_t vec_nnz   = 0;   // vecX.nnz   (nonzero count)
     int64_t dn_size   = 0;   // vecY.nums  (dense vector size)
 
-    std::string val_type;    // "FP32" / "FP16" / "BF16"
+    std::string val_type;    // "INT8" / "FP32" / "FP16" / "BF16" / "COMPLEX64"
     std::string idx_type;    // "I32" / "I64"
     int idx_base    = 0;     // 0 = ZERO, 1 = ONE
     bool idx_sorted = true;  // true = sorted, false = unsorted

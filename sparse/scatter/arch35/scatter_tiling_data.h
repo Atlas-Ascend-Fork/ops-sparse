@@ -23,9 +23,11 @@
 
 #include <cstdint>
 
-// SIMT 线程块最大线程数（scatter 为纯 GM 读写轻量 kernel，
-// 256 平衡并行度（掩盖 GM 延迟）与调度开销）。
-constexpr uint32_t kScatterMaxThreadsPerBlock = 256u;
+// SIMT 线程块：与 gather 对齐，512 提升 GM 延迟掩盖；stride-unroll 提升 ILP。
+constexpr uint32_t kScatterMaxThreadsPerBlock = 512u;
+constexpr uint32_t kScatterSmallThreadsPerBlock = 128u;
+constexpr uint64_t kScatterSmallNnzThreshold = 4096ull;
+constexpr uint32_t kScatterStrideUnroll = 4u;
 
 // 索引类型编码（kernel 内部分发用）
 constexpr int32_t SCATTER_IDX_I32 = 0;  // idxType = int32_t
@@ -35,12 +37,16 @@ constexpr int32_t SCATTER_IDX_I64 = 1;  // idxType = int64_t
 constexpr int32_t SCATTER_VAL_FP32 = 0;
 constexpr int32_t SCATTER_VAL_FP16 = 1;
 constexpr int32_t SCATTER_VAL_BF16 = 2;
+constexpr int32_t SCATTER_VAL_INT8 = 3;
+constexpr int32_t SCATTER_VAL_COMPLEX64 = 4;
 
 struct ScatterTilingData {
-    uint64_t nnz;        ///< 非零元素数量（grid-stride 范围上界）
-    int32_t idxBase;     ///< 索引基址偏移：0=ZERO_BASE, 1=ONE_BASE
-    int32_t idxType;     ///< SCATTER_IDX_I32 或 SCATTER_IDX_I64
-    int32_t valType;     ///< SCATTER_VAL_FP32 / FP16 / BF16
+    uint64_t nnz;              ///< 非零元素数量（grid-stride 范围上界）
+    int32_t idxBase;           ///< 索引基址偏移：0=ZERO_BASE, 1=ONE_BASE
+    int32_t idxType;           ///< SCATTER_IDX_I32 或 SCATTER_IDX_I64
+    int32_t valType;           ///< SCATTER_VAL_FP32 / FP16 / BF16 / INT8 / COMPLEX64
+    uint32_t threadsPerBlock;  ///< SIMT blockDim.x
+    uint32_t numBlocks;        ///< gridDim（Host 填入，kernel_do 使用）
 };
 
 #endif  // SCATTER_TILING_DATA_H_

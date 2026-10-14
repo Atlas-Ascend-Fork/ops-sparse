@@ -42,6 +42,7 @@ inline size_t ScatterAclDataTypeSize(aclDataType dt) {
         case ACL_FLOAT16: return 2;
         case ACL_BF16:    return 2;
         case ACL_FLOAT:   return 4;
+        case ACL_COMPLEX64: return 8;
         default:          return 4;
     }
 }
@@ -68,68 +69,74 @@ struct ScatterNpuResult {
 // Device memory managed via DeviceBuffer RAII.
 // Descriptors managed via SpVecManager / DnVecManager RAII.
 // ============================================================================
-inline ScatterNpuResult ScatterNpu(
-    HandleManager& handle,
-    aclrtStream stream,
-    int64_t vecSize,
-    int64_t nnz,
-    int64_t dnSize,
-    const void* indicesHost,
-    const void* valuesHost,
-    const void* yInitHost,
-    aclsparseIndexType_t idxType,
-    aclsparseIndexBase_t idxBase,
-    aclDataType valType)
+struct ScatterCallFields {
+    aclrtStream stream = nullptr;
+    int64_t vecSize = 0;
+    int64_t nnz = 0;
+    int64_t dnSize = 0;
+    const void* indicesHost = nullptr;
+    const void* valuesHost = nullptr;
+    const void* yInitHost = nullptr;
+    aclsparseIndexType_t idxType = ACL_SPARSE_INDEX_32I;
+    aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO;
+    aclDataType valType = ACL_FLOAT;
+};
+
+struct ScatterNpuArgs : ScatterCallFields {
+    HandleManager* handle = nullptr;
+};
+
+inline ScatterNpuResult ScatterNpu(const ScatterNpuArgs& a)
 {
     ScatterNpuResult result{};
-    size_t valSize = ScatterAclDataTypeSize(valType);
-    size_t idxSize = (idxType == ACL_SPARSE_INDEX_64I) ? sizeof(int64_t) : sizeof(int32_t);
+    size_t valSize = ScatterAclDataTypeSize(a.valType);
+    size_t idxSize = (a.idxType == ACL_SPARSE_INDEX_64I) ? sizeof(int64_t) : sizeof(int32_t);
 
-    handle.setStream(stream);
+    a.handle->setStream(a.stream);
 
     // 1. Device buffers (RAII)
     //    Ensure minimum 1-byte allocation for nnz=0 / dnSize=0 to avoid null ptr
-    size_t idxBytes = std::max(static_cast<size_t>(nnz) * idxSize, size_t(1));
-    size_t valBytes = std::max(static_cast<size_t>(nnz) * valSize, size_t(1));
-    size_t yBytes   = std::max(static_cast<size_t>(dnSize) * valSize, size_t(1));
+    size_t idxBytes = std::max(static_cast<size_t>(a.nnz) * idxSize, size_t(1));
+    size_t valBytes = std::max(static_cast<size_t>(a.nnz) * valSize, size_t(1));
+    size_t yBytes   = std::max(static_cast<size_t>(a.dnSize) * valSize, size_t(1));
 
-    auto dIndices = (nnz > 0 && indicesHost != nullptr)
-        ? DeviceBuffer::copyFrom(indicesHost, static_cast<size_t>(nnz) * idxSize)
+    auto dIndices = (a.nnz > 0 && a.indicesHost != nullptr)
+        ? DeviceBuffer::copyFrom(a.indicesHost, static_cast<size_t>(a.nnz) * idxSize)
         : DeviceBuffer::alloc(idxBytes);
 
-    auto dValues = (nnz > 0 && valuesHost != nullptr)
-        ? DeviceBuffer::copyFrom(valuesHost, static_cast<size_t>(nnz) * valSize)
+    auto dValues = (a.nnz > 0 && a.valuesHost != nullptr)
+        ? DeviceBuffer::copyFrom(a.valuesHost, static_cast<size_t>(a.nnz) * valSize)
         : DeviceBuffer::alloc(valBytes);
 
-    auto dY = (dnSize > 0 && yInitHost != nullptr)
-        ? DeviceBuffer::copyFrom(yInitHost, static_cast<size_t>(dnSize) * valSize)
+    auto dY = (a.dnSize > 0 && a.yInitHost != nullptr)
+        ? DeviceBuffer::copyFrom(a.yInitHost, static_cast<size_t>(a.dnSize) * valSize)
         : DeviceBuffer::alloc(yBytes);
 
     // 2. Create descriptors (RAII, auto-destroy on scope exit)
     SpVecManager vecX = SpVecManager::createConst(
-        vecSize, nnz, dIndices.get(), dValues.get(),
-        idxType, idxBase, valType);
+        a.vecSize, a.nnz, dIndices.get(), dValues.get(),
+        a.idxType, a.idxBase, a.valType);
     DnVecManager vecY = DnVecManager::create(
-        dnSize, dY.get(), valType);
+        a.dnSize, dY.get(), a.valType);
 
     // 3. Call aclsparseScatter
-    result.execRet = aclsparseScatter(handle.get(), vecX.cget(), vecY.get());
+    result.execRet = aclsparseScatter(a.handle->get(), vecX.cget(), vecY.get());
     if (result.execRet != ACL_SPARSE_STATUS_SUCCESS) {
         std::cerr << "[NPU] aclsparseScatter failed: " << result.execRet << std::endl;
         return result;
     }
 
     // 4. Synchronize
-    if (aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+    if (aclrtSynchronizeStream(a.stream) != ACL_SUCCESS) {
         std::cerr << "[NPU] aclrtSynchronizeStream failed" << std::endl;
         result.execRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return result;
     }
 
     // 5. D2H copy Y
-    result.yBytes.resize(static_cast<size_t>(dnSize) * valSize);
-    if (dnSize > 0) {
-        dY.copyToHost(result.yBytes.data(), static_cast<size_t>(dnSize) * valSize);
+    result.yBytes.resize(static_cast<size_t>(a.dnSize) * valSize);
+    if (a.dnSize > 0) {
+        dY.copyToHost(result.yBytes.data(), static_cast<size_t>(a.dnSize) * valSize);
     }
     return result;
 }  // exit scope → RAII auto-destroy descriptors + free device memory

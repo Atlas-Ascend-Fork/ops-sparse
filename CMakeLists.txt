@@ -151,6 +151,10 @@ set_source_files_properties(
     PROPERTIES LANGUAGE ASC
 )
 
+target_include_directories(${OPS_SPARSE} BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common
+)
 target_include_directories(${OPS_SPARSE} PRIVATE
     ./include
     ./sparse/common
@@ -158,8 +162,8 @@ target_include_directories(${OPS_SPARSE} PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/base/
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/
     ${ASCEND_CANN_PACKAGE_PATH}/include/op_common
-    ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include/utils
-    ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include
+    ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include/utils
+    ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
 )
 
 target_compile_options(${OPS_SPARSE} PRIVATE

@@ -21,18 +21,17 @@
 #include <cstdint>
 #include "scatter_tiling_data.h"
 
-// GM_ADDR: 由 Ascend C toolkit 标准定义（kernel_utils_macros.h）。
-// NPU 侧为 __gm__ uint8_t*（携带全局内存地址空间属性），Host 侧为 uint8_t*。
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
+#endif
 
 extern "C" {
 
-/// aclsparseScatter kernel 启动器（host 侧调用，异步执行）。
 void scatter_kernel_do(
     GM_ADDR indices,
     GM_ADDR values,
     GM_ADDR yVec,
     const ScatterTilingData &tiling,
-    uint32_t numBlocks,
     void *stream);
 
 }  // extern "C"

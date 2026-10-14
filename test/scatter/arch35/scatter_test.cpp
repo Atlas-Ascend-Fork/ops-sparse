@@ -46,7 +46,10 @@ using sparse_test::GetCasesFromCsv;
 using sparse_test::HandleManager;
 using sparse_test::PrecisionMode;
 using sparse_test::ScatterAclDataTypeSize;
+using sparse_test::ScatterCallFields;
 using sparse_test::ScatterNpu;
+using sparse_test::ScatterNpuArgs;
+using sparse_test::ScatterNpuResult;
 using sparse_test::ScatterParam;
 using sparse_test::SpVecManager;
 using sparse_test::Verifier;
@@ -139,9 +142,11 @@ static float Bf16ToFloat(uint16_t b) {
 // ============================================================================
 
 static aclDataType ParseValType(const std::string& s) {
-    if (s == "FP32") return ACL_FLOAT;
-    if (s == "FP16") return ACL_FLOAT16;
+    if (s == "FP32" || s == "FLOAT") return ACL_FLOAT;
+    if (s == "FP16" || s == "FLOAT16") return ACL_FLOAT16;
     if (s == "BF16") return ACL_BF16;
+    if (s == "INT8" || s == "I8") return ACL_INT8;
+    if (s == "COMPLEX64" || s == "C64") return ACL_COMPLEX64;
     return ACL_FLOAT;
 }
 
@@ -205,13 +210,34 @@ struct ScatterHostData {
 };
 
 // Store a value bit pattern into byte buffer at given offset, little-endian
-static void StoreValueBytes(uint8_t* dst, uint32_t fp32Bits, uint16_t fp16Bits,
-                             uint16_t bf16Bits, aclDataType valType, size_t valSize) {
+static void StoreValueBytes(uint8_t* dst, const SpecialValuePattern& bits,
+                             aclDataType valType, size_t valSize) {
     switch (valType) {
-        case ACL_FLOAT16: StoreBytes(dst, fp16Bits, valSize); break;
-        case ACL_BF16:    StoreBytes(dst, bf16Bits, valSize); break;
+        case ACL_FLOAT16:
+            StoreBytes(dst, bits.fp16Bits, valSize);
+            break;
+        case ACL_BF16:
+            StoreBytes(dst, bits.bf16Bits, valSize);
+            break;
+        case ACL_INT8: {
+            // Map float bits → int8 range for ST coverage.
+            int8_t v = static_cast<int8_t>(static_cast<int32_t>(bits.fp32Bits) & 0xFF);
+            if (v == 0) {
+                v = 1;
+            }
+            dst[0] = static_cast<uint8_t>(v);
+            break;
+        }
+        case ACL_COMPLEX64: {
+            // Pack (re, im) as two float32 words; im uses bf16-expanded float for diversity.
+            StoreBytes(dst, bits.fp32Bits, sizeof(float));
+            StoreBytes(dst + sizeof(float), FloatToBits(Bf16ToFloat(bits.bf16Bits)), sizeof(float));
+            break;
+        }
         case ACL_FLOAT:
-        default:          StoreBytes(dst, fp32Bits, valSize); break;
+        default:
+            StoreBytes(dst, bits.fp32Bits, valSize);
+            break;
     }
 }
 
@@ -307,14 +333,12 @@ static void GenerateValuesBytes(const ScatterParam& p, aclDataType valType,
     if (p.value_pattern == "special") {
         for (int64_t i = 0; i < p.vec_nnz; i++) {
             const auto& sv = kSpecialValues[static_cast<size_t>(i) % kNumSpecialValues];
-            StoreValueBytes(&out[static_cast<size_t>(i) * valSize],
-                            sv.fp32Bits, sv.fp16Bits, sv.bf16Bits, valType, valSize);
+            StoreValueBytes(&out[static_cast<size_t>(i) * valSize], sv, valType, valSize);
         }
     } else if (p.value_pattern == "extreme") {
         for (int64_t i = 0; i < p.vec_nnz; i++) {
             const auto& sv = kExtremeValues[static_cast<size_t>(i) % kNumExtremeValues];
-            StoreValueBytes(&out[static_cast<size_t>(i) * valSize],
-                            sv.fp32Bits, sv.fp16Bits, sv.bf16Bits, valType, valSize);
+            StoreValueBytes(&out[static_cast<size_t>(i) * valSize], sv, valType, valSize);
         }
     } else {
         // normal: random [-2, 2] converted to target type
@@ -324,8 +348,8 @@ static void GenerateValuesBytes(const ScatterParam& p, aclDataType valType,
             uint32_t fp32Bits = FloatToBits(fv);
             uint16_t fp16Bits = FloatToHalf(fv);
             uint16_t bf16Bits = FloatToBf16(fv);
-            StoreValueBytes(&out[static_cast<size_t>(i) * valSize],
-                            fp32Bits, fp16Bits, bf16Bits, valType, valSize);
+            SpecialValuePattern bits{fp32Bits, fp16Bits, bf16Bits, "rnd"};
+            StoreValueBytes(&out[static_cast<size_t>(i) * valSize], bits, valType, valSize);
         }
     }
 }
@@ -343,8 +367,8 @@ static void GenerateYInitBytes(const ScatterParam& p, aclDataType valType,
         uint32_t fp32Bits = FloatToBits(fv);
         uint16_t fp16Bits = FloatToHalf(fv);
         uint16_t bf16Bits = FloatToBf16(fv);
-        StoreValueBytes(&out[static_cast<size_t>(i) * valSize],
-                        fp32Bits, fp16Bits, bf16Bits, valType, valSize);
+        SpecialValuePattern bits{fp32Bits, fp16Bits, bf16Bits, "yinit"};
+        StoreValueBytes(&out[static_cast<size_t>(i) * valSize], bits, valType, valSize);
     }
 }
 
@@ -375,8 +399,10 @@ static std::vector<float> BytesToFloatVec(const std::vector<uint8_t>& bytes,
 {
     size_t valSize = ScatterAclDataTypeSize(valType);
     if (valSize == 0 || bytes.empty()) return {};
+    // COMPLEX64: expand to 2 floats per element for Verifier EXACT path.
+    const bool isC64 = (valType == ACL_COMPLEX64);
     size_t count = bytes.size() / valSize;
-    std::vector<float> out(count);
+    std::vector<float> out(isC64 ? count * 2 : count);
     for (size_t i = 0; i < count; i++) {
         const uint8_t* src = &bytes[i * valSize];
         switch (valType) {
@@ -385,6 +411,13 @@ static std::vector<float> BytesToFloatVec(const std::vector<uint8_t>& bytes,
                 break;
             case ACL_BF16:
                 out[i] = Bf16ToFloat(static_cast<uint16_t>(LoadBytes(src, sizeof(uint16_t))));
+                break;
+            case ACL_INT8:
+                out[i] = static_cast<float>(static_cast<int8_t>(src[0]));
+                break;
+            case ACL_COMPLEX64:
+                out[i * 2] = BitsToFloat(LoadBytes(src, sizeof(float)));
+                out[i * 2 + 1] = BitsToFloat(LoadBytes(src + sizeof(float), sizeof(float)));
                 break;
             case ACL_FLOAT:
             default:
@@ -450,41 +483,30 @@ protected:
 // TEST_P: Success-path parameterized test (CSV-driven)
 // ============================================================================
 
-TEST_P(ScatterTest, ScatterSuccess) {
-    const auto& p = param_;
-    PrintCaseHeader(p);
-
-    // Parse API parameters
-    aclDataType valType = ParseValType(p.val_type);
-    aclsparseIndexType_t idxType = ParseIdxType(p.idx_type);
-    aclsparseIndexBase_t idxBase = (p.idx_base == 1)
-        ? ACL_SPARSE_INDEX_BASE_ONE : ACL_SPARSE_INDEX_BASE_ZERO;
-
-    // 1. Generate host data
-    ScatterHostData hostData = GenerateScatterData(p, valType, idxType);
-
-    // 2. Compute golden reference
-    std::vector<uint8_t> goldenY = ComputeScatterGolden(
-        p.dn_size, p.vec_nnz,
-        hostData.indicesBytes, hostData.valuesBytes, hostData.yInitBytes,
-        p.idx_type, p.idx_base, hostData.valSize);
-
-    // 3. NPU call
-    HandleManager handle;
-    auto npuResult = ScatterNpu(
-        handle, stream_,
-        p.vec_size, p.vec_nnz, p.dn_size,
-        hostData.indicesBytes.data(),
-        hostData.valuesBytes.data(),
-        hostData.yInitBytes.data(),
-        idxType, idxBase, valType);
-
-    // 4. Verify API return code
-    aclsparseStatus_t expectedStatus = ParseExpectResult(p.expect_result);
-    ASSERT_EQ(npuResult.execRet, expectedStatus)
-        << "[" << p.case_name << "] aclsparseScatter return code mismatch";
-
-    // 5. EXACT precision verification (atol=0, rtol=0, bitwise)
+// Byte-exact or EXACT-float check. Kept out of TEST_P so NBNC stays <= 50.
+static void CheckScatterOutput(
+    const ScatterParam& p,
+    aclDataType valType,
+    const ScatterNpuResult& npuResult,
+    const std::vector<uint8_t>& goldenY)
+{
+    const bool preferBytes =
+        (valType == ACL_INT8 || valType == ACL_COMPLEX64 ||
+         p.value_pattern == "special" || p.value_pattern == "extreme");
+    if (preferBytes) {
+        EXPECT_EQ(npuResult.yBytes.size(), goldenY.size())
+            << "[" << p.case_name << "] Y byte size mismatch";
+        if (npuResult.yBytes.size() != goldenY.size()) {
+            return;
+        }
+        size_t mismatchAt = 0;
+        bool byteExact = VerifyBytesExact(npuResult.yBytes, goldenY, mismatchAt);
+        EXPECT_TRUE(byteExact)
+            << "[" << p.case_name << "] memcmp mismatch at byte " << mismatchAt
+            << " (NPU=0x" << std::hex << static_cast<int>(npuResult.yBytes[mismatchAt])
+            << " vs golden=0x" << static_cast<int>(goldenY[mismatchAt]) << std::dec << ")";
+        return;
+    }
     VerifyConfig cfg;
     cfg.SetMode(PrecisionMode::EXACT);
     bool ok = Verifier::verifyVector(
@@ -492,21 +514,42 @@ TEST_P(ScatterTest, ScatterSuccess) {
         BytesToFloatVec(goldenY, valType),
         cfg, p.case_name + "_Y");
     EXPECT_TRUE(ok);
+}
 
-    // 6. For special/extreme patterns, add byte-exact comparison to catch
-    //    ±0 sign bit and NaN payload differences that EXACT float comparison
-    //    might not detect.
-    if (p.value_pattern == "special" || p.value_pattern == "extreme") {
-        ASSERT_EQ(npuResult.yBytes.size(), goldenY.size())
-            << "[" << p.case_name << "] Y byte size mismatch";
-        size_t mismatchAt = 0;
-        bool byteExact = VerifyBytesExact(npuResult.yBytes, goldenY, mismatchAt);
-        EXPECT_TRUE(byteExact)
-            << "[" << p.case_name << "] memcmp mismatch at byte " << mismatchAt
-            << " (NPU=0x" << std::hex << static_cast<int>(npuResult.yBytes[mismatchAt])
-            << " vs golden=0x" << static_cast<int>(goldenY[mismatchAt]) << std::dec << ")";
-    }
+TEST_P(ScatterTest, ScatterSuccess) {
+    const auto& p = param_;
+    PrintCaseHeader(p);
 
+    aclDataType valType = ParseValType(p.val_type);
+    aclsparseIndexType_t idxType = ParseIdxType(p.idx_type);
+    aclsparseIndexBase_t idxBase = (p.idx_base == 1)
+        ? ACL_SPARSE_INDEX_BASE_ONE : ACL_SPARSE_INDEX_BASE_ZERO;
+
+    ScatterHostData hostData = GenerateScatterData(p, valType, idxType);
+    std::vector<uint8_t> goldenY = ComputeScatterGolden(
+        p.dn_size, p.vec_nnz,
+        hostData.indicesBytes, hostData.valuesBytes, hostData.yInitBytes,
+        p.idx_type, p.idx_base, hostData.valSize);
+
+    HandleManager handle;
+    ScatterNpuArgs npuArgs;
+    npuArgs.handle = &handle;
+    npuArgs.stream = stream_;
+    npuArgs.vecSize = p.vec_size;
+    npuArgs.nnz = p.vec_nnz;
+    npuArgs.dnSize = p.dn_size;
+    npuArgs.indicesHost = hostData.indicesBytes.data();
+    npuArgs.valuesHost = hostData.valuesBytes.data();
+    npuArgs.yInitHost = hostData.yInitBytes.data();
+    npuArgs.idxType = idxType;
+    npuArgs.idxBase = idxBase;
+    npuArgs.valType = valType;
+    auto npuResult = ScatterNpu(npuArgs);
+
+    aclsparseStatus_t expectedStatus = ParseExpectResult(p.expect_result);
+    ASSERT_EQ(npuResult.execRet, expectedStatus)
+        << "[" << p.case_name << "] aclsparseScatter return code mismatch";
+    CheckScatterOutput(p, valType, npuResult, goldenY);
     std::cout << "[" << p.case_name << "] PASSED\n";
 }
 
@@ -534,17 +577,28 @@ static DeviceBuffer MakeDeviceBuffer(const void* hostPtr, size_t copyBytes,
     return canCopy ? DeviceBuffer::copyFrom(hostPtr, copyBytes) : DeviceBuffer::alloc(allocBytes);
 }
 
+struct ScatterDevPtrs {
+    void* indices = nullptr;
+    void* values = nullptr;
+    void* y = nullptr;
+};
+
+struct ScatterExArgs : ScatterCallFields {
+    aclsparseHandle_t handle = nullptr;
+    bool nullVecX = false;
+    bool nullVecY = false;
+};
+
 // E1 helper: create dummy valid descriptors, call scatter with nullptr handle.
 static aclsparseStatus_t ScatterWithNullHandle(
-    int64_t vecSize, int64_t nnz, int64_t dnSize,
-    void* dIndices, void* dValues, void* dY,
-    aclsparseIndexType_t idxType, aclsparseIndexBase_t idxBase, aclDataType valType) {
+    const ScatterExArgs& a, const ScatterDevPtrs& d)
+{
     aclsparseConstSpVecDescr_t spVecDescr = nullptr;
     aclsparseDnVecDescr_t dnVecDescr = nullptr;
-    auto st = aclsparseCreateConstSpVec(&spVecDescr, vecSize, nnz,
-        dIndices, dValues, idxType, idxBase, valType);
+    auto st = aclsparseCreateConstSpVec(&spVecDescr, a.vecSize, a.nnz,
+        d.indices, d.values, a.idxType, a.idxBase, a.valType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    st = aclsparseCreateDnVec(&dnVecDescr, dnSize, dY, valType);
+    st = aclsparseCreateDnVec(&dnVecDescr, a.dnSize, d.y, a.valType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         aclsparseDestroySpVec(spVecDescr);
         return st;
@@ -556,32 +610,24 @@ static aclsparseStatus_t ScatterWithNullHandle(
 }
 
 // E2/E3: scatter call with exactly one null descriptor (null vecX or null vecY).
-//   nullVecX=true → aclsparseScatter(h, nullptr, dnVec)
-//   nullVecY=true → aclsparseScatter(h, spVec,  nullptr)
-// When neither flag is set, sets handled=false and returns SUCCESS so the
-// caller can proceed with the normal (both-descriptors) path.
 static aclsparseStatus_t ScatterWithOneNullDescriptor(
-    aclsparseHandle_t h, int64_t vecSize, int64_t nnz, int64_t dnSize,
-    bool nullVecX, bool nullVecY,
-    void* dIndices, void* dValues, void* dY,
-    aclsparseIndexType_t idxType, aclsparseIndexBase_t idxBase,
-    aclDataType valType, bool& handled)
+    const ScatterExArgs& a, const ScatterDevPtrs& d, bool& handled)
 {
     handled = true;
-    if (nullVecX) {
+    if (a.nullVecX) {
         aclsparseDnVecDescr_t dnVecDescr = nullptr;
-        auto st = aclsparseCreateDnVec(&dnVecDescr, dnSize, dY, valType);
+        auto st = aclsparseCreateDnVec(&dnVecDescr, a.dnSize, d.y, a.valType);
         if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-        st = aclsparseScatter(h, nullptr, dnVecDescr);
+        st = aclsparseScatter(a.handle, nullptr, dnVecDescr);
         aclsparseDestroyDnVec(dnVecDescr);
         return st;
     }
-    if (nullVecY) {
+    if (a.nullVecY) {
         aclsparseConstSpVecDescr_t spVecDescr = nullptr;
-        auto st = aclsparseCreateConstSpVec(&spVecDescr, vecSize, nnz,
-            dIndices, dValues, idxType, idxBase, valType);
+        auto st = aclsparseCreateConstSpVec(&spVecDescr, a.vecSize, a.nnz,
+            d.indices, d.values, a.idxType, a.idxBase, a.valType);
         if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-        st = aclsparseScatter(h, spVecDescr, nullptr);
+        st = aclsparseScatter(a.handle, spVecDescr, nullptr);
         aclsparseDestroySpVec(spVecDescr);
         return st;
     }
@@ -631,67 +677,64 @@ protected:
         handle_.reset();
     }
 
-    // Helper: run scatter with explicit parameters, return status
-    aclsparseStatus_t RunScatter(
-        aclsparseHandle_t h,
-        int64_t vecSize, int64_t nnz, int64_t dnSize,
-        const void* indicesHost, const void* valuesHost, const void* yInitHost,
-        aclsparseIndexType_t idxType,
-        aclsparseIndexBase_t idxBase,
-        aclDataType valType,
-        aclrtStream stream,
-        bool nullVecX = false,
-        bool nullVecY = false)
+    ScatterExArgs MakeDefaultArgs() {
+        ScatterExArgs args;
+        args.handle = handle_->get();
+        args.stream = stream_;
+        args.vecSize = kSize;
+        args.nnz = kNnz;
+        args.dnSize = kDn;
+        args.indicesHost = indicesHost_.data();
+        args.valuesHost = valuesHost_.data();
+        args.yInitHost = yInitHost_.data();
+        return args;
+    }
+
+    // Helper: run scatter with packed args (G.FNM.03), return status
+    aclsparseStatus_t RunScatter(const ScatterExArgs& a)
     {
-        size_t valSize = ScatterAclDataTypeSize(valType);
-        size_t idxSize = (idxType == ACL_SPARSE_INDEX_64I) ? sizeof(int64_t) : sizeof(int32_t);
+        size_t valSize = ScatterAclDataTypeSize(a.valType);
+        size_t idxSize = (a.idxType == ACL_SPARSE_INDEX_64I) ? sizeof(int64_t) : sizeof(int32_t);
 
-        size_t idxBytes = std::max(static_cast<size_t>(nnz) * idxSize, size_t(1));
-        size_t valBytes = std::max(static_cast<size_t>(nnz) * valSize, size_t(1));
-        size_t yBytes   = std::max(static_cast<size_t>(dnSize) * valSize, size_t(1));
+        size_t idxBytes = std::max(static_cast<size_t>(a.nnz) * idxSize, size_t(1));
+        size_t valBytes = std::max(static_cast<size_t>(a.nnz) * valSize, size_t(1));
+        size_t yBytes   = std::max(static_cast<size_t>(a.dnSize) * valSize, size_t(1));
 
-        // nullVecX/nullVecY flags mark null-descriptor tests: the corresponding
-        // host pointer is nullptr, MakeDeviceBuffer allocates a dummy device buffer.
-        auto dIndices = MakeDeviceBuffer(indicesHost,
-            static_cast<size_t>(nnz) * idxSize, idxBytes);
-        auto dValues = MakeDeviceBuffer(valuesHost,
-            static_cast<size_t>(nnz) * valSize, valBytes);
-        auto dY = MakeDeviceBuffer(yInitHost,
-            static_cast<size_t>(dnSize) * valSize, yBytes);
+        auto dIndices = MakeDeviceBuffer(a.indicesHost,
+            static_cast<size_t>(a.nnz) * idxSize, idxBytes);
+        auto dValues = MakeDeviceBuffer(a.valuesHost,
+            static_cast<size_t>(a.nnz) * valSize, valBytes);
+        auto dY = MakeDeviceBuffer(a.yInitHost,
+            static_cast<size_t>(a.dnSize) * valSize, yBytes);
+        ScatterDevPtrs dptrs{dIndices.get(), dValues.get(), dY.get()};
 
-        if (h != nullptr) {
-            auto setRet = aclsparseSetStream(h, stream);
+        if (a.handle != nullptr) {
+            auto setRet = aclsparseSetStream(a.handle, a.stream);
             if (setRet != ACL_SPARSE_STATUS_SUCCESS) {
                 return setRet;
             }
         }
 
-        // E1: null handle — pass dummy non-null descriptors to isolate handle check
-        if (h == nullptr) {
-            return ScatterWithNullHandle(vecSize, nnz, dnSize,
-                dIndices.get(), dValues.get(), dY.get(), idxType, idxBase, valType);
+        if (a.handle == nullptr) {
+            return ScatterWithNullHandle(a, dptrs);
         }
 
-        // E2/E3: null vecX / null vecY descriptor — delegate to helper
         bool nullDescHandled = false;
-        auto st = ScatterWithOneNullDescriptor(h, vecSize, nnz, dnSize,
-            nullVecX, nullVecY, dIndices.get(), dValues.get(), dY.get(),
-            idxType, idxBase, valType, nullDescHandled);
+        auto st = ScatterWithOneNullDescriptor(a, dptrs, nullDescHandled);
         if (nullDescHandled) return st;
 
-        // Normal path: create both descriptors and call
         aclsparseConstSpVecDescr_t spVecDescr = nullptr;
         aclsparseDnVecDescr_t dnVecDescr = nullptr;
-        st = aclsparseCreateConstSpVec(&spVecDescr, vecSize, nnz,
-            dIndices.get(), dValues.get(), idxType, idxBase, valType);
+        st = aclsparseCreateConstSpVec(&spVecDescr, a.vecSize, a.nnz,
+            dIndices.get(), dValues.get(), a.idxType, a.idxBase, a.valType);
         if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-        st = aclsparseCreateDnVec(&dnVecDescr, dnSize, dY.get(), valType);
+        st = aclsparseCreateDnVec(&dnVecDescr, a.dnSize, dY.get(), a.valType);
         if (st != ACL_SPARSE_STATUS_SUCCESS) {
             aclsparseDestroySpVec(spVecDescr);
             return st;
         }
-        st = aclsparseScatter(h, spVecDescr, dnVecDescr);
-        if (aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+        st = aclsparseScatter(a.handle, spVecDescr, dnVecDescr);
+        if (aclrtSynchronizeStream(a.stream) != ACL_SUCCESS) {
             std::cerr << "[Test] aclrtSynchronizeStream failed (scatter may be incomplete)\n";
         }
         aclsparseDestroySpVec(spVecDescr);
@@ -702,43 +745,46 @@ protected:
 
 // E1: null handle
 TEST_F(ScatterExceptionTest, NullHandle) {
-    auto st = RunScatter(nullptr, kSize, kNnz, kDn,
-        indicesHost_.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_);
+    auto args = MakeDefaultArgs();
+    args.handle = nullptr;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
 }
 
 // E2: null vecX
 TEST_F(ScatterExceptionTest, NullVecX) {
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        nullptr, valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_,
-        true, false);
+    auto args = MakeDefaultArgs();
+    args.indicesHost = nullptr;
+    args.nullVecX = true;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
 // E3: null vecY
 TEST_F(ScatterExceptionTest, NullVecY) {
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        indicesHost_.data(), valuesHost_.data(), nullptr,
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_,
-        false, true);
+    auto args = MakeDefaultArgs();
+    args.yInitHost = nullptr;
+    args.nullVecY = true;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
 // E4: vecX.size > vecY.nums
 TEST_F(ScatterExceptionTest, SizeGtDn) {
-    auto st = RunScatter(handle_->get(), 20, kNnz, 16,
-        indicesHost_.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_);
+    auto args = MakeDefaultArgs();
+    args.vecSize = 20;
+    args.dnSize = 16;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
 // E5: vecX.nnz > vecX.size
 TEST_F(ScatterExceptionTest, NnzGtSize) {
-    auto st = RunScatter(handle_->get(), 16, 20, 16,
-        indicesHost_.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_);
+    auto args = MakeDefaultArgs();
+    args.vecSize = 16;
+    args.nnz = 20;
+    args.dnSize = 16;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
@@ -767,23 +813,23 @@ TEST_F(ScatterExceptionTest, TypeMismatch) {
     if (dnVecDescr) aclsparseDestroyDnVec(dnVecDescr);
 }
 
-// E7: INT8 not supported
-TEST_F(ScatterExceptionTest, UnsupportedInt8) {
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        indicesHost_.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_INT8, stream_);
-    // May fail at CreateConstSpVec or at Scatter; either NOT_SUPPORTED or INVALID_VALUE
-    // Test plan §4.3 E7 expects NOT_SUPPORTED
-    bool acceptable = (st == ACL_SPARSE_STATUS_NOT_SUPPORTED ||
-                       st == ACL_SPARSE_STATUS_INVALID_VALUE);
-    EXPECT_TRUE(acceptable) << "Expected NOT_SUPPORTED or INVALID_VALUE, got " << st;
+// E7: INT8 supported on arch35
+TEST_F(ScatterExceptionTest, Int8Supported) {
+    std::vector<int8_t> valuesHost(kNnz, 7);
+    std::vector<int8_t> yInitHost(kDn, -1);
+    auto args = MakeDefaultArgs();
+    args.valuesHost = valuesHost.data();
+    args.yInitHost = yInitHost.data();
+    args.valType = ACL_INT8;
+    auto st = RunScatter(args);
+    EXPECT_EQ(st, ACL_SPARSE_STATUS_SUCCESS) << "INT8 scatter failed with " << st;
 }
 
 // E8: FP64 not supported
 TEST_F(ScatterExceptionTest, UnsupportedFp64) {
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        indicesHost_.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_DOUBLE, stream_);
+    auto args = MakeDefaultArgs();
+    args.valType = ACL_DOUBLE;
+    auto st = RunScatter(args);
     bool acceptable = (st == ACL_SPARSE_STATUS_NOT_SUPPORTED ||
                        st == ACL_SPARSE_STATUS_INVALID_VALUE);
     EXPECT_TRUE(acceptable) << "Expected NOT_SUPPORTED or INVALID_VALUE, got " << st;
@@ -817,10 +863,10 @@ TEST_F(ScatterExceptionTest, InvalidIdxType) {
 
 // E10: invalid idxBase enum
 TEST_F(ScatterExceptionTest, InvalidIdxBase) {
-    aclsparseIndexBase_t invalidBase = static_cast<aclsparseIndexBase_t>(999);
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        indicesHost_.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, invalidBase, ACL_FLOAT, stream_);
+    auto invalidBase = static_cast<aclsparseIndexBase_t>(99);
+    auto args = MakeDefaultArgs();
+    args.idxBase = invalidBase;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
@@ -831,9 +877,9 @@ TEST_F(ScatterExceptionTest, InvalidIdxBase) {
 TEST_F(ScatterExceptionTest, IdxOobZero) {
     // Create indices with one value == dn (out of bounds for ZERO base)
     std::vector<int32_t> badIndices = {0, 2, 4, 6, 8, 10, 12, static_cast<int32_t>(kDn)};
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        badIndices.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_);
+    auto args = MakeDefaultArgs();
+    args.indicesHost = badIndices.data();
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_SUCCESS);
 }
 
@@ -841,35 +887,44 @@ TEST_F(ScatterExceptionTest, IdxOobZero) {
 TEST_F(ScatterExceptionTest, IdxOobOne) {
     // idxBase=ONE: valid indices are [1, dn]; dn+1 is out of bounds
     std::vector<int32_t> badIndices = {1, 3, 5, 7, 9, 11, 13, static_cast<int32_t>(kDn + 1)};
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        badIndices.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ONE, ACL_FLOAT, stream_);
+    auto args = MakeDefaultArgs();
+    args.indicesHost = badIndices.data();
+    args.idxBase = ACL_SPARSE_INDEX_BASE_ONE;
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_SUCCESS);
 }
 
 // E13: index negative (ZERO, indices[i] = -1)
 TEST_F(ScatterExceptionTest, IdxNegative) {
     std::vector<int32_t> badIndices = {-1, 2, 4, 6, 8, 10, 12, 14};
-    auto st = RunScatter(handle_->get(), kSize, kNnz, kDn,
-        badIndices.data(), valuesHost_.data(), yInitHost_.data(),
-        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT, stream_);
+    auto args = MakeDefaultArgs();
+    args.indicesHost = badIndices.data();
+    auto st = RunScatter(args);
     EXPECT_EQ(st, ACL_SPARSE_STATUS_SUCCESS);
 }
 
 // Helper for E14/E15: create SpVec with one null field, create DnVec, call scatter,
 // expect INVALID_VALUE. Eliminates duplicate code between NullIndices and NullValues.
-static void TestScatterNullSpVecField(aclsparseHandle_t handle,
-    int64_t size, int64_t nnz, int64_t dnSize,
-    void* dIndices, void* dValues, void* dY) {
+struct NullSpVecFieldArgs {
+    aclsparseHandle_t handle = nullptr;
+    int64_t size = 0;
+    int64_t nnz = 0;
+    int64_t dnSize = 0;
+    void* dIndices = nullptr;
+    void* dValues = nullptr;
+    void* dY = nullptr;
+};
+
+static void TestScatterNullSpVecField(const NullSpVecFieldArgs& a) {
     aclsparseConstSpVecDescr_t spVecDescr = nullptr;
     aclsparseDnVecDescr_t dnVecDescr = nullptr;
-    auto st1 = aclsparseCreateConstSpVec(&spVecDescr, size, nnz,
-        dIndices, dValues, ACL_SPARSE_INDEX_32I,
+    auto st1 = aclsparseCreateConstSpVec(&spVecDescr, a.size, a.nnz,
+        a.dIndices, a.dValues, ACL_SPARSE_INDEX_32I,
         ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     if (st1 == ACL_SPARSE_STATUS_SUCCESS) {
-        auto st2 = aclsparseCreateDnVec(&dnVecDescr, dnSize, dY, ACL_FLOAT);
+        auto st2 = aclsparseCreateDnVec(&dnVecDescr, a.dnSize, a.dY, ACL_FLOAT);
         if (st2 == ACL_SPARSE_STATUS_SUCCESS) {
-            auto st = aclsparseScatter(handle, spVecDescr, dnVecDescr);
+            auto st = aclsparseScatter(a.handle, spVecDescr, dnVecDescr);
             EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
             aclsparseDestroyDnVec(dnVecDescr);
         }
@@ -881,16 +936,30 @@ static void TestScatterNullSpVecField(aclsparseHandle_t handle,
 TEST_F(ScatterExceptionTest, NullIndices) {
     auto dValues = DeviceBuffer::copyFrom(valuesHost_.data(), kNnz * sizeof(float));
     auto dY = DeviceBuffer::copyFrom(yInitHost_.data(), kDn * sizeof(float));
-    TestScatterNullSpVecField(handle_->get(), kSize, kNnz, kDn,
-        nullptr, dValues.get(), dY.get());
+    NullSpVecFieldArgs na;
+    na.handle = handle_->get();
+    na.size = kSize;
+    na.nnz = kNnz;
+    na.dnSize = kDn;
+    na.dIndices = nullptr;
+    na.dValues = dValues.get();
+    na.dY = dY.get();
+    TestScatterNullSpVecField(na);
 }
 
 // E15: null values (vecX.values = nullptr, nnz > 0)
 TEST_F(ScatterExceptionTest, NullValues) {
     auto dIndices = DeviceBuffer::copyFrom(indicesHost_.data(), kNnz * sizeof(int32_t));
     auto dY = DeviceBuffer::copyFrom(yInitHost_.data(), kDn * sizeof(float));
-    TestScatterNullSpVecField(handle_->get(), kSize, kNnz, kDn,
-        dIndices.get(), nullptr, dY.get());
+    NullSpVecFieldArgs na;
+    na.handle = handle_->get();
+    na.size = kSize;
+    na.nnz = kNnz;
+    na.dnSize = kDn;
+    na.dIndices = dIndices.get();
+    na.dValues = nullptr;
+    na.dY = dY.get();
+    TestScatterNullSpVecField(na);
 }
 
 // E16: null Y values (vecY.values = nullptr)
@@ -911,6 +980,25 @@ TEST_F(ScatterExceptionTest, NullYValues) {
         }
     }
     if (spVecDescr) aclsparseDestroySpVec(spVecDescr);
+}
+
+// E17: undeclared alias — vecX.values and vecY.values share the same Device pointer
+TEST_F(ScatterExceptionTest, ValuesAliasY) {
+    auto dIndices = DeviceBuffer::copyFrom(indicesHost_.data(), kNnz * sizeof(int32_t));
+    // Allocate one buffer large enough for both values[nnz] and Y[dn] views; reuse as Y.
+    auto dShared = DeviceBuffer::copyFrom(yInitHost_.data(), kDn * sizeof(float));
+    aclsparseConstSpVecDescr_t spVecDescr = nullptr;
+    aclsparseDnVecDescr_t dnVecDescr = nullptr;
+    auto st1 = aclsparseCreateConstSpVec(&spVecDescr, kSize, kNnz,
+        dIndices.get(), dShared.get(), ACL_SPARSE_INDEX_32I,
+        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    ASSERT_EQ(st1, ACL_SPARSE_STATUS_SUCCESS);
+    auto st2 = aclsparseCreateDnVec(&dnVecDescr, kDn, dShared.get(), ACL_FLOAT);
+    ASSERT_EQ(st2, ACL_SPARSE_STATUS_SUCCESS);
+    auto st = aclsparseScatter(handle_->get(), spVecDescr, dnVecDescr);
+    EXPECT_EQ(st, ACL_SPARSE_STATUS_INVALID_VALUE);
+    aclsparseDestroyDnVec(dnVecDescr);
+    aclsparseDestroySpVec(spVecDescr);
 }
 
 // ============================================================================

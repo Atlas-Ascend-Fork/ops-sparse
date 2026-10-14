@@ -9,6 +9,7 @@
 | public PyTorch API | ATen schema | 分发键 | 算子 | 文档 |
 | :--- | :--- | :--- | :--- | :--- |
 | `torch.index_select` | `aten::index_select` | `PrivateUse1` | gather | [gather.md](gather.md) |
+| `Tensor.index_copy_` | `aten::index_copy_` | `PrivateUse1` | scatter | [scatter.md](scatter.md) |
 | `torch.mm` / `torch.addmm` | `aten::mm` / `aten::addmm`（含 out overload） | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm / 后续 spmm 能力 | [spgemm.md](spgemm.md) |
 | `torch.sparse.mm` / `torch.sparse.addmm` | `aten::_sparse_addmm` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm / 后续 spmm 能力 | [spgemm.md](spgemm.md) |
 | `torch.sparse.mm` | `aten::_sparse_sparse_matmul` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm | [spgemm.md](spgemm.md) |

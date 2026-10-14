@@ -73,6 +73,24 @@ def test_scatter_empty_index_unchanged():
     assert torch.equal(y, y_ref)
 
 
+def test_scatter_rejects_contiguous_offset_overlap():
+    """source=self[1:] 连续且 data_ptr 不同，但仍与 self 共享存储，必须拒绝。"""
+    device = "npu:{}".format(torch.npu.current_device())
+    self = torch.arange(4, dtype=torch.float32, device=device)
+    source = self[1:]
+    index = torch.tensor([1, 2, 0], dtype=torch.int32, device=device)
+    assert source.is_contiguous()
+    assert source.data_ptr() != self.data_ptr()
+    self_ref = self.clone()
+    try:
+        self.index_copy_(0, index, source)
+        raise AssertionError("overlapping contiguous offset view should raise")
+    except RuntimeError:
+        pass
+    torch.npu.synchronize()
+    assert torch.equal(self, self_ref)
+
+
 def test_scatter_error_paths():
     """非法输入确定拒绝且输出逐位未修改；合法路径不受影响。
 

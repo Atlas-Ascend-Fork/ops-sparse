@@ -73,6 +73,39 @@ if(NOT SPARSELT_KERNEL_SRCS)
                    "skipping sparseLt library")
 endif()
 
+# OP_LIST path filter (same idea as sparse/CMakeLists.txt: keep sources whose path
+# contains /${op}/). Reuses ENABLE_SPARSELT: when the build is filtered to non-Lt
+# ops (e.g. --ops=scatter → -DOP_LIST=scatter), no path under sparseLt/ matches,
+# so clear sources and skip the Lt library. Decouples single sparse-op builds from
+# compiling the full sparseLt tree.
+if(OP_LIST AND ENABLE_SPARSELT)
+    set(_filtered_host "")
+    set(_filtered_kernel "")
+    foreach(src ${SPARSELT_HOST_SRCS})
+        foreach(op ${OP_LIST})
+            if(src MATCHES "/${op}/")
+                list(APPEND _filtered_host ${src})
+                break()
+            endif()
+        endforeach()
+    endforeach()
+    foreach(src ${SPARSELT_KERNEL_SRCS})
+        foreach(op ${OP_LIST})
+            if(src MATCHES "/${op}/")
+                list(APPEND _filtered_kernel ${src})
+                break()
+            endif()
+        endforeach()
+    endforeach()
+    set(SPARSELT_HOST_SRCS ${_filtered_host})
+    set(SPARSELT_KERNEL_SRCS ${_filtered_kernel})
+    if(NOT SPARSELT_HOST_SRCS AND NOT SPARSELT_KERNEL_SRCS)
+        set(ENABLE_SPARSELT FALSE)
+        message(STATUS "[sparseLt] OP_LIST=${OP_LIST} matches no path under sparseLt/, "
+                       "ENABLE_SPARSELT=FALSE")
+    endif()
+endif()
+
 if(NOT ENABLE_SPARSELT)
     # 清空源文件列表，使根 CMakeLists.txt 的 if(ALL_SPARSELT_SRC_FILES) 跳过库构建
     set(SPARSELT_HOST_SRCS "")

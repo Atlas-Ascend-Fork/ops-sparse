@@ -166,6 +166,13 @@ void ValidateIndexCopyInputs(const at::Tensor &self, int64_t dim, const at::Tens
     TORCH_CHECK(index.numel() == source.numel(),
                 "index.numel() (", index.numel(), ") must equal source.numel() (", source.numel(), ")");
 
+    // Reject storage overlap before launch (matches aten::index_copy_ contract).
+    // Contiguous offset views like source=self[1:] pass pointer-equality checks
+    // but still race when the kernel reads source while writing self.
+    at::assert_no_internal_overlap(self);
+    at::assert_no_overlap(self, source);
+    at::assert_no_overlap(self, index);
+
     aclType = ACL_FLOAT;
     TORCH_CHECK(ToAclDtype(self.scalar_type(), aclType),
                 "aclsparseScatter unsupported dtype: ", self.scalar_type());
