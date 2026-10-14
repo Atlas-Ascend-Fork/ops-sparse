@@ -60,7 +60,7 @@ aclsparseStatus_t aclsparseSgtsv2Nopivot(
 | du | 输入 | const float* | 上对角线数组 [m]，du[m-1] 必须在调用前置 0 | Device 内存 |
 | B | 输入/输出 | float* | 右端项 b（输入）/ 解 X（输出），大小为 ldb × n（column-major）。输入时为右端矩阵 B，计算完成后原地覆盖为解矩阵 X | Device 内存 |
 | ldb | 输入 | int | B 的 leading dimension，需 ≥ max(1, m) | Host 内存 |
-| pBuffer | 输入 | void* | 工作区 buffer，地址必须 128 字节对齐。当 m ≤ 1 时可为 nullptr；当 m > 1 时必须为有效指针，大小不少于 bufferSizeExt 返回的字节数 | Device 内存 |
+| pBuffer | 输入 | void* | 工作区 buffer，地址必须 128 字节对齐；合法输入（m ≥ 3）时必须为有效指针，大小不少于 bufferSizeExt 返回的字节数 | Device 内存 |
 
 #### 约束说明
 
@@ -113,7 +113,7 @@ aclsparseStatus_t aclsparseSgtsv2Nopivot_bufferSizeExt(
 - n ≥ 1
 - ldb ≥ max(1, m)
 - dl、d、du、B、pBufferSizeInBytes 均不可为 nullptr
-- 当 m ≤ 1 时，返回 0（无需工作区）
+- 当 m < 3 时，返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - 返回的工作区大小已包含 128 字节对齐
 
 ## 支持的稀疏格式
