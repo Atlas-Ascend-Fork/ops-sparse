@@ -52,6 +52,13 @@
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
+| [aclsparseSpMVOp_bufferSize](#aclsparsespmvop_buffersize) | 获取 SpMVOp workspace 大小 |
+| [aclsparseSpMVOp_createDescr](#aclsparsespmvop_createdescr) | 创建 SpMVOp 描述符并执行预处理 |
+| [aclsparseSpMVOp_destroyDescr](#aclsparsespmvop_destroydescr) | 销毁 SpMVOp 描述符 |
+| [aclsparseSpMVOp_createPlan](#aclsparsespmvop_createplan) | 创建 SpMVOp 执行计划 |
+| [aclsparseSpMVOp_destroyPlan](#aclsparsespmvop_destroyplan) | 销毁 SpMVOp 执行计划 |
+| [aclsparseSpMVOp_setGlobalUserData](#aclsparsespmvop_setglobaluserdata) | 设置 SpMVOp epilogue 用户数据（NPU 侧为 no-op） |
+| [aclsparseSpMVOp](#aclsparsespmvop) | 执行稀疏矩阵-向量乘法 |
 | [aclsparseSpMMOp_bufferSize](#aclsparsespmmop_buffersize) | 获取 workspace 大小 |
 | [aclsparseSpMMOp_createDescr](#aclsparsespmmop_createdescr) | 创建描述符并执行预处理 |
 | [aclsparseSpMMOp_destroyDescr](#aclsparsespmmop_destroydescr) | 销毁描述符 |
@@ -1280,6 +1287,210 @@ aclsparseStatus_t aclsparseSpMM(
 - `computeType`（IN）：HOST，计算类型。
 - `alg`（IN）：HOST，SpMM 算法类型。
 - `buffer`（IN）：DEVICE，工作缓冲区指针（需先调用 `aclsparseSpMMGetBufferSize` 分配，建议先调用 `aclsparseSpMMPreprocess` 预处理）。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp_bufferSize
+
+```c
+aclsparseStatus_t aclsparseSpMVOp_bufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseDnVecDescr_t vecZ,
+    aclDataType computeType,
+    aclsparseSpMVOpAlg_t alg,
+    size_t *bufferSize);
+```
+
+**功能**：获取 SpMVOp 所需 workspace 大小（字节数）。ALG1 / DEFAULT 返回 0；ALG2 返回重排表、临时重排表、scratch、临时 scratch 和 bin_edge 表的总大小（包含 64 字节对齐开销）。
+
+SpMVOp 系列接口遵循 descriptor/plan 生命周期模式，调用顺序为：`aclsparseSpMVOp_bufferSize` → `aclsparseSpMVOp_createDescr` → `aclsparseSpMVOp_createPlan` → [可选 `aclsparseSpMVOp_setGlobalUserData`] → `aclsparseSpMVOp` → `aclsparseSpMVOp_destroyPlan` → `aclsparseSpMVOp_destroyDescr`。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `opA`（IN）：HOST，矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `matA`（IN）：HOST，CSR 稀疏矩阵描述符。
+- `vecX`（IN）：HOST，输入稠密向量描述符。
+- `vecY`（IN）：HOST，额外加法输入稠密向量描述符。
+- `vecZ`（IN/OUT）：HOST，输出稠密向量描述符。
+- `computeType`（IN）：HOST，计算类型，仅支持 `ACL_FLOAT`。
+- `alg`（IN）：HOST，SpMVOp 算法类型。
+- `bufferSize`（OUT）：HOST，返回所需 workspace 字节数。
+
+**约束说明**：`matA` 必须为 CSR 格式，值类型必须为 FP32，列索引类型必须为 int32，行偏移类型可为 int32 或 int64。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp_createDescr
+
+```c
+aclsparseStatus_t aclsparseSpMVOp_createDescr(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpDescr_t *descr,
+    aclsparseOperation_t opA,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseDnVecDescr_t vecZ,
+    aclDataType computeType,
+    aclsparseSpMVOpAlg_t alg,
+    void *buffer);
+```
+
+**功能**：创建 SpMVOp 内部描述符并执行预处理。ALG2 的预处理在 handle 关联的 stream 上异步执行排序和 bin_edge 负载均衡切分。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `descr`（OUT）：HOST，返回 SpMVOp 描述符。
+- `opA`（IN）：HOST，矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `matA`（IN）：HOST，CSR 稀疏矩阵描述符。
+- `vecX`（IN）：HOST，输入稠密向量描述符。
+- `vecY`（IN）：HOST，额外加法输入稠密向量描述符。
+- `vecZ`（IN/OUT）：HOST，输出稠密向量描述符。
+- `computeType`（IN）：HOST，计算类型，仅支持 `ACL_FLOAT`。
+- `alg`（IN）：HOST，SpMVOp 算法类型。
+- `buffer`（IN）：DEVICE，workspace 缓冲区，由调用者先经 `aclsparseSpMVOp_bufferSize` 查询大小并分配。
+
+**约束说明**：ALG2 时 `buffer` 不可为 NULL，且其大小不得小于 `aclsparseSpMVOp_bufferSize` 返回值；`buffer` 必须在 descr 销毁前保持有效。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp_destroyDescr
+
+```c
+aclsparseStatus_t aclsparseSpMVOp_destroyDescr(aclsparseSpMVOpDescr_t descr);
+```
+
+**功能**：销毁 SpMVOp 描述符并释放其管理的 host 资源。`descr` 为 nullptr 时直接返回 SUCCESS。必须先销毁执行计划，再销毁描述符。
+
+**参数说明**：`descr`（IN）：HOST，要销毁的 SpMVOp 描述符。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp_createPlan
+
+```c
+aclsparseStatus_t aclsparseSpMVOp_createPlan(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpDescr_t descr,
+    aclsparseSpMVOpPlan_t *plan,
+    const void *epilogueLTOBuffer,
+    size_t epilogueLTOBufferSize);
+```
+
+**功能**：基于 descr 创建执行计划。NPU 侧使用 identity epilogue，`epilogueLTOBuffer` 必须为 NULL，`epilogueLTOBufferSize` 必须为 0，否则返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `descr`（IN）：HOST，来自 `aclsparseSpMVOp_createDescr` 的描述符。
+- `plan`（OUT）：HOST，返回执行计划。
+- `epilogueLTOBuffer`（IN）：HOST，epilogue LTO-IR 缓冲区，NPU 侧必须为 NULL。
+- `epilogueLTOBufferSize`（IN）：HOST，epilogue LTO-IR 大小，NPU 侧必须为 0。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp_destroyPlan
+
+```c
+aclsparseStatus_t aclsparseSpMVOp_destroyPlan(aclsparseSpMVOpPlan_t plan);
+```
+
+**功能**：销毁 SpMVOp 执行计划。`plan` 为 nullptr 时直接返回 SUCCESS；必须先于 `aclsparseSpMVOp_destroyDescr` 调用。
+
+**参数说明**：`plan`（IN）：HOST，要销毁的 SpMVOp 执行计划。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp_setGlobalUserData
+
+```c
+aclsparseStatus_t aclsparseSpMVOp_setGlobalUserData(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpPlan_t plan,
+    const char *epilogueDataName,
+    void *epilogueData,
+    size_t epilogueDataSize);
+```
+
+**功能**：设置 epilogue 模块中的全局用户数据。NPU 侧使用 identity epilogue，本接口为 no-op，直接返回 SUCCESS。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `plan`（IN）：HOST，SpMVOp 执行计划。
+- `epilogueDataName`（IN）：HOST，epilogue 数据变量名。
+- `epilogueData`（IN）：HOST，epilogue 数据指针。
+- `epilogueDataSize`（IN）：HOST，数据字节数。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMVOp
+
+```c
+aclsparseStatus_t aclsparseSpMVOp(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpPlan_t plan,
+    const void *alpha,
+    const void *beta,
+    aclsparseConstDnVecDescr_t vecX,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseDnVecDescr_t vecZ);
+```
+
+**功能**：执行稀疏矩阵向量乘法 `Z = alpha * A * X + beta * Y`。调用异步入队到 handle 关联的 stream；ALG1 和 ALG2 均提供 bit-wise 可重复结果。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `plan`（IN）：HOST，SpMVOp 执行计划。
+- `alpha`（IN）：HOST/DEVICE，FP32 标量，指针模式由 `aclsparseSetPointerMode` 决定。
+- `beta`（IN）：HOST/DEVICE，FP32 标量，指针模式由 `aclsparseSetPointerMode` 决定。
+- `vecX`（IN）：HOST，输入稠密向量描述符。
+- `vecY`（IN）：HOST，额外加法输入稠密向量描述符。
+- `vecZ`（IN/OUT）：HOST，输出稠密向量描述符，可与 vecY 共享 device values 实现 in-place。
+
+**约束说明**：仅支持 CSR 格式；`colIndType` 必须为 int32，`rowOffsetsType` 可为 int32 或 int64；FP32 是唯一支持的数据类型。
 
 **返回值**：
 
