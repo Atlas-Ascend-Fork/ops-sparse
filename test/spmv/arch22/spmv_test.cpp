@@ -493,7 +493,8 @@ int Test(const size_t M, const size_t N, const float sparsity,
          float &MARE, float &MERE, aclrtStream stream,
          std::string *worstInfo = nullptr,
          aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT,
-         bool productsInValT = false) {
+         bool productsInValT = false,
+         bool deviceScalarStreamOrder = false) {
     const char *label = transpose ? " Transpose"
                                   : (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE ? " Cube" : "");
     std::cout << "====Test" << label << " case: row num = " << M
@@ -608,8 +609,53 @@ int Test(const size_t M, const size_t N, const float sparsity,
     }
     std::unique_ptr<void, aclError (*)(void *)> ebp(externalBuffer, aclrtFree);
 
-    sparseRet = aclsparseSpMV(spHandle, op, &alphaVal, matDesc, vecXDesc,
-                              &betaVal, vecYDesc, compDt,
+    const void *alphaPtr = &alphaVal;
+    const void *betaPtr = &betaVal;
+    void *deviceAlpha = nullptr;
+    void *deviceBeta = nullptr;
+    void *hostAlphaUpdate = nullptr;
+    void *hostBetaUpdate = nullptr;
+    std::unique_ptr<void, aclError (*)(void *)> dap(nullptr, aclrtFree);
+    std::unique_ptr<void, aclError (*)(void *)> dbp(nullptr, aclrtFree);
+    std::unique_ptr<void, aclError (*)(void *)> hap(nullptr, aclrtFreeHost);
+    std::unique_ptr<void, aclError (*)(void *)> hbp(nullptr, aclrtFreeHost);
+    if (deviceScalarStreamOrder) {
+        const CompT initialAlpha = static_cast<CompT>(1);
+        const CompT initialBeta = static_cast<CompT>(0);
+        aclRet = aclrtMalloc(&deviceAlpha, sizeof(CompT), ACL_MEM_MALLOC_HUGE_FIRST);
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        dap.reset(deviceAlpha);
+        aclRet = aclrtMalloc(&deviceBeta, sizeof(CompT), ACL_MEM_MALLOC_HUGE_FIRST);
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        dbp.reset(deviceBeta);
+        aclRet = aclrtMemcpy(deviceAlpha, sizeof(CompT), &initialAlpha, sizeof(CompT), ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        aclRet = aclrtMemcpy(deviceBeta, sizeof(CompT), &initialBeta, sizeof(CompT), ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        aclRet = aclrtMallocHost(&hostAlphaUpdate, sizeof(CompT));
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        hap.reset(hostAlphaUpdate);
+        aclRet = aclrtMallocHost(&hostBetaUpdate, sizeof(CompT));
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        hbp.reset(hostBetaUpdate);
+        *static_cast<CompT *>(hostAlphaUpdate) = alphaVal;
+        *static_cast<CompT *>(hostBetaUpdate) = betaVal;
+        sparseRet = aclsparseSetPointerMode(spHandle, ACL_SPARSE_POINTER_MODE_DEVICE);
+        CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return sparseRet);
+        // Leave scalar updates pending on the handle stream. SpMV must observe
+        // these values without caller-side synchronization.
+        aclRet = aclrtMemcpyAsync(deviceAlpha, sizeof(CompT), hostAlphaUpdate, sizeof(CompT),
+                                  ACL_MEMCPY_HOST_TO_DEVICE, stream);
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        aclRet = aclrtMemcpyAsync(deviceBeta, sizeof(CompT), hostBetaUpdate, sizeof(CompT),
+                                  ACL_MEMCPY_HOST_TO_DEVICE, stream);
+        CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
+        alphaPtr = deviceAlpha;
+        betaPtr = deviceBeta;
+    }
+
+    sparseRet = aclsparseSpMV(spHandle, op, alphaPtr, matDesc, vecXDesc,
+                              betaPtr, vecYDesc, compDt,
                               alg, externalBuffer);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return sparseRet);
 
@@ -653,11 +699,12 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
                 bool transpose,
                 TestStats &stats, aclrtStream stream, const std::string &tag = "",
                 aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT,
-                bool productsInValT = false) {
+                bool productsInValT = false,
+                bool deviceScalarStreamOrder = false) {
     float MARE = 0, MERE = 0;
     std::string worstInfo;
     int ret = Test<CompT, ValT, OutT>(M, N, sparsity, alpha, beta, transpose, MARE, MERE, stream,
-                                      &worstInfo, alg, productsInValT);
+                                      &worstInfo, alg, productsInValT, deviceScalarStreamOrder);
 
     stats.total++;
     if (ret == 0) {
@@ -761,6 +808,11 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     // ============ Cube 算法 fp32 用例（ACL_SPARSE_SPMV_CSR_ALG_CUBE，仅非转置）============
     std::cout << "\n======== Float Cube Algorithm Tests ========\n";
     constexpr aclsparseSpMVAlg_t kCube = ACL_SPARSE_SPMV_CSR_ALG_CUBE;
+    RunAndTrack<float>(1, 1, 0.0f, 2.0f, 1.0f, false, stats, stream,
+                       "device-scalar-stream-order-float-cube", kCube, false, true);
+    RunAndTrack<int32_t>(1, 1, 0.0f, 2, 1, false, stats, stream,
+                         "device-scalar-stream-order-int32-vector",
+                         ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
     RunAndTrack<float>(512, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "cube-default", kCube);
     RunAndTrack<float>(512, 1024, 0.0f, 1.0f, 0.0f, false, stats, stream, "cube-dense", kCube);
     RunAndTrack<float>(512, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "cube-sparse", kCube);

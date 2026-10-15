@@ -41,6 +41,25 @@ extern "C" void spmv_kernel_do(
 // -------------------------------------------------------------------
 namespace {
 
+    template <typename T>
+    aclsparseStatus_t ReadSpmvScalar(const void *scalar,
+                                     aclsparsePointerMode_t pointerMode, T &value,
+                                     const char *scalarName)
+    {
+        if (pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE)
+        {
+            aclError aclRet = aclrtMemcpy(&value, sizeof(T), scalar, sizeof(T), ACL_MEMCPY_DEVICE_TO_HOST);
+            if (aclRet != ACL_SUCCESS)
+            {
+                LOG_PRINT("[ERROR] aclsparseSpMV: copying device %s failed, ret=%d\n", scalarName, aclRet);
+                return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+            }
+            return ACL_SPARSE_STATUS_SUCCESS;
+        }
+        value = *static_cast<const T *>(scalar);
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
     bool IsSupportedSpmvDtypeCombo(aclDataType computeType,
                                    aclDataType valType,
                                    aclDataType outType)
@@ -406,23 +425,36 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: beta is nullptr\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
 
-        float alphaFloat = 1.0f;
-        float betaFloat = 0.0f;
-        int32_t alphaInt = 1;
-        int32_t betaInt = 0;
-        if (computeType == ACL_FLOAT) {
-            alphaFloat = *static_cast<const float *>(alpha);
-            betaFloat = *static_cast<const float *>(beta);
-        } else {
-            alphaInt = *static_cast<const int32_t *>(alpha);
-            betaInt = *static_cast<const int32_t *>(beta);
-        }
-
-        // ==================== Stream ====================
+        // Device scalars can be written by work already queued on the handle
+        // stream. aclrtMemcpy(D2H) does not wait for that work, so establish
+        // the stream dependency before reading alpha/beta on the host.
         aclrtStream stream = h->stream;
         CHECK_RET(stream != nullptr,
                   LOG_PRINT("[ERROR] aclsparseSpMV: stream is nullptr, please call aclsparseSetStream first\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
+        if (h->pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
+            aclError syncRet = aclrtSynchronizeStream(stream);
+            CHECK_RET(syncRet == ACL_SUCCESS,
+                      LOG_PRINT("[ERROR] aclsparseSpMV: synchronizing handle stream before scalar read failed, ret=%d\n",
+                                syncRet);
+                      return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+        }
+
+        float alphaFloat = 1.0f;
+        float betaFloat = 0.0f;
+        int32_t alphaInt = 1;
+        int32_t betaInt = 0;
+        aclsparseStatus_t scalarStatus = ACL_SPARSE_STATUS_SUCCESS;
+        if (computeType == ACL_FLOAT) {
+            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaFloat, "alpha");
+            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaFloat, "beta");
+        } else {
+            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaInt, "alpha");
+            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaInt, "beta");
+        }
+        CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
 
         // ==================== 平台参数 ====================
         auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
