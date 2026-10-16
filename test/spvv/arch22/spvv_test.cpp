@@ -20,6 +20,7 @@
 #include <random>
 #include <string>
 #include <sstream>
+#include <stdexcept>
 #include "acl/acl.h"
 #include "securec.h"
 #include "cann_ops_sparse.h"
@@ -135,20 +136,57 @@ static float compute_golden_fp32(const std::vector<int32_t> &indices,
 
 // Software FP16 <-> FP32 conversion (no dependency on AscendC half type)
 
+static inline void checked_memcpy(void *dst, size_t dstSize, const void *src, size_t count)
+{
+    const errno_t status = memcpy_s(dst, dstSize, src, count);
+    if (status != EOK) {
+        throw std::runtime_error("SPVV host memcpy_s failed: " + std::to_string(status));
+    }
+}
+
+static inline uint16_t fp32_bits_to_fp16_bits(uint32_t x)
+{
+    uint32_t sign = (x >> 16) & 0x8000;
+    int32_t exp = static_cast<int32_t>((x >> 23) & 0xFF) - 127;
+    uint32_t mant = x & 0x007FFFFF;
+
+    if (exp >= 16) {
+        // Keep NaN handling on the existing overflow path so ordinary finite
+        // conversions incur no additional branch. Preserve sign and payload.
+        uint32_t payload = 0;
+        if ((x & 0x7F800000) == 0x7F800000 && mant != 0) {
+            payload = mant >> 13;
+            if (payload == 0) {
+                payload = 1;
+            }
+        }
+        return static_cast<uint16_t>(sign | 0x7C00 | payload);
+    }
+
+    if (exp >= -14) {
+        // Bias by half an ulp minus one, then use the retained low bit for ties
+        // to even. Addition also carries a rounded mantissa into the exponent.
+        uint32_t roundedMant = (mant + 0xFFF + ((mant >> 13) & 1u)) >> 13;
+        uint32_t result = (static_cast<uint32_t>(exp + 15) << 10) + roundedMant;
+        return static_cast<uint16_t>(sign | result);
+    }
+
+    if (exp >= -25) {
+        uint32_t significand = 0x00800000 | mant;
+        uint32_t shift = static_cast<uint32_t>(-exp - 1);
+        uint32_t halfway = 1u << (shift - 1u);
+        uint32_t fraction = (significand + halfway - 1u + ((significand >> shift) & 1u)) >> shift;
+        return static_cast<uint16_t>(sign | fraction);
+    }
+
+    return static_cast<uint16_t>(sign);
+}
+
 static uint16_t fp32_to_fp16_bits(float f)
 {
-    uint32_t x;
-    memcpy_s(&x, sizeof(x), &f, sizeof(x));
-    uint32_t sign = (x >> 16) & 0x8000;
-    int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = (x >> 13) & 0x3FF;
-    if (exp <= 0) {
-        return static_cast<uint16_t>(sign);
-    }
-    if (exp >= 31) {
-        return static_cast<uint16_t>(sign | 0x7C00);
-    }
-    return static_cast<uint16_t>(sign | (exp << 10) | mant);
+    uint32_t bits;
+    checked_memcpy(&bits, sizeof(bits), &f, sizeof(bits));
+    return fp32_bits_to_fp16_bits(bits);
 }
 
 static float fp16_bits_to_fp32(uint16_t h)
@@ -158,15 +196,107 @@ static float fp16_bits_to_fp32(uint16_t h)
     uint32_t mant = h & 0x3FF;
     uint32_t f;
     if (exp == 0) {
-        f = sign;
+        if (mant == 0) {
+            f = sign;
+        } else {
+            int32_t exp32 = 113;
+            while ((mant & 0x400) == 0) {
+                mant <<= 1;
+                exp32--;
+            }
+            mant &= 0x3FF;
+            f = sign | (static_cast<uint32_t>(exp32) << 23) | (mant << 13);
+        }
     } else if (exp == 31) {
         f = sign | 0x7F800000 | (mant << 13);
     } else {
         f = sign | ((exp + 127 - 15) << 23) | (mant << 13);
     }
     float result;
-    memcpy_s(&result, sizeof(result), &f, sizeof(result));
+    checked_memcpy(&result, sizeof(result), &f, sizeof(result));
     return result;
+}
+
+static bool test_fp16_nonfinite_helpers()
+{
+    struct NonfiniteCase {
+        uint32_t input;
+        uint16_t expected;
+    };
+    const NonfiniteCase cases[] = {
+        {0x7F800000, 0x7C00}, {0xFF800000, 0xFC00}, // infinities
+        {0x7FC00001, 0x7E00}, {0xFFC00001, 0xFE00}, // signed quiet NaNs
+        {0x7F802000, 0x7C01}, {0xFF802000, 0xFC01}, // signed signaling NaNs
+        {0x7F800001, 0x7C01}, {0xFF800001, 0xFC01}, // payload lost by truncation
+        {0x7FFFFFFF, 0x7FFF}, {0xFFFFFFFF, 0xFFFF}, // maximum payload
+    };
+    for (const NonfiniteCase &testCase : cases) {
+        float input;
+        checked_memcpy(&input, sizeof(input), &testCase.input, sizeof(input));
+        uint16_t actual = fp32_to_fp16_bits(input);
+        float decoded = fp16_bits_to_fp32(testCase.expected);
+        uint32_t decodedBits;
+        checked_memcpy(&decodedBits, sizeof(decodedBits), &decoded, sizeof(decodedBits));
+        const uint32_t expectedBits = (static_cast<uint32_t>(testCase.expected & 0x8000) << 16) |
+                                     0x7F800000 | ((testCase.expected & 0x3FF) << 13);
+        if (actual != testCase.expected || decodedBits != expectedBits ||
+            fp32_to_fp16_bits(decoded) != testCase.expected) {
+            fprintf(stderr, "FP16 nonfinite mismatch: input=0x%08x expected=0x%04x actual=0x%04x\n",
+                    testCase.input, static_cast<unsigned>(testCase.expected), static_cast<unsigned>(actual));
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool test_fp16_conversion_helpers()
+{
+    if (!test_fp16_nonfinite_helpers()) {
+        return false;
+    }
+    struct ConversionCase {
+        float input;
+        uint16_t expected;
+    };
+    const ConversionCase cases[] = {
+        {0x1p-24f, 0x0001},
+        {0x1p-20f, 0x0010},
+        {0x1p-14f, 0x0400},
+        {1.00048828125f, 0x3C00},
+        {1.0009f, 0x3C01},
+        {1.00146484375f, 0x3C02},
+        {-0x1p-20f, 0x8010},
+    };
+    for (const ConversionCase &testCase : cases) {
+        uint16_t actual = fp32_to_fp16_bits(testCase.input);
+        if (actual != testCase.expected) {
+            fprintf(stderr, "FP16 conversion mismatch: input=%.9g expected=0x%04x actual=0x%04x\n",
+                    testCase.input, static_cast<unsigned>(testCase.expected),
+                    static_cast<unsigned>(actual));
+            return false;
+        }
+    }
+
+    if (fp16_bits_to_fp32(0x0010) != 0x1p-20f) {
+        fprintf(stderr, "FP16 subnormal decode mismatch: bits=0x0010\n");
+        return false;
+    }
+    for (uint32_t bits = 1; bits <= 0x03FF; bits++) {
+        uint16_t positive = static_cast<uint16_t>(bits);
+        uint16_t negative = static_cast<uint16_t>(bits | 0x8000);
+        float expected = static_cast<float>(bits) * 0x1p-24f;
+        float positiveValue = fp16_bits_to_fp32(positive);
+        float negativeValue = fp16_bits_to_fp32(negative);
+        if (positiveValue != expected || negativeValue != -expected ||
+            fp32_to_fp16_bits(positiveValue) != positive ||
+            fp32_to_fp16_bits(negativeValue) != negative) {
+            fprintf(stderr, "FP16 subnormal round-trip mismatch: bits=0x%04x\n", bits);
+            return false;
+        }
+    }
+
+    printf("FP16 conversion helper boundaries: PASS\n");
+    return true;
 }
 
 static float compute_golden_fp16(const std::vector<int32_t> &indices,
@@ -184,7 +314,18 @@ static float compute_golden_fp16(const std::vector<int32_t> &indices,
 static void float_to_fp16(const std::vector<float> &src, std::vector<uint16_t> &dst)
 {
     dst.resize(src.size());
-    for (size_t i = 0; i < src.size(); i++) {
+    // Amortize the secure-copy call across a block while retaining the exact
+    // scalar integer conversion, including NaN payloads and subnormals.
+    constexpr size_t kBlockSize = 8;
+    size_t i = 0;
+    for (; src.size() - i >= kBlockSize; i += kBlockSize) {
+        uint32_t bits[kBlockSize];
+        checked_memcpy(bits, sizeof(bits), src.data() + i, sizeof(bits));
+        for (size_t lane = 0; lane < kBlockSize; ++lane) {
+            dst[i + lane] = fp32_bits_to_fp16_bits(bits[lane]);
+        }
+    }
+    for (; i < src.size(); ++i) {
         dst[i] = fp32_to_fp16_bits(src[i]);
     }
 }
@@ -509,7 +650,7 @@ static bool test_spvv_benchmark()
 // Main
 // ---------------------------------------------------------------------------
 
-int main(int argc, char *argv[])
+static int run_spvv_tests(int argc, char *argv[])
 {
     // Optional argv[1]: "fp32" | "fp16" | "all" (default). Selects which dtype
     // paths to exercise so FP32/FP16 can be validated independently.
@@ -525,6 +666,10 @@ int main(int argc, char *argv[])
     }
     printf("Dtype filter: %s\n",
         g_dtypeFilter == DT_FP32 ? "FP32" : g_dtypeFilter == DT_FP16 ? "FP16" : "ALL");
+
+    if (g_dtypeFilter != DT_FP32 && !test_fp16_conversion_helpers()) {
+        return 1;
+    }
 
     int passed = 0, failed = 0;
 
@@ -550,4 +695,14 @@ int main(int argc, char *argv[])
     printf("========================================\n");
 
     return failed > 0 ? 1 : 0;
+}
+
+int main(int argc, char *argv[])
+{
+    try {
+        return run_spvv_tests(argc, argv);
+    } catch (const std::exception &error) {
+        fprintf(stderr, "SPVV test failed: %s\n", error.what());
+        return EXIT_FAILURE;
+    }
 }

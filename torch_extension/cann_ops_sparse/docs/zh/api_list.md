@@ -13,7 +13,6 @@
 | `torch.mm` / `torch.addmm` | `aten::mm` / `aten::addmm`（含 out overload） | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm / 后续 spmm 能力 | [spgemm.md](spgemm.md) |
 | `torch.sparse.mm` / `torch.sparse.addmm` | `aten::_sparse_addmm` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm / 后续 spmm 能力 | [spgemm.md](spgemm.md) |
 | `torch.sparse.mm` | `aten::_sparse_sparse_matmul` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm | [spgemm.md](spgemm.md) |
-| `Tensor.index_copy_` | `aten::index_copy_` | `PrivateUse1` | scatter | [scatter.md](scatter.md) |
 | `Tensor.to_dense` | `aten::_to_dense` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | sparse2dense | [sparse2dense.md](sparse2dense.md) |
 | `Tensor.to_sparse` / `Tensor.to_sparse_csr` / `Tensor.to_sparse_csc` / `Tensor.to_sparse_bsr` | `aten::_to_sparse` / `aten::_to_sparse.sparse_dim` / `aten::_to_sparse_csr` / `aten::_to_sparse_csc` / `aten::_to_sparse_bsr` | `PrivateUse1` | densetosparse | - |
 
