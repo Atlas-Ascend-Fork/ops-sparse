@@ -2,8 +2,10 @@
 
 ## 1. 概述
 
-本文档基于 `sparseLt/matmul/arch35/matmul_kernel.cpp` 中阶段一新增的 bias+ReLU+GeLU epilogue 链，
-枚举所有执行分支，并映射到 `ltmatmul_test.csv` 中的白盒用例（case_id 400-415）。
+本文档记录 `sparseLt/matmul/arch35/matmul_kernel.cpp` 中阶段一新增的 bias+ReLU+GeLU epilogue 链的原始设计，
+并保留当时的分支与白盒用例映射（case_id 400-415）。
+
+> **当前基线说明**：本文档中的映射、覆盖状态、验证结论及统计均为原始设计历史记录，不代表当前 CSV 加载的用例或当前分支覆盖率。在原始集合 400—415 中，当前 `ltmatmul_test.csv` 仅保留 case 400、403、406、412、413；其余 11 个 case 已不在当前参数化测试数据中。CSV 是当前用例集合的事实来源。
 
 **目标芯片**: Ascend 950PR (arch35 / DAV_3510), CANN 9.1.0
 **测试框架**: GTest + CSV 参数化驱动, Eigen FP64 golden
@@ -128,7 +130,7 @@
 | B44 | INT8 bias=127 (饱和上界) | `bias_enabled==1 && biasSeed%10==3` | 388 (SP9) | 覆盖 |
 | B45 | INT8 bias=-128 (饱和下界) | `bias_enabled==1 && biasSeed%10==4` | 389 (SP10) | 覆盖 |
 
-## 3. 分支覆盖统计
+## 3. 原始设计基线的分支覆盖统计（历史记录）
 
 | 分支组 | 总分支数 | 已覆盖 | 新增覆盖 | 未覆盖 |
 |--------|---------|--------|---------|--------|
@@ -147,7 +149,7 @@
 | bias 特殊值 (B41-B45) | 5 | 5 | 0 | 0 |
 | **合计** | **45** | **45** | **15** | **0** |
 
-**分支覆盖率: 45/45 = 100%** (声明覆盖)
+**原始设计记录中的分支覆盖率声明: 45/45 = 100%**（历史统计，不代表当前覆盖率）
 
 > 新增白盒用例 (case_id 400-415) 补充覆盖了 15 个此前未覆盖的分支：
 > - B11: per-chunk FP16 bias FP32 直接加载 (case 400)
@@ -160,9 +162,9 @@
 > - B33: alpha=0+beta=1+bias+GeLU 链 (case 411)
 > - B37-B39: 小 m/小 n/大 m biasChunkMode 降级 (case 413, 414, 400/401/406)
 
-## 4. 已知算子缺陷（均已修复）
+## 4. 已知算子缺陷与修复记录（历史）
 
-> **状态：已修复**。本节原记录的 bias+activation epilogue 系统性缺陷已通过 commit 96bf47b 的多处 `[BUGFIX]` 修复，当前代码中所有 `bias_enabled=1` 的用例 NPU 结果与 golden 一致。以下保留缺陷描述与修复记录，供追溯。
+> **历史修复记录（非本轮验证）**：本节原记录的 bias+activation epilogue 系统性缺陷已通过 commit 96bf47b 的多处 `[BUGFIX]` 修复。以下保留缺陷描述与修复记录，供追溯。
 
 **原缺陷描述**：bias+activation epilogue 路径曾存在系统性缺陷，所有 `bias_enabled=1` 的用例 NPU 结果与 golden 不匹配；不含 bias 的用例（如 case 2, 22, 41, 402）均通过。
 
@@ -174,9 +176,9 @@
 2. **bias FP32 直接加载修复**（`matmul_kernel.cpp:1796-1801, 1804-1820`）：bias UB 分配顺序修复 + bias 始终按 FP32 直接加载（`sizeof(float)`）。此前 FP16/BF16 路径按 `sizeof(T)` 读取 bias 导致半数数据丢失；修复后所有 dtype 路径统一 FP32 加载，不再需要 `Cast(biasVecUB, biasLoadUB, ...)` 类型转换分支。
 3. **CrossCore localTileIdx 每 batch 重置修复**（`matmul_kernel.cpp:1213-1241`）：`localTileIdx` 每 batch 重置为 0，与 AIV 侧 `SpltFusedEpilogueTileLoop` 的 per-batch 重置对齐。此前 localTileIdx 跨 batch 累加导致 AIC 奇偶翻转与 AIV 不匹配引发 CrossCore 死锁；修复后每 batch 末尾 drain 残留 flag，无 tile 的 block 跳过 CrossCoreSetFlag 避免残留 flag。
 
-**验证结论**：修复后所有 bias+activation 用例（含已有用例 200-399 和新增用例 400-415）NPU 结果与 golden 一致。本文档 §2 中各分支的覆盖状态由"覆盖*（NPU 结果不正确）"更新为"覆盖"。
+**原始验证记录**：本节当时记载修复后所有 bias+activation 用例（含当时的用例 200-399 和 400-415）NPU 结果与 golden 一致，并据此更新 §2 的历史分支覆盖状态。该记录不表示这些用例仍全部存在于当前 CSV，也不表示这些结果来自本轮 CI。
 
-## 5. 新增白盒用例清单
+## 5. 新增白盒用例清单（原始设计历史记录；非当前 CSV 加载清单）
 
 | case_id | 用例名 | 目标分支 | dtype | shape (m×k×n) | bias | act | splitK | 关键参数 |
 |---------|--------|---------|-------|---------------|------|-----|--------|---------|
