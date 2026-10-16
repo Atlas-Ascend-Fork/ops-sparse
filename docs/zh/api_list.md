@@ -920,15 +920,15 @@ aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, in
 ```c
 aclsparseStatus_t aclsparseSpMVGetBufferSize(
     aclsparseHandle_t handle,
-    aclsparseOperation_t op,
+    aclsparseOperation_t opA,
     const void *alpha,
-    aclsparseConstSpMatDescr_t mat,
-    aclsparseConstDnVecDescr_t x,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
     const void *beta,
-    aclsparseDnVecDescr_t y,
+    aclsparseDnVecDescr_t vecY,
     aclDataType computeType,
     aclsparseSpMVAlg_t alg,
-    size_t *size
+    size_t *bufferSize
 );
 ```
 
@@ -937,15 +937,15 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏计算句柄。
-- `op`（IN）：HOST，稀疏操作类型。
+- `opA`（IN）：HOST，稀疏操作类型。
 - `alpha`（IN）：HOST/DEVICE，标量alpha参数。
-- `mat`（IN）：HOST，稀疏矩阵描述符。
-- `x`（IN）：HOST，输入向量x的描述符。
+- `matA`（IN）：HOST，稀疏矩阵描述符。
+- `vecX`（IN）：HOST，输入向量x的描述符。
 - `beta`（IN）：HOST/DEVICE，标量beta参数。
-- `y`（IN）：HOST，输出向量y的描述符。
+- `vecY`（IN）：HOST，输出向量y的描述符。
 - `computeType`（IN）：HOST，计算的数据类型。
 - `alg`（IN）：HOST，SpMV算法类型。
-- `size`（OUT）：HOST，所需的缓冲区大小。
+- `bufferSize`（OUT）：HOST，所需的缓冲区大小。
 
 **说明**：`ACL_SPARSE_SPMV_ALG_DEFAULT`（向量版）的所有中间量都在 UB 内，返回 0。
 `ACL_SPARSE_SPMV_CSR_ALG_CUBE` 返回分段求和所需的 workspace 大小，调用方须按该大小
@@ -1005,15 +1005,15 @@ aclsparseStatus_t aclsparseSpMVPreprocess(
 ```c
 aclsparseStatus_t aclsparseSpMV(
     aclsparseHandle_t handle,
-    aclsparseOperation_t op,
+    aclsparseOperation_t opA,
     const void *alpha,
-    aclsparseConstSpMatDescr_t mat,
-    aclsparseConstDnVecDescr_t x,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
     const void *beta,
-    aclsparseDnVecDescr_t y,
+    aclsparseDnVecDescr_t vecY,
     aclDataType computeType,
     aclsparseSpMVAlg_t alg,
-    void *buffer
+    void *externalBuffer
 );
 ```
 
@@ -1022,15 +1022,15 @@ aclsparseStatus_t aclsparseSpMV(
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏矩阵处理器句柄。
-- `op`（IN）：HOST，稀疏矩阵操作符。
+- `opA`（IN）：HOST，稀疏矩阵操作符。
 - `alpha`（IN）：HOST/DEVICE，标量alpha。
-- `mat`（IN）：HOST，稀疏矩阵描述符。
-- `x`（IN）：HOST，密集向量x描述符。
+- `matA`（IN）：HOST，稀疏矩阵描述符。
+- `vecX`（IN）：HOST，密集向量x描述符。
 - `beta`（IN）：HOST/DEVICE，标量beta。
-- `y`（IN/OUT）：HOST，密集向量y描述符。
+- `vecY`（IN/OUT）：HOST，密集向量y描述符。
 - `computeType`（IN）：HOST，计算类型。
 - `alg`（IN）：HOST，稀疏矩阵向量乘法算法。
-- `buffer`（IN）：DEVICE，工作缓冲区指针。
+- `externalBuffer`（IN）：DEVICE，工作缓冲区指针。
 
 **返回值**：
 

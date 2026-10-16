@@ -266,7 +266,7 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(aclsparseLtMatDescriptor_t* ma
 aclsparseStatus_t aclsparseLtMatDescSetAttribute(
     aclsparseLtConstHandle_t handle,
     aclsparseLtMatDescriptor_t* matDescr,
-    aclsparseLtMatDescAttribute_t attribute,
+    aclsparseLtMatDescAttribute_t matAttribute,
     const void* data,
     size_t dataSize);
 ```
@@ -277,7 +277,7 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `matDescr`（IN/OUT）：HOST，矩阵描述符。
-- `attribute`（IN）：HOST，要设置的矩阵描述符属性。
+- `matAttribute`（IN）：HOST，要设置的矩阵描述符属性。
 - `data`（IN）：HOST，指向属性值的指针。
 - `dataSize`（IN）：HOST，属性值字节数，须等于对应属性的 sizeof，用于校验。
 
@@ -294,7 +294,7 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配、`NUM_BATCHES` 值 < 1
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、matAttribute 非法、data 为空、dataSize 与属性不匹配、`NUM_BATCHES` 值 < 1
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性不在支持范围内
 
 ---
@@ -305,7 +305,7 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
 aclsparseStatus_t aclsparseLtMatDescGetAttribute(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatDescriptor_t* matDescr,
-    aclsparseLtMatDescAttribute_t attribute,
+    aclsparseLtMatDescAttribute_t matAttribute,
     void* data,
     size_t dataSize);
 ```
@@ -316,7 +316,7 @@ aclsparseStatus_t aclsparseLtMatDescGetAttribute(
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `matDescr`（IN）：HOST，矩阵描述符。
-- `attribute`（IN）：HOST，要获取的矩阵描述符属性。
+- `matAttribute`（IN）：HOST，要获取的矩阵描述符属性。
 - `data`（OUT）：HOST，返回属性值的内存地址。
 - `dataSize`（IN）：HOST，属性值字节数，须等于对应属性的 sizeof，用于校验。
 
@@ -326,7 +326,7 @@ aclsparseStatus_t aclsparseLtMatDescGetAttribute(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、matAttribute 非法、data 为空、dataSize 与属性不匹配
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性不在支持范围内
 
 ---
