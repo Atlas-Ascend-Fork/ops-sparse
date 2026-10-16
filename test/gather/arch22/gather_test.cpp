@@ -37,8 +37,38 @@
 #include "gather_golden.h"
 #include "gather_npu_wrapper.h"
 #include "gather_param.h"
+#include "../../frame/presmoke.h"
+
+#include <algorithm>
 
 using namespace sparse_test;
+
+namespace {
+
+std::vector<GatherTestParam> GetGatherArch22Cases()
+{
+    auto cases = GetCasesFromCsv<GatherTestParam>("gather_test.csv");
+    if (SparseTestFullEnabled()) {
+        return cases;
+    }
+
+    for (auto& p : cases) {
+        // These cases cross a device output block or exercise the largest
+        // complex tail. Keep their exact sizes; shrink all other large data
+        // movement cases without changing dtype, base or index semantics.
+        const bool isBlockBoundaryCase = p.case_name == "float_base0_yblock_multi" ||
+                                         p.case_name == "float16_base0_yblock_multi" ||
+                                         p.case_name == "c64_base0_ub_worst";
+        if (!isBlockBoundaryCase && p.vec_size > 4096) {
+            const int oldVecSize = p.vec_size;
+            p.vec_size = 4096;
+            p.nnz = p.nnz == oldVecSize ? p.vec_size : std::min(p.nnz, 1024);
+        }
+    }
+    return cases;
+}
+
+}  // namespace
 
 // 将输出/参考向量转为 float 序列用于 EXACT 验证：
 //   - c64：实部/虚部交错展平（2*nnz）
@@ -353,5 +383,5 @@ TEST_F(GatherHandleOrderTest, RawZeroNnzNeedsNoDataPointers)
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    GatherCases, GatherTest, testing::ValuesIn(GetCasesFromCsv<GatherTestParam>("gather_test.csv")),
+    GatherCases, GatherTest, testing::ValuesIn(GetGatherArch22Cases()),
     [](const testing::TestParamInfo<GatherTestParam>& info) { return info.param.case_name; });

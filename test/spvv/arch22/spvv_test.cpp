@@ -24,6 +24,7 @@
 #include "acl/acl.h"
 #include "securec.h"
 #include "cann_ops_sparse.h"
+#include "../../frame/presmoke.h"
 
 #define CHECK_ACL(x)                                                \
     do {                                                            \
@@ -382,8 +383,9 @@ struct SpvvCase {
     const char *tag;
 };
 
-// Correctness cases: edge, sparse, small, medium, large.
-static const SpvvCase kCorrectnessCases[] = {
+// Original correctness coverage, including large scale and sparse stress.
+// Ordinary build.sh runs use these original full-scale inputs.
+static const SpvvCase kFullCorrectnessCases[] = {
     {1,     256,      "tiny"        },
     {0,     256,      "zero-nnz"    },
     {100,   1000000,  "sparse-1M"   },  // density 1e-4, scalar fallback
@@ -394,6 +396,20 @@ static const SpvvCase kCorrectnessCases[] = {
     {10000, 102400,   "medium"      },
     {100000,1000000,  "large-1M"    },
     {100000,10000000, "large-10M"   },
+};
+
+// Explicit presmoke coverage: small functional shapes retain zero-nnz, very
+// sparse scalar fallback, vector work and both tiny/tail-oriented paths.
+static const SpvvCase kPresmokeCorrectnessCases[] = {
+    {1,    16,    "tail-16"},
+    {7,    32,    "tail-32"},
+    {1,    256,   "tiny"},
+    {0,    256,   "zero-nnz"},
+    {100,  16384, "sparse-scalar-16K"},
+    {100,  32768, "sparse-scalar-32K"},
+    {256,  10240, "small-vector"},
+    {1024, 16384, "medium-vector"},
+    {4096, 32768, "dense-vector-32K"},
 };
 
 // ---------------------------------------------------------------------------
@@ -481,10 +497,12 @@ static bool test_spvv_case(aclDataType dtype, uint32_t nnz, uint32_t yLen, const
 // Randomized fuzz test: 100 iterations, random nnz/yLen, FP32 + FP16.
 // ---------------------------------------------------------------------------
 
-static bool test_spvv_random()
+static bool test_spvv_random(bool full_suite)
 {
     const int N_ITERS = 100;
-    printf("=== Random fuzz: %d iters × {FP32, FP16} ===\n", N_ITERS);
+    const uint32_t max_y_len = full_suite ? 2000000 : 32768;
+    printf("=== Random fuzz (%s): %d iters × {FP32, FP16}, yLen=[256, %u] ===\n",
+        full_suite ? "full" : "presmoke", N_ITERS, max_y_len);
 
     CHECK_ACL(aclInit(nullptr));
     int32_t deviceId = 0;
@@ -494,8 +512,8 @@ static bool test_spvv_random()
     int passed = 0, failed = 0;
 
     for (int it = 0; it < N_ITERS; it++) {
-        // yLen in [256, 2M]; nnz in [0, yLen] (nnz <= yLen required).
-        std::uniform_int_distribution<uint32_t> yLenDist(256, 2000000);
+        // nnz is always in [0, yLen], as required by the sparse-vector API.
+        std::uniform_int_distribution<uint32_t> yLenDist(256, max_y_len);
         uint32_t yLen = yLenDist(rng);
         std::uniform_int_distribution<uint32_t> nnzDist(0, yLen);
         uint32_t nnz = nnzDist(rng);
@@ -520,10 +538,11 @@ static bool test_spvv_random()
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark: FP32 & FP16 across scales / sparsities (warmup=5, iters=20)
+// Benchmark: full mode preserves warmup=5/iters=20; presmoke uses short
+// functional sampling only.
 // ---------------------------------------------------------------------------
 
-static const SpvvCase kBenchCases[] = {
+static const SpvvCase kFullBenchCases[] = {
     // Scalar-fallback path (very sparse: < ALIGN_ELEM indices per y segment)
     {100,   1000000,  "scalar-1M"    },  // density 1e-4
     {100,   10000000, "scalar-10M"   },  // density 1e-5, heavy
@@ -539,108 +558,152 @@ static const SpvvCase kBenchCases[] = {
     {100000,10000000, "large-10M"    },
 };
 
-static bool test_spvv_benchmark()
-{
-    static const aclDataType kDtypes[] = {ACL_FLOAT, ACL_FLOAT16};
-    bool allPass = true;
+static const SpvvCase kPresmokeBenchCases[] = {
+    {100,  16384, "scalar-16K"},
+    {256,  10240, "vector-small"},
+    {4096, 32768, "vector-32K"},
+};
 
-    CHECK_ACL(aclInit(nullptr));
-    int32_t deviceId = 0;
-    CHECK_ACL(aclrtSetDevice(deviceId));
+struct SpvvBenchmarkTiming {
+    double sumMs = 0.0;
+    float minMs = 1e30f;
+    float maxMs = 0.0f;
+};
 
-    int64_t coreNum = 0;
-    aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_VECTOR_CORE_NUM, &coreNum);
-    printf("=== Benchmark: FP32 & FP16 (warmup=5, iters=20), cores=%ld ===\n", coreNum);
+struct SpvvBenchmarkEvents {
+    aclrtEvent start = nullptr;
+    aclrtEvent stop = nullptr;
 
-    int nCases = sizeof(kBenchCases) / sizeof(kBenchCases[0]);
-    for (size_t d = 0; d < sizeof(kDtypes) / sizeof(kDtypes[0]); d++) {
-        aclDataType dtype = kDtypes[d];
-        if (!dtype_enabled(dtype)) continue;
-        bool isFp16 = (dtype == ACL_FLOAT16);
-        const char *dtName = isFp16 ? "FP16" : "FP32";
-        size_t elemSz = isFp16 ? sizeof(uint16_t) : sizeof(float);
-
-        for (int ci = 0; ci < nCases; ci++) {
-            uint32_t nnz = kBenchCases[ci].nnz;
-            uint32_t yLen = kBenchCases[ci].yLen;
-            printf("\n--- %s [%s] nnz=%u yLen=%u ---\n", dtName, kBenchCases[ci].tag, nnz, yLen);
-
-            std::vector<int32_t> indices;
-            std::vector<float> xValuesFp32, yValuesFp32;
-            generate_random_spvv_data(indices, xValuesFp32, yValuesFp32, nnz, yLen);
-            std::vector<uint16_t> xValuesFp16, yValuesFp16;
-            float golden;
-            if (isFp16) {
-                float_to_fp16(xValuesFp32, xValuesFp16);
-                float_to_fp16(yValuesFp32, yValuesFp16);
-                golden = compute_golden_fp16(indices, xValuesFp16, yValuesFp16);
-            } else {
-                golden = compute_golden_fp32(indices, xValuesFp32, yValuesFp32);
-            }
-
-            SpvvDeviceResources res;
-            CHECK_ACL(aclrtMalloc(&res.dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
-            CHECK_ACL(aclrtMalloc(&res.dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
-            CHECK_ACL(aclrtMalloc(&res.dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
-            CHECK_ACL(aclrtMalloc(&res.dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
-
-            if (nnz > 0) {
-                CHECK_ACL(aclrtMemcpy(res.dIndices, nnz * sizeof(int32_t), indices.data(),
-                    nnz * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE));
-                const void *xv = isFp16 ? (const void *)xValuesFp16.data() : (const void *)xValuesFp32.data();
-                CHECK_ACL(aclrtMemcpy(res.dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
-            }
-            const void *yv = isFp16 ? (const void *)yValuesFp16.data() : (const void *)yValuesFp32.data();
-            CHECK_ACL(aclrtMemcpy(res.dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
-
-            CHECK_ACL_SPARSE(aclsparseCreate(&res.handle));
-            CHECK_ACL_SPARSE(aclsparseCreateSpVec(&res.spVecX, yLen, nnz, res.dIndices, res.dXValues,
-                ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype));
-            CHECK_ACL_SPARSE(aclsparseCreateDnVec(&res.dnVecY, yLen, res.dYValues, dtype));
-
-            for (int w = 0; w < 5; w++) {
-                aclsparseSpvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE, res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT);
-            }
-            CHECK_ACL(aclrtSynchronizeDevice());
-
-            const int N_ITERS = 20;
-            double sumMs = 0.0, sumSq = 0.0;
-            float minMs = 1e30f, maxMs = 0.0f;
-            aclrtEvent startEvt, stopEvt;
-            aclrtCreateEvent(&startEvt);
-            aclrtCreateEvent(&stopEvt);
-            for (int iter = 0; iter < N_ITERS; iter++) {
-                aclrtRecordEvent(startEvt, nullptr);
-                aclsparseSpvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE, res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT);
-                aclrtRecordEvent(stopEvt, nullptr);
-                aclrtSynchronizeEvent(stopEvt);
-                float ms = 0.0f;
-                aclrtEventElapsedTime(&ms, startEvt, stopEvt);
-                sumMs += ms;
-                sumSq += (double)ms * ms;
-                if (ms < minMs) minMs = ms;
-                if (ms > maxMs) maxMs = ms;
-            }
-            aclrtDestroyEvent(startEvt);
-            aclrtDestroyEvent(stopEvt);
-
-            double avgMs = sumMs / N_ITERS;
-            double stdMs = sqrt(sumSq / N_ITERS - avgMs * avgMs);
-            double throughput = (nnz / avgMs) / 1000.0;  // Mnnz/s
-
-            CHECK_ACL(aclrtSynchronizeDevice());
-            float hResult = 0.0f;
-            CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), res.dResult, sizeof(float),
-                ACL_MEMCPY_DEVICE_TO_HOST));
-            float tol = (isFp16 ? 1e-2f : 1e-3f) * std::max(1.0f, std::abs(golden));
-            bool pass = std::abs(hResult - golden) < tol;
-
-            printf("  avg=%.4f ms, min=%.4f ms, max=%.4f ms, %.1f Mnnz/s | diff=%.2e → %s\n",
-                   avgMs, minMs, maxMs, throughput, std::abs(hResult - golden), pass ? "PASS" : "FAIL");
-            if (!pass) allPass = false;
+    ~SpvvBenchmarkEvents()
+    {
+        if (start != nullptr) {
+            aclrtDestroyEvent(start);
+        }
+        if (stop != nullptr) {
+            aclrtDestroyEvent(stop);
         }
     }
 
+    SpvvBenchmarkEvents() = default;
+    SpvvBenchmarkEvents(const SpvvBenchmarkEvents &) = delete;
+    SpvvBenchmarkEvents &operator=(const SpvvBenchmarkEvents &) = delete;
+};
+
+static bool prepare_spvv_benchmark_case(aclDataType dtype, const SpvvCase &c,
+    SpvvDeviceResources &res, float &golden)
+{
+    const bool isFp16 = (dtype == ACL_FLOAT16);
+    const size_t elemSz = isFp16 ? sizeof(uint16_t) : sizeof(float);
+    std::vector<int32_t> indices;
+    std::vector<float> xValuesFp32, yValuesFp32;
+    generate_random_spvv_data(indices, xValuesFp32, yValuesFp32, c.nnz, c.yLen);
+    std::vector<uint16_t> xValuesFp16, yValuesFp16;
+    if (isFp16) {
+        float_to_fp16(xValuesFp32, xValuesFp16);
+        float_to_fp16(yValuesFp32, yValuesFp16);
+        golden = compute_golden_fp16(indices, xValuesFp16, yValuesFp16);
+    } else {
+        golden = compute_golden_fp32(indices, xValuesFp32, yValuesFp32);
+    }
+    CHECK_ACL(aclrtMalloc(&res.dIndices, std::max<size_t>(c.nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&res.dXValues, std::max<size_t>(c.nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&res.dYValues, c.yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&res.dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+    if (c.nnz > 0) {
+        CHECK_ACL(aclrtMemcpy(res.dIndices, c.nnz * sizeof(int32_t), indices.data(),
+            c.nnz * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE));
+        const void *xv = isFp16 ? (const void *)xValuesFp16.data() : (const void *)xValuesFp32.data();
+        CHECK_ACL(aclrtMemcpy(res.dXValues, c.nnz * elemSz, xv, c.nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+    }
+    const void *yv = isFp16 ? (const void *)yValuesFp16.data() : (const void *)yValuesFp32.data();
+    CHECK_ACL(aclrtMemcpy(res.dYValues, c.yLen * elemSz, yv, c.yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL_SPARSE(aclsparseCreate(&res.handle));
+    CHECK_ACL_SPARSE(aclsparseCreateSpVec(&res.spVecX, c.yLen, c.nnz, res.dIndices, res.dXValues,
+        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype));
+    CHECK_ACL_SPARSE(aclsparseCreateDnVec(&res.dnVecY, c.yLen, res.dYValues, dtype));
+    return true;
+}
+
+static bool measure_spvv_benchmark(const SpvvDeviceResources &res, int warmup,
+    int n_iters, SpvvBenchmarkTiming &timing)
+{
+    for (int w = 0; w < warmup; w++) {
+        CHECK_ACL_SPARSE(aclsparseSpvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+            res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT));
+    }
+    CHECK_ACL(aclrtSynchronizeDevice());
+    SpvvBenchmarkEvents events;
+    CHECK_ACL(aclrtCreateEvent(&events.start));
+    CHECK_ACL(aclrtCreateEvent(&events.stop));
+    for (int iter = 0; iter < n_iters; iter++) {
+        CHECK_ACL(aclrtRecordEvent(events.start, nullptr));
+        CHECK_ACL_SPARSE(aclsparseSpvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+            res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT));
+        CHECK_ACL(aclrtRecordEvent(events.stop, nullptr));
+        CHECK_ACL(aclrtSynchronizeEvent(events.stop));
+        float ms = 0.0f;
+        CHECK_ACL(aclrtEventElapsedTime(&ms, events.start, events.stop));
+        timing.sumMs += ms;
+        timing.minMs = std::min(timing.minMs, ms);
+        timing.maxMs = std::max(timing.maxMs, ms);
+    }
+    return true;
+}
+
+static bool run_spvv_benchmark_case(aclDataType dtype, const SpvvCase &c, int warmup, int n_iters)
+{
+    if (n_iters <= 0) {
+        fprintf(stderr, "SpVV benchmark iterations must be positive: %d\n", n_iters);
+        return false;
+    }
+    const bool isFp16 = (dtype == ACL_FLOAT16);
+    printf("\n--- %s [%s] nnz=%u yLen=%u ---\n", isFp16 ? "FP16" : "FP32", c.tag, c.nnz, c.yLen);
+    SpvvDeviceResources res;
+    float golden = 0.0f;
+    if (!prepare_spvv_benchmark_case(dtype, c, res, golden)) {
+        return false;
+    }
+    SpvvBenchmarkTiming timing;
+    if (!measure_spvv_benchmark(res, warmup, n_iters, timing)) {
+        return false;
+    }
+    CHECK_ACL(aclrtSynchronizeDevice());
+    float hResult = 0.0f;
+    CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), res.dResult, sizeof(float), ACL_MEMCPY_DEVICE_TO_HOST));
+    const double avgMs = n_iters > 0 ? timing.sumMs / static_cast<double>(n_iters) : 0.0;
+    // Very short measurements can round to zero at the timer's resolution.
+    const double throughput = avgMs > 0.0 ? (c.nnz / avgMs) / 1000.0 : 0.0; // Mnnz/s
+    const float tol = (isFp16 ? 1e-2f : 1e-3f) * std::max(1.0f, std::abs(golden));
+    const bool pass = std::abs(hResult - golden) < tol;
+    printf("  avg=%.4f ms, min=%.4f ms, max=%.4f ms, %.1f Mnnz/s | diff=%.2e → %s\n",
+        avgMs, timing.minMs, timing.maxMs, throughput, std::abs(hResult - golden), pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+static bool test_spvv_benchmark(bool full_suite)
+{
+    static const aclDataType kDtypes[] = {ACL_FLOAT, ACL_FLOAT16};
+    bool allPass = true;
+    CHECK_ACL(aclInit(nullptr));
+    int32_t deviceId = 0;
+    CHECK_ACL(aclrtSetDevice(deviceId));
+    int64_t coreNum = 0;
+    aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_VECTOR_CORE_NUM, &coreNum);
+    const SpvvCase *bench_cases = full_suite ? kFullBenchCases : kPresmokeBenchCases;
+    const int n_cases = full_suite ? sizeof(kFullBenchCases) / sizeof(kFullBenchCases[0])
+                                   : sizeof(kPresmokeBenchCases) / sizeof(kPresmokeBenchCases[0]);
+    const int warmup = full_suite ? 5 : 2;
+    const int n_iters = full_suite ? 20 : 3;
+    printf("=== Benchmark (%s): FP32 & FP16 (warmup=%d, iters=%d), cores=%ld ===\n",
+        full_suite ? "full" : "presmoke", warmup, n_iters, coreNum);
+    for (aclDataType dtype : kDtypes) {
+        if (!dtype_enabled(dtype)) continue;
+        for (int ci = 0; ci < n_cases; ci++) {
+            if (!run_spvv_benchmark_case(dtype, bench_cases[ci], warmup, n_iters)) {
+                allPass = false;
+            }
+        }
+    }
     CHECK_ACL(aclrtResetDevice(deviceId));
     CHECK_ACL(aclFinalize());
     return allPass;
@@ -650,32 +713,32 @@ static bool test_spvv_benchmark()
 // Main
 // ---------------------------------------------------------------------------
 
-static int run_spvv_tests(int argc, char *argv[])
+static bool configure_spvv_dtype_filter(int argc, char *argv[])
 {
-    // Optional argv[1]: "fp32" | "fp16" | "all" (default). Selects which dtype
-    // paths to exercise so FP32/FP16 can be validated independently.
-    if (argc > 1) {
-        std::string sel = argv[1];
-        if (sel == "fp32") g_dtypeFilter = DT_FP32;
-        else if (sel == "fp16") g_dtypeFilter = DT_FP16;
-        else if (sel == "all") g_dtypeFilter = DT_ALL;
-        else {
-            fprintf(stderr, "Usage: %s [fp32|fp16|all]\n", argv[0]);
-            return 1;
-        }
+    if (argc <= 1) {
+        return true;
     }
-    printf("Dtype filter: %s\n",
-        g_dtypeFilter == DT_FP32 ? "FP32" : g_dtypeFilter == DT_FP16 ? "FP16" : "ALL");
-
-    if (g_dtypeFilter != DT_FP32 && !test_fp16_conversion_helpers()) {
-        return 1;
+    const std::string sel = argv[1];
+    if (sel == "fp32") g_dtypeFilter = DT_FP32;
+    else if (sel == "fp16") g_dtypeFilter = DT_FP16;
+    else if (sel == "all") g_dtypeFilter = DT_ALL;
+    else {
+        fprintf(stderr, "Usage: %s [fp32|fp16|all]\n", argv[0]);
+        return false;
     }
+    return true;
+}
 
-    int passed = 0, failed = 0;
-
-    // Correctness: each case × {FP32, FP16}
-    for (size_t i = 0; i < sizeof(kCorrectnessCases) / sizeof(kCorrectnessCases[0]); i++) {
-        const SpvvCase &c = kCorrectnessCases[i];
+static void run_spvv_correctness_cases(bool full_suite, int &passed, int &failed)
+{
+    const SpvvCase *cases = full_suite ? kFullCorrectnessCases : kPresmokeCorrectnessCases;
+    const size_t case_count = full_suite
+        ? sizeof(kFullCorrectnessCases) / sizeof(kFullCorrectnessCases[0])
+        : sizeof(kPresmokeCorrectnessCases) / sizeof(kPresmokeCorrectnessCases[0]);
+    printf("=== Correctness suite (%s): %zu shapes ===\n",
+        full_suite ? "full" : "presmoke", case_count);
+    for (size_t i = 0; i < case_count; i++) {
+        const SpvvCase &c = cases[i];
         if (dtype_enabled(ACL_FLOAT)) {
             test_spvv_case(ACL_FLOAT, c.nnz, c.yLen, c.tag) ? passed++ : failed++;
         }
@@ -683,17 +746,27 @@ static int run_spvv_tests(int argc, char *argv[])
             test_spvv_case(ACL_FLOAT16, c.nnz, c.yLen, c.tag) ? passed++ : failed++;
         }
     }
+}
 
-    // Benchmark: FP32 & FP16 across scales / sparsities
-    test_spvv_benchmark() ? passed++ : failed++;
-
-    // Randomized fuzz: 100 iters × {FP32, FP16}
-    test_spvv_random() ? passed++ : failed++;
-
+static int run_spvv_tests(int argc, char *argv[])
+{
+    const bool full_suite = SparseTestFullEnabled();
+    if (!configure_spvv_dtype_filter(argc, argv)) {
+        return 1;
+    }
+    printf("Dtype filter: %s; suite: %s\n",
+        g_dtypeFilter == DT_FP32 ? "FP32" : g_dtypeFilter == DT_FP16 ? "FP16" : "ALL",
+        full_suite ? "full" : "presmoke");
+    if (g_dtypeFilter != DT_FP32 && !test_fp16_conversion_helpers()) {
+        return 1;
+    }
+    int passed = 0, failed = 0;
+    run_spvv_correctness_cases(full_suite, passed, failed);
+    test_spvv_benchmark(full_suite) ? passed++ : failed++;
+    test_spvv_random(full_suite) ? passed++ : failed++;
     printf("\n========================================\n");
     printf("Total: %d passed, %d failed\n", passed, failed);
     printf("========================================\n");
-
     return failed > 0 ? 1 : 0;
 }
 

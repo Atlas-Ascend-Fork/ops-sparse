@@ -66,6 +66,7 @@
 #include "acl/acl.h"
 #include "securec.h"  // memcpy_s, EOK
 #include "cann_ops_sparse.h"
+#include "../../frame/presmoke.h"
 
 // ===================== 工具宏 =====================
 #define CHECK_RET(cond, return_expr) \
@@ -522,6 +523,32 @@ struct TestStats {
     std::vector<std::string> failedCases;
 };
 
+// The presmoke suite keeps every functional case, but uses bounded data
+// sizes for host-side golden generation and byte comparison.  Full-scale
+// stress cases are used by ordinary build.sh runs.
+static void ApplyScatterPresmokeShape(size_t &N, size_t &nnz, const std::string &tag)
+{
+    if (SparseTestFullEnabled()) {
+        return;
+    }
+    // Keep the 131072/131073 tail regression exact; only its output vector is
+    // shortened to the smallest size that still contains both contiguous runs.
+    if (tag.find("boundary-13107") == 0) {
+        N = std::min(N, size_t{262144});
+        return;
+    }
+    if (N > 1024) {
+        N = std::max(size_t{1024}, (N + 15) / 16);
+    }
+    if (nnz > N) {
+        nnz = N;
+    }
+    if (nnz > 4096) {
+        nnz = std::max(size_t{4096}, (nnz + 15) / 16);
+        nnz = std::min(nnz, N);
+    }
+}
+
 /*
  * RunAndTrack：执行单个 Test 用例并统计结果。
  * 适配 scatter 维度：(N, nnz, pattern, fillVal)。
@@ -530,6 +557,7 @@ template <typename ValT>
 int RunAndTrack(size_t N, size_t nnz, IndexPattern pattern,
                 const std::vector<float> *fillVal,
                 TestStats &stats, aclrtStream stream, const std::string &tag = "") {
+    ApplyScatterPresmokeShape(N, nnz, tag);
     float MARE = 0, MERE = 0;
     std::string worstInfo;
     int ret = Test<ValT>(N, nnz, pattern, fillVal, MARE, MERE, stream, &worstInfo);
@@ -564,7 +592,9 @@ void RunRandomParams(int numCases, const std::string &tagPrefix,
 
     std::mt19937 rng(static_cast<uint32_t>(
         std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::uniform_int_distribution<int64_t> nDist(1024, 65536);
+    const int64_t minN = SparseTestFullEnabled() ? 1024 : 256;
+    const int64_t maxN = SparseTestFullEnabled() ? 65536 : 4096;
+    std::uniform_int_distribution<int64_t> nDist(minN, maxN);
     // 索引模式：偏向 RANDOM_UNIQUE / CONTIGUOUS / STRIDE（覆盖主要分支）
     std::uniform_int_distribution<int> patDist(0, 3);
 
@@ -838,6 +868,7 @@ void RunDtypeAndTrack(const ScatterDtypeDesc &dt, size_t N, size_t nnz, IndexPat
                       aclsparseIndexBase_t idxBase, TestStats &stats, aclrtStream stream,
                       const std::string &tag)
 {
+    ApplyScatterPresmokeShape(N, nnz, tag);
     int ret = TestDtype(dt, N, nnz, pattern, idxBase, stream, tag);
     stats.total++;
     if (ret == 0) {
@@ -1273,6 +1304,8 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     }
 
     TestStats stats;
+    std::cout << "[Scatter] " << (SparseTestFullEnabled() ? "full stress shapes" : "small functional shapes")
+              << " (set SPARSE_TEST_PRESMOKE=1 for small shapes)\n";
 
     std::cout << "\n"
               << "###########################################################\n"

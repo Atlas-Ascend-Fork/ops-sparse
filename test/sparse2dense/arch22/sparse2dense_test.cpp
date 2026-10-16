@@ -56,6 +56,7 @@
 //   * 与官方 torch 胶水层的生成器差异（torch.randn vs splitmix64）为既成偏差，
 //     测试侧按单分布标签执行，不复刻官方 RNG。
 #include <gtest/gtest.h>
+#include "../../frame/presmoke.h"
 
 #include <algorithm>
 #include <cmath>
@@ -721,6 +722,7 @@ protected:
             std::exit(2);
         }
         EnvUp() = true;
+        LOG_PRINT("[SparseToDense] suite=%s", SparseTestFullEnabled() ? "full" : "small functional");
         const char *vis = std::getenv("ASCEND_RT_VISIBLE_DEVICES");
         LOG_PRINT("[real-env] OK (logical device=%d, soc=%s, vector_cores=%u, ASCEND_RT_VISIBLE_DEVICES=%s; "
                   "NPU 真机执行，无 Mock/CPU fallback)",
@@ -852,6 +854,11 @@ TEST_F(Sparse2DenseRealTest, L0_012)
 {
     CaseSpec cs{"L0_012", DType::FP32, Fmt::CSR, Layout::ROW, 0, 4096, 1536, 1536, 262144, RowPattern::UNIFORM,
                 CoordMode::SORTED_UNIQUE, 20260911ull};
+    if (!SparseTestFullEnabled()) {
+        cs.rows = 128;
+        cs.cols = cs.ld = 192;
+        cs.nnz = 8192; // Retain the original 64 stored entries per row.
+    }
     RunResult r = RunSparseToDenseCase(cs);
     ReportCase(cs, r);
     EXPECT_TRUE(r.ok);
@@ -872,7 +879,15 @@ const char *DTypeTag(DType t)
 
 CaseSpec SpecOf(const CaseRow &row)
 {
-    return row.spec; // 公共执行参数单点承载（CaseRow 专有字段不进入 CaseSpec）
+    CaseSpec cs = row.spec;
+    // This manifest entry otherwise allocates a 8192 x 28672 dense oracle.
+    // Keep its precision and format checks at a small, multi-tile scale.
+    if (!SparseTestFullEnabled() && std::strcmp(cs.caseId, "L1_080") == 0) {
+        cs.rows = 256;
+        cs.cols = cs.ld = 512;
+        cs.nnz = 16384;
+    }
+    return cs;
 }
 
 // 逐字节 bit 比对（等价断言：两份输出存储缓冲一致）

@@ -15,7 +15,10 @@
 #include "sddmm_npu_wrapper.h"
 #include "sddmm_param.h"
 #include "../sddmm_test_layout.h"
+#include "../../frame/presmoke.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <random>
 
@@ -46,6 +49,36 @@ TEST(VerifierRegressionTest, ComparesIntegralVectorsWithoutFloatNarrowing)
 }
 
 using SddmmArch22Test = SddmmFunctionalTestFixture;
+
+namespace {
+
+std::vector<SddmmTestParam> GetSddmmArch22Cases()
+{
+    auto cases = GetCasesFromCsv<SddmmTestParam>("sddmm_test.csv");
+    if (SparseTestFullEnabled()) {
+        return cases;
+    }
+
+    for (auto& p : cases) {
+        // These rows target K/cache and row-nnz thresholds. Their dimensions
+        // are part of the regression contract and must not be normalized.
+        const int caseNumber = std::atoi(p.case_name.c_str() + 4);
+        const bool isBoundaryCase = p.case_name == "A22_10" || p.case_name == "A22_11" ||
+                                    p.case_name == "A22_15" || p.case_name == "A22_35" ||
+                                    p.case_name == "A22_48" || p.case_name == "A22_49" ||
+                                    caseNumber >= 54;
+        if (!isBoundaryCase) {
+            // Preserve CSV rows and their dtype/op/layout/scalar semantics,
+            // while avoiding throughput-scale CPU golden calculations.
+            p.m = std::min<int64_t>(p.m, 128);
+            p.n = std::min<int64_t>(p.n, 128);
+            p.k = std::min<int64_t>(p.k, 64);
+        }
+    }
+    return cases;
+}
+
+}  // namespace
 
 TEST_P(SddmmArch22Test, SddmmFunctional) {
     const auto& p = param_;
@@ -82,7 +115,7 @@ TEST_P(SddmmArch22Test, SddmmFunctional) {
 INSTANTIATE_TEST_SUITE_P(
     SddmmArch22Cases,
     SddmmArch22Test,
-    testing::ValuesIn(GetCasesFromCsv<SddmmTestParam>("sddmm_test.csv")),
+    testing::ValuesIn(GetSddmmArch22Cases()),
     [](const testing::TestParamInfo<SddmmTestParam>& info) {
         return info.param.case_name;
     }

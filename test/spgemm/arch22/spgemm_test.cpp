@@ -29,6 +29,7 @@
 #include "spgemm_ref.h"
 #include "spgemm_harness.h"
 #include "gtest/gtest.h"
+#include "../../frame/presmoke.h"
 
 namespace {
 
@@ -2466,6 +2467,7 @@ bool TestScalarEncoding(aclsparseHandle_t handle, aclDataType dt)
 class SpGemmArch22Test : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
+        std::printf("[SpGEMM] suite=%s\n", SparseTestFullEnabled() ? "full" : "small functional");
         const char *envDev = std::getenv("SPGEMM_TEST_DEVICE");
         int devId = envDev ? std::atoi(envDev) : 0;
         ASSERT_EQ(aclInit(nullptr), ACL_SUCCESS);
@@ -2692,14 +2694,25 @@ TEST_F(SpGemmArch22Test, ScaleCases) {
         { 2000, 20000,  2000, 2, 3,  0,  0, "scale-2000x20000x2000-d2/3"},
         { 4096,  4096, 16384, 3, 6, 11,  0, "scale-4096x4096x16384-d3/6"},
     };
-    for (const ScaleCase &c : kScale) {
+    // Keep degrees, empty rows and rectangular axes at functional-test sizes.
+    const ScaleCase kPresmokeScale[] = {
+        { 63, 255, 193, 1, 1,  0,  0, "small-63x255x193-d1"},
+        {127, 128,  97, 4, 4,  0,  0, "small-127x128x97-d4"},
+        {128, 128, 128, 8, 8,  0,  0, "small-128cube-d8"},
+        {256,  64,  96, 8, 6, 17, 19, "small-256x64x96-d8/6-empty"},
+        { 96, 256,  96, 2, 3,  0,  0, "small-96x256x96-d2/3"},
+        {128, 128, 512, 3, 6, 11,  0, "small-128x128x512-d3/6"},
+    };
+    const auto &cases = SparseTestFullEnabled() ? kScale : kPresmokeScale;
+    for (const ScaleCase &c : cases) {
         EXPECT_TRUE(TestScaleCase(h, c.m, c.k, c.n, c.degA, c.degB, c.emptyA, c.emptyB,
                                   ACL_FLOAT, c.name));
         EXPECT_TRUE(TestScaleCase(h, c.m, c.k, c.n, c.degA, c.degB, c.emptyA, c.emptyB,
                                   ACL_COMPLEX64, c.name));
     }
-    EXPECT_TRUE(TestScaleCase(h, 4096, 4096, 4096, 4, 4, 0, 0, ACL_FLOAT16,
-                              "scale-4096cube-d4"));
-    EXPECT_TRUE(TestScaleCase(h, 4096, 4096, 4096, 4, 4, 0, 0, ACL_BF16,
-                              "scale-4096cube-d4"));
+    const int32_t lowPrecisionSize = SparseTestFullEnabled() ? 4096 : 128;
+    EXPECT_TRUE(TestScaleCase(h, lowPrecisionSize, lowPrecisionSize, lowPrecisionSize,
+                              4, 4, 0, 0, ACL_FLOAT16, "fp16-cube-d4"));
+    EXPECT_TRUE(TestScaleCase(h, lowPrecisionSize, lowPrecisionSize, lowPrecisionSize,
+                              4, 4, 0, 0, ACL_BF16, "bf16-cube-d4"));
 }

@@ -26,6 +26,7 @@
 #include "cscsort_golden.h"
 #include "cscsort_tiling_data.h"
 #include "cscsort_tiling_utils.h"
+#include "../../frame/presmoke.h"
 #include "tiling/platform/platform_ascendc.h"
 
 #include "acl/acl.h"
@@ -1057,7 +1058,7 @@ static uint64_t EstimateGmBytes(int nnz, uint32_t runSize,
 // Run a single perf case: warmup + measured iterations with ACL event timing.
 static CscsortPerfResult RunPerfCase(CscsortTest *t, const std::string &name, int m, int n,
     const std::vector<int32_t> &colPtrHost, const std::vector<int32_t> &rowIndHost,
-    int warmup = 3, int iters = 5)
+    int warmup = SparseTestFullEnabled() ? 3 : 1, int iters = SparseTestFullEnabled() ? 5 : 2)
 {
     int nnz = static_cast<int>(rowIndHost.size());
     CscsortPerfResult r;
@@ -1211,7 +1212,9 @@ TEST_F(CscsortTest, PERF_SmallScale)
 // PERF-2 MediumScale - 1000x1000, ~10000 nnz, uniform
 TEST_F(CscsortTest, PERF_MediumScale)
 {
-    const int m = 1000, n = 1000, elemsPerCol = 10;
+    const int m = SparseTestFullEnabled() ? 1000 : 128;
+    const int n = SparseTestFullEnabled() ? 1000 : 128;
+    const int elemsPerCol = SparseTestFullEnabled() ? 10 : 4;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 22, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_MediumScale", m, n, colPtr, rowInd);
@@ -1222,7 +1225,9 @@ TEST_F(CscsortTest, PERF_MediumScale)
 // PERF-3 LargeScale - 4096x4096, ~100000 nnz, uniform
 TEST_F(CscsortTest, PERF_LargeScale)
 {
-    const int m = 4096, n = 4096, elemsPerCol = 24;  // 4096*24 = 98304 ~ 100000
+    const int m = SparseTestFullEnabled() ? 4096 : 256;
+    const int n = SparseTestFullEnabled() ? 4096 : 256;
+    const int elemsPerCol = SparseTestFullEnabled() ? 24 : 4;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 33, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_LargeScale", m, n, colPtr, rowInd);
@@ -1234,7 +1239,9 @@ TEST_F(CscsortTest, PERF_LargeScale)
 // the LargeNnzMultiCore functional case for direct csrsort comparison)
 TEST_F(CscsortTest, PERF_MillionNnz)
 {
-    const int m = 4096, n = 64, elemsPerCol = 16384;  // 64*16384 = 1048576
+    const int m = SparseTestFullEnabled() ? 4096 : 256;
+    const int n = SparseTestFullEnabled() ? 64 : 16;
+    const int elemsPerCol = SparseTestFullEnabled() ? 16384 : 256;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 44, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_MillionNnz", m, n, colPtr, rowInd);
@@ -1245,9 +1252,11 @@ TEST_F(CscsortTest, PERF_MillionNnz)
 // PERF-5 SkewedCols - 1000x1000, ~10000 nnz, skewed (few long columns)
 TEST_F(CscsortTest, PERF_SkewedCols)
 {
-    const int m = 1000, n = 1000;
+    const int m = SparseTestFullEnabled() ? 1000 : 128;
+    const int n = SparseTestFullEnabled() ? 1000 : 128;
     std::vector<int32_t> colPtr, rowInd;
-    BuildSkewedCsc(m, n, /*longColLen=*/10000, /*shortColLen=*/2048, /*longColEvery=*/64,
+    BuildSkewedCsc(m, n, SparseTestFullEnabled() ? 10000 : 256,
+                   SparseTestFullEnabled() ? 2048 : 32, /*longColEvery=*/64,
                    55, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_SkewedCols", m, n, colPtr, rowInd);
     PrintPerfResult(r);
@@ -1258,7 +1267,9 @@ TEST_F(CscsortTest, PERF_SkewedCols)
 // mirrors LongColMultiRun for direct csrsort comparison)
 TEST_F(CscsortTest, PERF_SingleLongCol)
 {
-    const int m = 4096, n = 1, nnz = 32768;
+    const int m = SparseTestFullEnabled() ? 4096 : 256;
+    const int n = 1;
+    const int nnz = SparseTestFullEnabled() ? 32768 : 2048;
     std::vector<int32_t> colPtr = {0, nnz};
     std::vector<int32_t> rowInd(nnz);
     std::mt19937 rng(2026);
@@ -1274,7 +1285,9 @@ TEST_F(CscsortTest, PERF_SingleLongCol)
 // PERF-7 MultiCoreSmallCols - 100x1000, ~3000 nnz, 3 elems per col (multi-core parallelism)
 TEST_F(CscsortTest, PERF_MultiCoreSmallCols)
 {
-    const int m = 100, n = 1000, elemsPerCol = 3;  // 1000*3 = 3000
+    const int m = 100;
+    const int n = SparseTestFullEnabled() ? 1000 : 128;
+    const int elemsPerCol = 3;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 77, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_MultiCoreSmallCols", m, n, colPtr, rowInd);
@@ -1286,7 +1299,9 @@ TEST_F(CscsortTest, PERF_MultiCoreSmallCols)
 // 标杆 GPU median 2961.7-2969.3us，0.25x 门槛即 NPU <= 约11.8ms
 TEST_F(CscsortTest, PERF_P01_Llama70B)
 {
-    const int m = 8192, n = 28672, elemsPerCol = 18;  // 28672*18 = 516096 ≈ 524288
+    const int m = SparseTestFullEnabled() ? 8192 : 256;
+    const int n = SparseTestFullEnabled() ? 28672 : 256;
+    const int elemsPerCol = SparseTestFullEnabled() ? 18 : 4;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 101, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_P01_Llama70B", m, n, colPtr, rowInd);
@@ -1298,7 +1313,9 @@ TEST_F(CscsortTest, PERF_P01_Llama70B)
 // 标杆 GPU median 2595.9-2610.4us，0.25x 门槛即 NPU <= 约10.4ms
 TEST_F(CscsortTest, PERF_P02_Qwen235B)
 {
-    const int m = 4096, n = 1536, elemsPerCol = 170;  // 1536*170 = 261120 ≈ 262144
+    const int m = SparseTestFullEnabled() ? 4096 : 256;
+    const int n = SparseTestFullEnabled() ? 1536 : 128;
+    const int elemsPerCol = SparseTestFullEnabled() ? 170 : 8;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 102, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_P02_Qwen235B", m, n, colPtr, rowInd);
@@ -1310,7 +1327,9 @@ TEST_F(CscsortTest, PERF_P02_Qwen235B)
 // 标杆 GPU median 2780.8-2783.1us，0.25x 门槛即 NPU <= 约11.1ms
 TEST_F(CscsortTest, PERF_P03_DeepSeekV3)
 {
-    const int m = 7168, n = 2048, elemsPerCol = 224;  // 2048*224 = 458752
+    const int m = SparseTestFullEnabled() ? 7168 : 256;
+    const int n = SparseTestFullEnabled() ? 2048 : 128;
+    const int elemsPerCol = SparseTestFullEnabled() ? 224 : 8;
     std::vector<int32_t> colPtr, rowInd;
     BuildUniformCsc(m, n, elemsPerCol, 103, colPtr, rowInd);
     auto r = RunPerfCase(this, "PERF_P03_DeepSeekV3", m, n, colPtr, rowInd);

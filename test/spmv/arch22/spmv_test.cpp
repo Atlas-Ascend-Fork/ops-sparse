@@ -25,6 +25,7 @@
 #include <limits>
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
+#include "../../frame/presmoke.h"
 
 // host 侧 half/bf16 别名：kernel 侧为 AscendC::half / AscendC::bfloat16_t
 // aarch64 host 使用原生 __fp16；其余 host（如 x86_64，GCC 11 无 __fp16/_Float16）使用
@@ -788,6 +789,22 @@ struct TestStats {
     std::vector<std::string> failedCases;
 };
 
+// Keep the presmoke suite focused on functional precision. The complete
+// stress shapes are the default for ordinary build.sh runs. Do this at the
+// test boundary so every dtype, algorithm, transpose, scalar and regression
+// case still runs with its original parameters apart from its regular shape.
+static size_t PresmokeSpmvDimension(size_t dimension, const std::string &tag)
+{
+    // Fixed synchronization and transpose precision regressions retain the
+    // exact dimensions that originally exposed their failures.
+    if (SparseTestFullEnabled() || dimension <= 64 ||
+        tag.find("sync-fixed-") == 0 || tag.find("transpose-") == 0) {
+        return dimension;
+    }
+    // Round upward to retain non-aligned dimensions such as 513 -> 129.
+    return (dimension + 3) / 4;
+}
+
 template <typename CompT, typename ValT = CompT, typename OutT = CompT>
 int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
                 bool transpose,
@@ -796,6 +813,8 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
                 bool productsInValT = false,
                 int fixedSyncInput = 0, uint32_t seed = 0, bool useHandleWorkspace = false,
                 bool deviceScalarStreamOrder = false) {
+    M = PresmokeSpmvDimension(M, tag);
+    N = PresmokeSpmvDimension(N, tag);
     float MARE = 0, MERE = 0;
     std::string worstInfo;
     int ret = Test<CompT, ValT, OutT>(M, N, sparsity, alpha, beta, transpose, MARE, MERE, stream,
@@ -839,8 +858,10 @@ void RunRandomParams(int numCases, const std::string &tagPrefix, bool transpose,
 
     std::mt19937 rng(static_cast<uint32_t>(
         std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::uniform_int_distribution<int> rowDist(1, 2048);
-    std::uniform_int_distribution<int> colDist(1, 4096);
+    const int maxRows = SparseTestFullEnabled() ? 2048 : 512;
+    const int maxCols = SparseTestFullEnabled() ? 4096 : 1024;
+    std::uniform_int_distribution<int> rowDist(1, maxRows);
+    std::uniform_int_distribution<int> colDist(1, maxCols);
     std::uniform_real_distribution<float> sparsityDist(0.5f, 0.999f);
 
     for (int i = 0; i < numCases; ++i) {
@@ -952,6 +973,8 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     }
 
     TestStats stats;
+    std::cout << "[SpMV] " << (SparseTestFullEnabled() ? "full stress shapes" : "small functional shapes")
+              << " (set SPARSE_TEST_PRESMOKE=1 for small shapes)\n";
     RunFixedSyncRegression(stats, stream);
     RunFixedSyncInvalidShapeRegression(stats, stream);
     RunTransposePrecisionRegression(stats, stream);

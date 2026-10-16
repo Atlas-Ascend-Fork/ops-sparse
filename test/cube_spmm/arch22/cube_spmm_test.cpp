@@ -26,6 +26,7 @@
 #include "acl/acl.h"
 #include "aclsparse_fp16_utils.h"
 #include "cann_ops_sparse.h"
+#include "../../frame/presmoke.h"
 
 namespace {
 
@@ -530,10 +531,13 @@ static bool PrepareTestInputs(
 
     if (randomMode) {
         // Default random case for "bash build.sh --ops=cube_spmm --run".
-        M = 512;
-        K = 512;
-        N = 1024;
-        double density = 0.01;
+        // The presmoke shape still crosses multiple 16x16 tiles on all three
+        // axes and has an N tail.  The original throughput-sized case remains
+        // available with ordinary build.sh runs.
+        M = SparseTestFullEnabled() ? 512 : 80;
+        K = SparseTestFullEnabled() ? 512 : 80;
+        N = SparseTestFullEnabled() ? 1024 : 130;
+        double density = SparseTestFullEnabled() ? 0.01 : 0.04;
         // Fixed seed keeps the default random case reproducible.
         SparseMatrix sm = GenerateRandomSparseMatrix(M, K, density, 12345u);
         M = sm.M;

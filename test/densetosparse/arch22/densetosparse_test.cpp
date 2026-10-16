@@ -40,6 +40,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../../frame/presmoke.h"
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
 
@@ -184,6 +185,8 @@ class DenseToSparseUtEnv : public ::testing::Environment {
 public:
     void SetUp() override
     {
+        std::printf("[DenseToSparse] suite=%s\n",
+            SparseTestFullEnabled() ? "full" : "small functional");
         ASSERT_EQ(aclInit(nullptr), ACL_SUCCESS);
         ASSERT_EQ(aclrtSetDevice(0), ACL_SUCCESS);
         ASSERT_EQ(aclrtCreateStream(&dts_stream), ACL_SUCCESS);
@@ -293,6 +296,11 @@ std::vector<NamedCase> LoadArch22Cases()
         cfg.ellCols = sparse_test::parseInt(row, "ell_cols");
         cfg.nnzPerRow = sparse_test::parseInt(row, "nnz_per_row");
         cfg.seed = static_cast<unsigned>(sparse_test::parseInt(row, "seed"));
+        // Preserve column width, density and carve-out thresholds. Fewer rows
+        // reduce dense generation/conversion cost without changing each row.
+        if (!SparseTestFullEnabled() && cfg.rows >= 512) {
+            cfg.rows = 64;
+        }
         cases.emplace_back(sparse_test::parseString(row, "case_name"), cfg);
     }
     return cases;

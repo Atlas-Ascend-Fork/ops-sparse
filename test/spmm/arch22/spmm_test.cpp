@@ -662,10 +662,11 @@ static const TestCaseParam kTestCases[] = {
     {8191, 32767, 8, 5367889, 3.3f, -2.4f, DIST_UNIFORM},
 };
 
-// The default suite is deliberately small enough for CI presmoke while still
-// retaining representative boundary, shape, distribution, coefficient and
-// large-workload coverage.  Set SPMM_TEST_FULL=1 to run every case in
-// kTestCases, including the exhaustive performance-stress cases.
+// The presmoke suite uses small functional shapes so its CPU golden calculation
+// is suitable for presmoke. It still covers both CSR distributions, scalar
+// coefficients, non-aligned dimensions, empty-row inputs and a dense-output
+// pressure shape. Ordinary build.sh runs execute kTestCases at full scale;
+// only SPARSE_TEST_PRESMOKE=1 selects this reduced suite.
 static const TestCaseParam kPresmokeCases[] = {
     // Small and scalar boundaries.
     {16, 16, 16, 128, 1.0f, 1.0f, DIST_UNIFORM},
@@ -674,29 +675,29 @@ static const TestCaseParam kPresmokeCases[] = {
     {64, 64, 1, 32, 1.0f, 0.0f, DIST_UNIFORM},
 
     // Coefficients and non-square / non-aligned shapes.
-    {512, 512, 128, 26214, 2.0f, 0.5f, DIST_UNIFORM},
-    {1024, 1024, 128, 52428, 0.0f, 1.0f, DIST_UNIFORM},
-    {1024, 1024, 128, 52428, -1.0f, 1.0f, DIST_UNIFORM},
-    {1024, 1024, 128, 52428, 2.5f, 1.5f, DIST_UNIFORM},
+    {256, 256, 64, 6553, 2.0f, 0.5f, DIST_UNIFORM},
+    {256, 256, 64, 6553, 0.0f, 1.0f, DIST_UNIFORM},
+    {256, 256, 64, 6553, -1.0f, 1.0f, DIST_UNIFORM},
+    {256, 256, 64, 6553, 2.5f, 1.5f, DIST_UNIFORM},
     {256, 128, 128, 1638, 1.0f, 0.0f, DIST_UNIFORM},
     {256, 128, 128, 1638, 1.0f, 0.0f, DIST_POWERLAW},
-    {4095, 2047, 255, 419123, 1.0f, 0.0f, DIST_UNIFORM},
-    {4095, 2047, 255, 419123, 1.0f, 0.0f, DIST_POWERLAW},
-    {2048, 128, 1024, 5242, 2.1f, -0.8f, DIST_POWERLAW},
-    {1023, 1024, 32, 1047, 3.2f, 2.9f, DIST_UNIFORM},
-    {4096, 4096, 128, 1, 1.0f, 0.0f, DIST_UNIFORM},
-    {4096, 4096, 128, 10, 1.0f, 0.0f, DIST_UNIFORM},
+    {255, 127, 63, 1619, 1.0f, 0.0f, DIST_UNIFORM},
+    {255, 127, 63, 1619, 1.0f, 0.0f, DIST_POWERLAW},
+    {255, 128, 255, 655, 2.1f, -0.8f, DIST_POWERLAW},
+    {511, 512, 32, 523, 3.2f, 2.9f, DIST_UNIFORM},
+    {512, 512, 128, 1, 1.0f, 0.0f, DIST_UNIFORM},
+    {512, 512, 128, 10, 1.0f, 0.0f, DIST_UNIFORM},
 
-    // Representative large workloads: both CSR distributions, wide output,
-    // high row count and dense-per-row stress.
-    {4096, 4096, 256, 1048576, 1.0f, 0.0f, DIST_UNIFORM},
-    {4096, 4096, 256, 1048576, 1.0f, 0.0f, DIST_POWERLAW},
-    {65536, 65536, 64, 16777216, 1.0f, 0.0f, DIST_UNIFORM},
-    {65536, 65536, 64, 16777216, 1.0f, 0.0f, DIST_POWERLAW},
-    {4096, 4096, 4096, 1048576, 1.0f, 0.0f, DIST_UNIFORM},
-    {4096, 4096, 4096, 1048576, 1.0f, 0.0f, DIST_POWERLAW},
-    {4096, 4096, 256, 8388608, 1.0f, 0.0f, DIST_UNIFORM},
-    {4096, 4096, 256, 8388608, 1.0f, 0.0f, DIST_POWERLAW},
+    // Representative small pressure cases: both distributions, wide output,
+    // high row count and dense-per-row work without the former CPU stress.
+    {512, 512, 128, 26214, 1.0f, 0.0f, DIST_UNIFORM},
+    {512, 512, 128, 26214, 1.0f, 0.0f, DIST_POWERLAW},
+    {4096, 256, 64, 52428, 1.0f, 0.0f, DIST_UNIFORM},
+    {4096, 256, 64, 52428, 1.0f, 0.0f, DIST_POWERLAW},
+    {512, 512, 512, 13107, 1.0f, 0.0f, DIST_UNIFORM},
+    {512, 512, 512, 13107, 1.0f, 0.0f, DIST_POWERLAW},
+    {512, 512, 128, 131072, 1.0f, 0.0f, DIST_UNIFORM},
+    {512, 512, 128, 131072, 1.0f, 0.0f, DIST_POWERLAW},
 };
 
 static int run_test_cases(const TestCaseParam *test_cases, size_t case_count,
@@ -803,8 +804,8 @@ static bool startup_option_enabled(char *const envp[], const char *name)
 
 int main(int, char **, char **envp)
 {
-    const bool full_suite = startup_option_enabled(envp, "SPMM_TEST_FULL");
-    const int cpu_repeat = startup_option_enabled(envp, "SPMM_TEST_CPU_BENCHMARK") ? 10 : 1;
+    const bool full_suite = !startup_option_enabled(envp, "SPARSE_TEST_PRESMOKE");
+    const int cpu_repeat = full_suite && startup_option_enabled(envp, "SPMM_TEST_CPU_BENCHMARK") ? 10 : 1;
     int32_t deviceId = 0;
     aclrtStream stream = 0;
     CHECK_ACL(aclInit(NULL))
