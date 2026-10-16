@@ -1017,7 +1017,7 @@ aclsparseStatus_t aclsparseSpMV(
 );
 ```
 
-**功能**：稀疏矩阵向量乘法（SpMV）。稀疏矩阵 `mat` 须为 **CSR** 格式（CSC / COO 等格式将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。
+**功能**：稀疏矩阵向量乘法（SpMV）。稀疏矩阵 `matA` 须为 **CSR** 格式（CSC / COO 等格式将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。
 
 **参数说明**：
 

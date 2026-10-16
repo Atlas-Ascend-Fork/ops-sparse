@@ -445,29 +445,29 @@ extern "C" __global__ __aicore__ void spmm_custom_int8(
 // Host-side launch dispatcher — dataType/blockDim passed from spmm_host.cpp.
 // ============================================================================
 extern "C" void spmm_kernel_launch(
-    const void *csrRowOffsets,
-    const void *csrColInd,
-    const void *csrValues,
-    const void *matB,
-    void *matC,
-    void *workspaceGM,
-    void *tilingGM,
+    GM_ADDR csrRowOffsets,
+    GM_ADDR csrColInd,
+    GM_ADDR csrValues,
+    GM_ADDR matB,
+    GM_ADDR matC,
+    GM_ADDR workspaceGM,
+    GM_ADDR tilingGM,
     int32_t dataType,
     uint32_t blockDim,
     void *stream)
 {
     if (dataType == SPMM_DTYPE_FP32) {
         spmm_custom_fp32<<<blockDim, nullptr, stream>>>(
-            (GM_ADDR)csrRowOffsets, (GM_ADDR)csrColInd, (GM_ADDR)csrValues,
-            (GM_ADDR)matB, (GM_ADDR)matC, (GM_ADDR)workspaceGM, (GM_ADDR)tilingGM);
+            csrRowOffsets, csrColInd, csrValues,
+            matB, matC, workspaceGM, tilingGM);
     } else if (dataType == SPMM_DTYPE_FP16) {
         spmm_custom_fp16<<<blockDim, nullptr, stream>>>(
-            (GM_ADDR)csrRowOffsets, (GM_ADDR)csrColInd, (GM_ADDR)csrValues,
-            (GM_ADDR)matB, (GM_ADDR)matC, (GM_ADDR)workspaceGM, (GM_ADDR)tilingGM);
+            csrRowOffsets, csrColInd, csrValues,
+            matB, matC, workspaceGM, tilingGM);
     } else if (dataType == SPMM_DTYPE_INT8) {
         spmm_custom_int8<<<blockDim, nullptr, stream>>>(
-            (GM_ADDR)csrRowOffsets, (GM_ADDR)csrColInd, (GM_ADDR)csrValues,
-            (GM_ADDR)matB, (GM_ADDR)matC, (GM_ADDR)workspaceGM, (GM_ADDR)tilingGM);
+            csrRowOffsets, csrColInd, csrValues,
+            matB, matC, workspaceGM, tilingGM);
     } else {
         // 未知 dtype：显式报错并拒绝启动，避免静默按 int8 处理导致错误结果。
         fprintf(stderr, "[ERROR] spmm_kernel_launch: unsupported dataType %d "

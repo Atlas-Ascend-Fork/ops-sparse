@@ -144,8 +144,11 @@ aclsparseStatus_t aclsparseSpvv(aclsparseHandle_t handle, aclsparseOperation_t o
     // Zero result on `stream` before launch: every core AtomicAdds into a known-zero output.
     CHECK_ACL(aclrtMemsetAsync(result, sizeof(float), 0, sizeof(float), stream));
 
-    spvv_kernel_do(xInner->indices, xInner->values, yInner->values,
-        result, tiling, blockNum, xInner->valueType, stream);
+    spvv_kernel_do(reinterpret_cast<GM_ADDR>(xInner->indices),
+        reinterpret_cast<GM_ADDR>(xInner->values),
+        reinterpret_cast<GM_ADDR>(yInner->values),
+        reinterpret_cast<GM_ADDR>(result),
+        tiling, blockNum, xInner->valueType, stream);
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }

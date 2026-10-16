@@ -19,6 +19,14 @@
 #define __gm__
 #endif
 
+/* CXX(host) TU 下 GM_ADDR 未定义，此处补齐，使 launch 声明可统一使用 GM_ADDR。
+ * ASC(kernel) TU 下编译器已定义 GM_ADDR，#ifndef 跳过重定义。
+ * 这样 <<<>>> 调用处不再需要 (GM_ADDR) 强转，消除
+ * "cce_global attribute ignored when parsing type" 告警。 */
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
+#endif
+
 #define SPMM_ARCH22_MAX_BLOCK_DIM  24
 #define SPMM_ARCH22_BUFFER_NUM     2
 #define SPMM_ARCH22_UB_SIZE        (192 * 1024)
@@ -64,8 +72,8 @@ static inline uint32_t SpmmArch22ComputeNChunks(uint32_t N)
 
 /* host 侧 kernel launch 入口，定义于 spmm_kernel.cpp，供 spmm_host.cpp 调用 */
 void spmm_arch22_kernel_launch(
-    void *rowOff, void *colIdx, void *values,
-    void *matB, void *matC, void *workspace, void *tiling,
+    GM_ADDR rowOff, GM_ADDR colIdx, GM_ADDR values,
+    GM_ADDR matB, GM_ADDR matC, GM_ADDR workspace, GM_ADDR tiling,
     uint32_t blockDim, void *stream);
 
 #endif

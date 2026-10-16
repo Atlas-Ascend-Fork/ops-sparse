@@ -21,6 +21,14 @@
 #define __gm__
 #endif
 
+/* CXX(host) TU 下 GM_ADDR 未定义，此处补齐，使 launch 声明可统一使用 GM_ADDR。
+ * ASC(kernel) TU 下编译器已定义 GM_ADDR，#ifndef 跳过重定义。
+ * 这样 <<<>>> 调用处不再需要 (GM_ADDR) 强转，消除
+ * "cce_global attribute ignored when parsing type" 告警。 */
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
+#endif
+
 #ifndef SPMM_ROUNDUP
 #define SPMM_ROUNDUP(a, b) (((a) + (b) - 1) / (b) * (b))
 #endif

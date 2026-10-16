@@ -284,9 +284,9 @@ __global__ __vector__ void gather_custom(
 }
 
 void gather_kernel_do(
-    void *idxDev, void *yDev, void *xValuesDev,
+    GM_ADDR idxDev, GM_ADDR yDev, GM_ADDR xValuesDev,
     const GatherTilingData &tiling, uint32_t blockNum, void *stream)
 {
     gather_custom<<<blockNum, nullptr, stream>>>(
-        (GM_ADDR)idxDev, (GM_ADDR)yDev, (GM_ADDR)xValuesDev, tiling);
+        idxDev, yDev, xValuesDev, tiling);
 }

@@ -539,18 +539,16 @@ SPGEMM_DEFINE_NUMERIC_KERNEL(bf16, bfloat16_t)
 SPGEMM_DEFINE_NUMERIC_KERNEL(c64, SpgemmComplex64)
 
 void spgemm_arch22_numeric_launch(
-    void *aRowPtr, void *aColIdx, void *aValues,
-    void *bRowPtr, void *bColIdx, void *bValues,
-    void *cRowPtrIn, void *cColIdxIn, void *cValuesIn,
-    void *buffer1, void *buffer2, void *tiling,
+    GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR aValues,
+    GM_ADDR bRowPtr, GM_ADDR bColIdx, GM_ADDR bValues,
+    GM_ADDR cRowPtrIn, GM_ADDR cColIdxIn, GM_ADDR cValuesIn,
+    GM_ADDR buffer1, GM_ADDR buffer2, GM_ADDR tiling,
     uint32_t dtypeId, uint32_t blockDim, void *stream)
 {
 #define SPGEMM_NUMERIC_LAUNCH(SUFFIX)                                                 \
     spgemm_arch22_numeric_##SUFFIX<<<blockDim, nullptr, stream>>>(                    \
-        (GM_ADDR)aRowPtr, (GM_ADDR)aColIdx, (GM_ADDR)aValues,                         \
-        (GM_ADDR)bRowPtr, (GM_ADDR)bColIdx, (GM_ADDR)bValues,                         \
-        (GM_ADDR)cRowPtrIn, (GM_ADDR)cColIdxIn, (GM_ADDR)cValuesIn,                   \
-        (GM_ADDR)buffer1, (GM_ADDR)buffer2, (GM_ADDR)tiling)
+        aRowPtr, aColIdx, aValues, bRowPtr, bColIdx, bValues,                         \
+        cRowPtrIn, cColIdxIn, cValuesIn, buffer1, buffer2, tiling)
 
     switch (dtypeId) {
         case SPGEMM_KERNEL_DTYPE_FP16:

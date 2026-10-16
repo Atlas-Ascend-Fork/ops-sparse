@@ -357,17 +357,15 @@ __global__ __aicore__ void spvv_kernel_half(
 // Host-side launcher (called from spvv_host.cpp)
 // ---------------------------------------------------------------------------
 
-void spvv_kernel_do(void* xIndices, void* xValues, void* y,
-    void* output, const SpvvTilingData &tiling, uint32_t blockNum,
+void spvv_kernel_do(GM_ADDR xIndices, GM_ADDR xValues, GM_ADDR y,
+    GM_ADDR output, const SpvvTilingData &tiling, uint32_t blockNum,
     aclDataType valueType, void* stream)
 {
     if (valueType == ACL_FLOAT) {
         spvv_kernel_fp32<<<blockNum, nullptr, stream>>>(
-            (GM_ADDR)xIndices, (GM_ADDR)xValues, (GM_ADDR)y,
-            (GM_ADDR)output, tiling);
+            xIndices, xValues, y, output, tiling);
     } else {
         spvv_kernel_half<<<blockNum, nullptr, stream>>>(
-            (GM_ADDR)xIndices, (GM_ADDR)xValues, (GM_ADDR)y,
-            (GM_ADDR)output, tiling);
+            xIndices, xValues, y, output, tiling);
     }
 }

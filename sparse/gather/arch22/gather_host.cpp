@@ -265,7 +265,9 @@ static aclsparseStatus_t LaunchGatherKernelRaw(
             nnz, tiling.idxBase, tiling.elemBytes, static_cast<unsigned long long>(tiling.yElems),
             tiling.blockNum, tiling.tileNn);
 
-    gather_kernel_do(dIdx, const_cast<void *>(dY), dXVal, tiling, tiling.blockNum,
+    gather_kernel_do(reinterpret_cast<GM_ADDR>(dIdx),
+                     reinterpret_cast<GM_ADDR>(const_cast<void *>(dY)),
+                     reinterpret_cast<GM_ADDR>(dXVal), tiling, tiling.blockNum,
                      reinterpret_cast<aclsparseContext *>(handle)->stream);
 
     return ACL_SPARSE_STATUS_SUCCESS;

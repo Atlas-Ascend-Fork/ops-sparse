@@ -25,9 +25,9 @@
 #include "cube_spmm.h"
 
 extern "C" void cube_spmm_kernel_launch(
-    const void *rw_ptr, const void *col_ref, const void *vals,
-    const void *b, const void *core_info, void *c,
-    void *workspaceGM, const cube_spmm::CubeSpmmTilingData &tiling,
+    GM_ADDR rw_ptr, GM_ADDR col_ref, GM_ADDR vals,
+    GM_ADDR b, GM_ADDR core_info, GM_ADDR c,
+    GM_ADDR workspaceGM, const cube_spmm::CubeSpmmTilingData &tiling,
     uint32_t usedCoreNum, void *stream);
 
 namespace cube_spmm {
@@ -411,9 +411,13 @@ aclsparseStatus_t aclsparseCubeSpmm(
     }
 
     cube_spmm_kernel_launch(
-        matAInner->rwPtr, matAInner->colRef, matAInner->vals,
-        matB->values, matAInner->coreInfo, matC->values,
-        buffer, td,
+        reinterpret_cast<GM_ADDR>(matAInner->rwPtr),
+        reinterpret_cast<GM_ADDR>(matAInner->colRef),
+        reinterpret_cast<GM_ADDR>(matAInner->vals),
+        reinterpret_cast<GM_ADDR>(matB->values),
+        reinterpret_cast<GM_ADDR>(matAInner->coreInfo),
+        reinterpret_cast<GM_ADDR>(matC->values),
+        reinterpret_cast<GM_ADDR>(buffer), td,
         static_cast<uint32_t>(matAInner->numCores), stream);
 
     aclError ret = aclrtSynchronizeStream(stream);

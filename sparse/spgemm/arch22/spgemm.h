@@ -34,6 +34,14 @@
 #define __gm__
 #endif
 
+/* CXX(host) TU 下 GM_ADDR 未定义，此处补齐，使 launch 声明可统一使用 GM_ADDR。
+ * ASC(kernel) TU 下编译器已定义 GM_ADDR，#ifndef 跳过重定义。
+ * 这样 <<<>>> 调用处不再需要 (GM_ADDR) 强转，消除
+ * "cce_global attribute ignored when parsing type" 告警。 */
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
+#endif
+
 // A2/A3 单核 UB 192KB，预留部分给编译器临时与栈。
 #define SPGEMM_ARCH22_UB_SIZE      (192 * 1024)
 #define SPGEMM_ARCH22_UB_OVERHEAD  (24 * 1024)
@@ -258,8 +266,8 @@ static inline SpgemmArch22Ws2Layout SpgemmArch22ComputeWs2(
  * 同趟还产出 bApStride[k]（B 每行是否为等差数列及其公差）和 bHead[k]（B 每行首列索引）。
  */
 void spgemm_arch22_count_launch(
-    void *aRowPtr, void *aColIdx, void *bRowPtr, void *bColIdx,
-    void *buffer1, void *tiling, uint32_t blockDim, void *stream);
+    GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR bRowPtr, GM_ADDR bColIdx,
+    GM_ADDR buffer1, GM_ADDR tiling, uint32_t blockDim, void *stream);
 
 /**
  * 符号阶段 Kernel（Compute 阶段第 1 趟）：
@@ -271,10 +279,10 @@ void spgemm_arch22_count_launch(
  * (colIdx, value) 并写入暂存区，数值阶段仅做压实搬运。
  */
 void spgemm_arch22_symbolic_launch(
-    void *aRowPtr, void *aColIdx, void *aValues,
-    void *bRowPtr, void *bColIdx, void *bValues,
-    void *cRowPtrIn, void *cColIdxIn,
-    void *buffer1, void *buffer2, void *tiling,
+    GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR aValues,
+    GM_ADDR bRowPtr, GM_ADDR bColIdx, GM_ADDR bValues,
+    GM_ADDR cRowPtrIn, GM_ADDR cColIdxIn,
+    GM_ADDR buffer1, GM_ADDR buffer2, GM_ADDR tiling,
     uint32_t dtypeId, uint32_t blockDim, void *stream);
 
 /**
@@ -283,10 +291,10 @@ void spgemm_arch22_symbolic_launch(
  * 累加顺序固定为「段序（= A 行内列序）× 段内 B 列序」，故 bit-wise 可复现。
  */
 void spgemm_arch22_numeric_launch(
-    void *aRowPtr, void *aColIdx, void *aValues,
-    void *bRowPtr, void *bColIdx, void *bValues,
-    void *cRowPtrIn, void *cColIdxIn, void *cValuesIn,
-    void *buffer1, void *buffer2, void *tiling,
+    GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR aValues,
+    GM_ADDR bRowPtr, GM_ADDR bColIdx, GM_ADDR bValues,
+    GM_ADDR cRowPtrIn, GM_ADDR cColIdxIn, GM_ADDR cValuesIn,
+    GM_ADDR buffer1, GM_ADDR buffer2, GM_ADDR tiling,
     uint32_t dtypeId, uint32_t blockDim, void *stream);
 
 #endif  // SPGEMM_ARCH22_H

@@ -365,8 +365,12 @@ extern "C" aclsparseStatus_t aclsparseScatter(
     // Tiling 随 kernel 启动参数一起下发（const 引用），Host 侧不单独分配
     // device 内存存 tiling。kernel_do 按 valueType 分发 5 个模板实例化。
     // -----------------------------------------------------------------------
-    scatter_kernel_do(dVal, dIdx, dY, spVecInner->valueType, tilingData, blockNum,
-                      handleInner->stream);
+    scatter_kernel_do(
+        reinterpret_cast<GM_ADDR>(dVal),
+        reinterpret_cast<GM_ADDR>(dIdx),
+        reinterpret_cast<GM_ADDR>(dY),
+        spVecInner->valueType,
+        tilingData, blockNum, handleInner->stream);
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }

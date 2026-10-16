@@ -21,6 +21,14 @@
 #include <stdint.h>
 #include "scatter.h"
 
+/* CXX(host) TU 下 GM_ADDR 未定义，此处补齐，使 launch 声明可统一使用 GM_ADDR。
+ * ASC(kernel) TU 下编译器已定义 GM_ADDR，#ifndef 跳过重定义。
+ * 这样 <<<>>> 调用处不再需要 (GM_ADDR) 强转，消除
+ * "cce_global attribute ignored when parsing type" 告警。 */
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
+#endif
+
 // scatter kernel_do launcher declaration (Host / Kernel shared).
 // Defined in scatter_kernel.cpp; linked with C++ linkage (no extern "C"),
 // matching the definition. Host code includes this header instead of writing
@@ -31,7 +39,7 @@
 // Tiling 随 kernel 启动参数一起下发（const 引用传递），Host 侧不单独分配
 // device 内存存 tiling。
 void scatter_kernel_do(
-    void *valDev, void *idxDev, void *yDev, aclDataType valueType,
+    GM_ADDR valDev, GM_ADDR idxDev, GM_ADDR yDev, aclDataType valueType,
     const ScatterTilingData &tiling, uint32_t blockNum, void *stream);
 
 #endif // SCATTER_KERNEL_H

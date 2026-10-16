@@ -37,6 +37,10 @@ namespace {
 
 constexpr int64_t kInt32Max = 2147483647LL;
 
+// Launch 形参统一为 GM_ADDR（host TU 下即 uint8_t*），此处把描述符里的
+// void* 设备地址转过去，避免调用处堆叠 static_cast。
+inline GM_ADDR AsGm(void *p) { return static_cast<GM_ADDR>(p); }
+
 // 运行时查询 AIV 核数。查询失败时返回错误，避免使用错误的同步区大小。
 aclsparseStatus_t GetSpgemmBlockDim(uint32_t &blockDim)
 {
@@ -503,7 +507,8 @@ static aclsparseStatus_t RunCountKernel(const StageContext &ctx,
                          ctx.stream) != ACL_ERROR_NONE) {
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
-    spgemm_arch22_count_launch(ctx.a->ptrs, ctx.a->idxs, ctx.b->ptrs, ctx.b->idxs,
+    spgemm_arch22_count_launch(AsGm(ctx.a->ptrs), AsGm(ctx.a->idxs),
+                               AsGm(ctx.b->ptrs), AsGm(ctx.b->idxs),
                                buf1, buf1 + ws1.tilingOff, blockDim, ctx.stream);
     if (aclrtSynchronizeStream(ctx.stream) != ACL_ERROR_NONE) {
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
@@ -648,9 +653,10 @@ static aclsparseStatus_t RunSymbolicStage(const StageContext &ctx,
 
     // ---- 第 1 趟：符号 Kernel（含 device 侧前缀和，直接产出 C.rowOffsets）----
     spgemm_arch22_symbolic_launch(
-        ctx.a->ptrs, ctx.a->idxs, ctx.a->values, ctx.b->ptrs, ctx.b->idxs, ctx.b->values,
-        cRowPtrIn, cColIdxIn, spgemmDescr->externalBuffer1, buf2, buf1 + ws1.tilingOff,
-        dtypeId, blockDim, ctx.stream);
+        AsGm(ctx.a->ptrs), AsGm(ctx.a->idxs), AsGm(ctx.a->values),
+        AsGm(ctx.b->ptrs), AsGm(ctx.b->idxs), AsGm(ctx.b->values),
+        AsGm(cRowPtrIn), AsGm(cColIdxIn), AsGm(spgemmDescr->externalBuffer1), buf2,
+        buf1 + ws1.tilingOff, dtypeId, blockDim, ctx.stream);
 
     if (aclrtSynchronizeStream(ctx.stream) != ACL_ERROR_NONE) {
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
@@ -1059,9 +1065,11 @@ static aclsparseStatus_t RunSpgemmKernels(const StageContext &ctx,
     // ---- 第 2 趟：数值 Kernel（按 dtype 特化）----
     if (nnzC > 0) {
         spgemm_arch22_numeric_launch(
-            ctx.a->ptrs, ctx.a->idxs, ctx.a->values, ctx.b->ptrs, ctx.b->idxs,
-            ctx.b->values, cRowPtrIn, cColIdxIn, cValuesIn, spgemmDescr->externalBuffer1,
-            buf2, buf1 + plan.ws1.tilingOff, plan.dtypeId, plan.blockDim, ctx.stream);
+            AsGm(ctx.a->ptrs), AsGm(ctx.a->idxs), AsGm(ctx.a->values),
+            AsGm(ctx.b->ptrs), AsGm(ctx.b->idxs), AsGm(ctx.b->values),
+            AsGm(cRowPtrIn), AsGm(cColIdxIn), AsGm(cValuesIn),
+            AsGm(spgemmDescr->externalBuffer1), buf2, buf1 + plan.ws1.tilingOff,
+            plan.dtypeId, plan.blockDim, ctx.stream);
     }
 
     spgemmDescr->state = AclsparseSpGemmState::COMPUTED;

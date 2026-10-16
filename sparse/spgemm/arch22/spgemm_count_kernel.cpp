@@ -940,10 +940,9 @@ __global__ __aicore__ void spgemm_arch22_count(
 }
 
 void spgemm_arch22_count_launch(
-    void *aRowPtr, void *aColIdx, void *bRowPtr, void *bColIdx,
-    void *buffer1, void *tiling, uint32_t blockDim, void *stream)
+    GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR bRowPtr, GM_ADDR bColIdx,
+    GM_ADDR buffer1, GM_ADDR tiling, uint32_t blockDim, void *stream)
 {
     spgemm_arch22_count<<<blockDim, nullptr, stream>>>(
-        (GM_ADDR)aRowPtr, (GM_ADDR)aColIdx, (GM_ADDR)bRowPtr, (GM_ADDR)bColIdx,
-        (GM_ADDR)buffer1, (GM_ADDR)tiling);
+        aRowPtr, aColIdx, bRowPtr, bColIdx, buffer1, tiling);
 }

@@ -23,6 +23,12 @@
 #include <stdint.h>
 #include "gather_tiling_data.h"
 
+// Host translation units use byte pointers; kernel translation units retain
+// the GM_ADDR definition supplied by the Ascend C SDK.
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
+#endif
+
 // gather kernel_do launcher declaration (Host / Kernel shared).
 // Defined in gather_kernel.cpp; linked with C++ linkage (no extern "C"),
 // matching the definition. Host code includes this header instead of writing
@@ -30,7 +36,7 @@
 // Tiling 随 kernel 启动参数一起下发（const 引用传递），Host 侧不再单独分配
 // device 内存存 tiling，对齐 arch22 scatter 与 spmv arch22 的实现模式。
 void gather_kernel_do(
-    void *idxDev, void *yDev, void *xValuesDev,
+    GM_ADDR idxDev, GM_ADDR yDev, GM_ADDR xValuesDev,
     const GatherTilingData &tiling, uint32_t blockNum, void *stream);
 
 #endif // GATHER_KERNEL_H

@@ -29,9 +29,9 @@
 #endif
 
 extern "C" void spmm_kernel_launch(
-    const void *csrRowOffsets, const void *csrColInd,
-    const void *csrValues, const void *matB, void *matC,
-    void *workspaceGM, void *tilingGM,
+    GM_ADDR csrRowOffsets, GM_ADDR csrColInd,
+    GM_ADDR csrValues, GM_ADDR matB, GM_ADDR matC,
+    GM_ADDR workspaceGM, GM_ADDR tilingGM,
     int32_t dataType, uint32_t blockDim, void *stream);
 
 namespace {
@@ -289,9 +289,14 @@ static aclsparseStatus_t SpmmRunKernel(
     aclsparseSpMatDescr *matA, aclsparseDnMatDescr *matB, aclsparseDnMatDescr *matC,
     void *buffer, const WsOffsets &off, aclrtStream stream)
 {
-    spmm_kernel_launch(matA->ptrs, matA->idxs, matA->values,
-                       matB->values, matC->values, buffer,
-                       static_cast<uint8_t *>(buffer) + off.tilingOff,
+    spmm_kernel_launch(reinterpret_cast<GM_ADDR>(matA->ptrs),
+                       reinterpret_cast<GM_ADDR>(matA->idxs),
+                       reinterpret_cast<GM_ADDR>(matA->values),
+                       reinterpret_cast<GM_ADDR>(matB->values),
+                       reinterpret_cast<GM_ADDR>(matC->values),
+                       reinterpret_cast<GM_ADDR>(buffer),
+                       reinterpret_cast<GM_ADDR>(
+                           static_cast<uint8_t *>(buffer) + off.tilingOff),
                        SpmmDataTypeFromAcl(matA->valueType),
                        GetSpmmBlockDim(), stream);
     return ACL_SPARSE_STATUS_SUCCESS;

@@ -414,13 +414,13 @@ extern "C" __global__ __aicore__ void cube_spmm_kernel(
 }
 
 extern "C" void cube_spmm_kernel_launch(
-    const void *rw_ptr, const void *col_ref, const void *vals,
-    const void *b, const void *core_info, void *c,
-    void *workspaceGM, const cube_spmm::CubeSpmmTilingData &tiling,
+    GM_ADDR rw_ptr, GM_ADDR col_ref, GM_ADDR vals,
+    GM_ADDR b, GM_ADDR core_info, GM_ADDR c,
+    GM_ADDR workspaceGM, const cube_spmm::CubeSpmmTilingData &tiling,
     uint32_t usedCoreNum, void *stream)
 {
     cube_spmm_kernel<<<usedCoreNum, nullptr, stream>>>(
-        (GM_ADDR)rw_ptr, (GM_ADDR)col_ref, (GM_ADDR)vals,
-        (GM_ADDR)b, (GM_ADDR)core_info, (GM_ADDR)c,
-        (GM_ADDR)workspaceGM, tiling);
+        rw_ptr, col_ref, vals,
+        b, core_info, c,
+        workspaceGM, tiling);
 }

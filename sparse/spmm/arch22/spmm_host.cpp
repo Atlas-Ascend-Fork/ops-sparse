@@ -279,9 +279,13 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle,
     }
 
     spmm_arch22_kernel_launch(
-        matAInner->ptrs, matAInner->idxs, matAInner->values,
-        matBInner->values, matCInner->values,
-        buffer, (uint8_t *)buffer + off.tilingOff,
+        reinterpret_cast<GM_ADDR>(matAInner->ptrs),
+        reinterpret_cast<GM_ADDR>(matAInner->idxs),
+        reinterpret_cast<GM_ADDR>(matAInner->values),
+        reinterpret_cast<GM_ADDR>(matBInner->values),
+        reinterpret_cast<GM_ADDR>(matCInner->values),
+        reinterpret_cast<GM_ADDR>(buffer),
+        reinterpret_cast<GM_ADDR>(buffer) + off.tilingOff,
         blockDim, stream);
 
     return ACL_SPARSE_STATUS_SUCCESS;

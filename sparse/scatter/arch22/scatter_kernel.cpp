@@ -323,31 +323,31 @@ __global__ __vector__ void scatter_custom(
 }
 
 void scatter_kernel_do(
-    void *valDev, void *idxDev, void *yDev, aclDataType valueType,
+    GM_ADDR valDev, GM_ADDR idxDev, GM_ADDR yDev, aclDataType valueType,
     const ScatterTilingData &tiling, uint32_t blockNum, void *stream)
 {
     // Host 校验链已保证 valueType ∈ 五 dtype 集合，default 不达
     switch (valueType) {
         case ACL_INT8:
             scatter_custom<int8_t, 1><<<blockNum, nullptr, stream>>>(
-                (GM_ADDR)valDev, (GM_ADDR)idxDev, (GM_ADDR)yDev, tiling);
+                valDev, idxDev, yDev, tiling);
             break;
         case ACL_FLOAT16:
             scatter_custom<half, 2><<<blockNum, nullptr, stream>>>(
-                (GM_ADDR)valDev, (GM_ADDR)idxDev, (GM_ADDR)yDev, tiling);
+                valDev, idxDev, yDev, tiling);
             break;
         case ACL_BF16:
             scatter_custom<bfloat16_t, 2><<<blockNum, nullptr, stream>>>(
-                (GM_ADDR)valDev, (GM_ADDR)idxDev, (GM_ADDR)yDev, tiling);
+                valDev, idxDev, yDev, tiling);
             break;
         case ACL_FLOAT:
             scatter_custom<float, 4><<<blockNum, nullptr, stream>>>(
-                (GM_ADDR)valDev, (GM_ADDR)idxDev, (GM_ADDR)yDev, tiling);
+                valDev, idxDev, yDev, tiling);
             break;
         case ACL_COMPLEX64:
             // complex64 = 2×fp32 交错存储：T=float、ELEM_BYTES=8，纯字节搬运不拆实虚部
             scatter_custom<float, 8><<<blockNum, nullptr, stream>>>(
-                (GM_ADDR)valDev, (GM_ADDR)idxDev, (GM_ADDR)yDev, tiling);
+                valDev, idxDev, yDev, tiling);
             break;
         default:
             // Host 校验链保证 valueType ∈ 五 dtype 集合，default 不达；

@@ -164,18 +164,19 @@ __global__ __aicore__ void spmm_arch22_fp32(
     GM_ADDR matB, GM_ADDR matC,
     GM_ADDR workspace, GM_ADDR tilingGm)
 {
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     SpmmArch22Kernel op;
     op.Init(rowOff, colIdx, values, matB, matC, workspace, tilingGm);
     op.Process();
 }
 
 void spmm_arch22_kernel_launch(
-    void *rowOff, void *colIdx, void *values,
-    void *matB, void *matC, void *workspace, void *tiling,
+    GM_ADDR rowOff, GM_ADDR colIdx, GM_ADDR values,
+    GM_ADDR matB, GM_ADDR matC, GM_ADDR workspace, GM_ADDR tiling,
     uint32_t blockDim, void *stream)
 {
     spmm_arch22_fp32<<<blockDim, nullptr, stream>>>(
-        (GM_ADDR)rowOff, (GM_ADDR)colIdx, (GM_ADDR)values,
-        (GM_ADDR)matB, (GM_ADDR)matC,
-        (GM_ADDR)workspace, (GM_ADDR)tiling);
+        rowOff, colIdx, values,
+        matB, matC,
+        workspace, tiling);
 }
