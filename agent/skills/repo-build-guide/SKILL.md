@@ -25,6 +25,7 @@ bash build.sh --ops={op_name} --soc={soc_version}
 - `--device=<id>`：指定测试运行的 NPU 设备 ID（默认 0），如 `--device=1`
 - `--run`：编译后运行测试
 - `--pkg`：编译后打包 run 包
+- `--torch_extension`：构建 Torch Extension wheel，可配合 `--ops` 指定算子；不能与 `--run` 或 `--pkg` 同用。
 
 ### 编译全量
 

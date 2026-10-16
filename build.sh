@@ -14,6 +14,8 @@ set -e
 BUILD_DIR=build
 BUILD_OPS=""
 RUN_TEST=OFF
+RUN_DEVICE=0
+DEVICE_SPECIFIED=FALSE
 ENABLE_PACKAGE=FALSE
 ENABLE_TORCH_EXTENSION=FALSE
 
@@ -75,6 +77,15 @@ for arg in "$@"; do
         --run)
             RUN_TEST=ON
             ;;
+        --device=*)
+            DEVICE_SPECIFIED=TRUE
+            RUN_DEVICE="${arg#*=}"
+            if [[ ! "${RUN_DEVICE}" =~ ^[0-9]{1,10}$ ]] || (( 10#${RUN_DEVICE} > 2147483647 )); then
+                print_error "--device requires a non-negative 32-bit device ID"
+                exit 1
+            fi
+            RUN_DEVICE=$((10#${RUN_DEVICE}))
+            ;;
         --soc=*)
             SOC_VERSION="${arg#*=}"
             ;;
@@ -92,6 +103,7 @@ for arg in "$@"; do
             echo "  bash build.sh --ops=spmv,spmm                  # 编译多个算子（逗号分隔）"
             echo "  bash build.sh --run                            # 编译并运行全部 test"
             echo "  bash build.sh --ops=spmv --run                 # 编译并运行指定算子测试"
+            echo "  bash build.sh --ops=spmv --run --device=1      # 指定测试可见的 NPU 设备"
             echo "  bash build.sh --pkg                            # 编译并打包 run 包"
             echo "  bash build.sh --pkg --soc=ascend950            # 打包指定 SOC 的 run 包"
             echo "  bash build.sh --torch_extension                 # 构建全部 Torch Extension wheel"
@@ -100,6 +112,11 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ "${DEVICE_SPECIFIED}" == "TRUE" ] && [ "${RUN_TEST}" != "ON" ]; then
+    print_error "--device requires --run"
+    exit 1
+fi
 
 # 校验 --run 和 --pkg 不能同时使用
 if [ "${RUN_TEST}" == "ON" ] && { [ "${ENABLE_PACKAGE}" == "TRUE" ] || [ "${ENABLE_TORCH_EXTENSION}" == "TRUE" ]; }; then
@@ -304,7 +321,14 @@ if [ "${RUN_TEST}" == "ON" ]; then
         # 临时禁用 errexit 以捕获测试退出码
         set +e
         TEST_DIR="$(dirname "${TEST_BIN}")"
-        (cd "${TEST_DIR}" && LD_LIBRARY_PATH="${BUILD_OUT_PATH}/lib64:${LD_LIBRARY_PATH}" "./$(basename "${TEST_BIN}")")
+        (
+            cd "${TEST_DIR}" || exit 1
+            if [ "${DEVICE_SPECIFIED}" == "TRUE" ]; then
+                # Runtime maps this single visible device to user device ID 0.
+                export ASCEND_RT_VISIBLE_DEVICES="${RUN_DEVICE}"
+            fi
+            LD_LIBRARY_PATH="${BUILD_OUT_PATH}/lib64:${LD_LIBRARY_PATH}" "./$(basename "${TEST_BIN}")"
+        )
         exit_code=$?
         set -e
         if [ $exit_code -eq 0 ]; then
