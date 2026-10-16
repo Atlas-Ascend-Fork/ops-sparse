@@ -111,7 +111,7 @@ aclsparseDnVecSetStride(vecY, yStride);
 
 ### aclsparseSpMVGetBufferSize
 
-查询 `aclsparseSpMV` 所需的 workspace 字节数。调用方负责按返回字节数分配 Device 内存。
+查询 `aclsparseSpMV` 所需的 workspace 字节数。在 arch22 默认算法的转置模式下，FP16/BF16 输出使用每列 4 字节的 FP32 累加工作区，最后一次转换到输出类型；未传入 `externalBuffer` 时使用句柄工作区。调用方负责按返回字节数分配 Device 内存。
 此阶段只检查描述符元数据及参数，不读取 CSR 或 x/y 数据，允许这些数据指针尚未绑定。
 
 - Ascend 950PR/950DT 非转置路径：返回 0。

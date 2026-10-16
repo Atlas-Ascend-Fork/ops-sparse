@@ -86,8 +86,8 @@ namespace {
      * @brief 获取 UB 容量下允许的最大单行长（非零元个数）
      */
     template <typename T>
-    uint32_t ComputeMaxRowLength() {
-        constexpr uint64_t kYLocalBytes = 32;
+    uint32_t ComputeMaxRowLength(bool transpose) {
+        const uint64_t kYLocalBytes = transpose ? 128 * 32 : 32;
         constexpr uint64_t kSystemReserved = 4 * 1024;
         constexpr uint64_t kBufferCount = 5;
         constexpr uint64_t kAlignBytes = 32;
@@ -110,7 +110,7 @@ namespace {
             + sizeof(float)  // workReduce
             + sizeof(float); // floatTmp
 
-        constexpr uint64_t kFixed = kYLocalBytes + kSystemReserved + kAlignSlack;
+        const uint64_t kFixed = kYLocalBytes + kSystemReserved + kAlignSlack;
 
         if (ubSize <= kFixed)
             return 0;
@@ -316,7 +316,7 @@ namespace {
      * 回退到句柄上的 workspace：先用 aclsparseEnsureDefaultWorkspace 保证容量，
      * 再用 aclsparseGetEffectiveWorkspace 取出实际使用的缓冲区。
      */
-    aclsparseStatus_t SelectCubeWorkspace(aclsparseContext *h, void *externalBuffer,
+    aclsparseStatus_t SelectSpmvWorkspace(aclsparseContext *h, void *externalBuffer,
                                           size_t requiredBytes, void **outWorkspace) {
         if (externalBuffer != nullptr) {
             *outWorkspace = externalBuffer;
@@ -325,7 +325,7 @@ namespace {
 
         const aclsparseStatus_t status = aclsparseEnsureDefaultWorkspace(h, requiredBytes);
         CHECK_RET(status == ACL_SPARSE_STATUS_SUCCESS,
-                  LOG_PRINT("[ERROR] aclsparseSpMV: ACL_SPARSE_SPMV_CSR_ALG_CUBE needs %zu bytes of "
+                  LOG_PRINT("[ERROR] aclsparseSpMV: needs %zu bytes of "
                             "workspace, but the handle workspace (%zu bytes) cannot provide it, "
                             "please pass an externalBuffer sized by aclsparseSpMVGetBufferSize\n",
                             requiredBytes, aclsparseGetEffectiveWorkspaceSize(h));
@@ -372,8 +372,12 @@ extern "C" {
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
         *bufferSize = 0;
 
-        // 向量版按行并行，所有中间量都在 UB 内，不需要额外的 device 显存。
+        // Narrow transpose outputs accumulate in FP32 workspace and round only once.
         if (!args.useCube) {
+            if (opA == ACL_SPARSE_OP_TRANSPOSE && computeType == ACL_FLOAT &&
+                args.outType != ACL_FLOAT) {
+                *bufferSize = static_cast<size_t>(args.mat->cols) * sizeof(float);
+            }
             return ACL_SPARSE_STATUS_SUCCESS;
         }
 
@@ -492,7 +496,7 @@ extern "C" {
                                           static_cast<uint32_t>(nnz), alphaFloat, betaFloat,
                                           blockDim, &cubeTiling, &cubeBlocks)) {
                 void *workspace = nullptr;
-                st = SelectCubeWorkspace(h, externalBuffer, layout.totalBytes, &workspace);
+                st = SelectSpmvWorkspace(h, externalBuffer, layout.totalBytes, &workspace);
                 CHECK_RET(st == ACL_SPARSE_STATUS_SUCCESS, return st);
 
                 // gather 只写前 nnz 个乘积，尾部补零以免 cube 扫描到未初始化数据。
@@ -516,6 +520,16 @@ extern "C" {
             }
         }
 
+        if (opA == ACL_SPARSE_OP_TRANSPOSE && computeType == ACL_FLOAT &&
+            outType != ACL_FLOAT) {
+            const size_t bytes = static_cast<size_t>(cols) * sizeof(float);
+            st = SelectSpmvWorkspace(h, externalBuffer, bytes, &cubeWorkspace);
+            CHECK_RET(st == ACL_SPARSE_STATUS_SUCCESS, return st);
+            aclError ret = aclrtMemsetAsync(cubeWorkspace, bytes, 0, bytes, stream);
+            CHECK_RET(ret == ACL_SUCCESS,
+                      return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+        }
+
         // ==================== UB 容量检查（仅 vector 版）====================
         // vector 版按行切分，整行必须放进 UB，因此需要读回 rowPtr 求最大行长。
         // cube 版（分段求和）按 nnz 切分，行长不受 UB 限制，故跳过该检查以及
@@ -523,7 +537,7 @@ extern "C" {
         if (algType != SPMV_ALG_CUBE) {
             uint32_t maxRowLength = ComputeMaxRowLengthFromDevice(csrRowPtrDevice, rows, stream);
             uint32_t maxTileLength =
-                (computeType == ACL_FLOAT) ? ComputeMaxRowLength<float>() : ComputeMaxRowLength<int32_t>();
+                (computeType == ACL_FLOAT) ? ComputeMaxRowLength<float>(opA == ACL_SPARSE_OP_TRANSPOSE) : ComputeMaxRowLength<int32_t>(opA == ACL_SPARSE_OP_TRANSPOSE);
 
             CHECK_RET(maxTileLength > 0,
                       LOG_PRINT("[ERROR] aclsparseSpMV: failed to compute max tile length\n");

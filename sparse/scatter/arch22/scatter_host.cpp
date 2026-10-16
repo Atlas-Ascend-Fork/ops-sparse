@@ -326,10 +326,12 @@ extern "C" aclsparseStatus_t aclsparseScatter(
     uint32_t remainder = static_cast<uint32_t>(nnz) % blockNum;
     uint32_t maxPerCore = baseCount + (remainder > 0 ? 1 : 0);
 
-    // Tile size: largest power of 2 <= maxPerCore (min 8)
-    uint32_t tileNn = SCATTER_TILE_NN_MAX;   // 4096
-    while (tileNn > maxPerCore && tileNn > 8) {
-        tileNn >>= 1;
+    // Tile size: smallest power of 2 >= maxPerCore (range [8, 4096]).
+    // A floor-sized tile splits small per-core workloads into extra kernel
+    // iterations and therefore extra DMA/synchronization rounds.
+    uint32_t tileNn = 8;
+    while (tileNn < maxPerCore && tileNn < SCATTER_TILE_NN_MAX) {
+        tileNn <<= 1;
     }
 
     // dtype 对齐元素数上取整（AllocTensor 尺寸 / Copy 快路径对齐口径）

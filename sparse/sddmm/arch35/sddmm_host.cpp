@@ -99,7 +99,7 @@ float ScalarReadF32(const void *p) {
 // Used to read alpha/beta when computeType=ACL_FLOAT16 per ACL generic API
 // convention: alpha/beta pointer type is determined by computeType.
 //
-// 注意：test/sddmm/sddmm/sddmm_golden.h 中有同功能实现 Fp16BitsToFp32，
+// 注意：test/sddmm/sddmm_golden.h 中有同功能实现 Fp16BitsToFp32，
 // 两者算法一致，host.cpp 侧独立保留以便 sparse 库不依赖测试头文件。
 static float SddmmFp16BitsToFp32(uint16_t h) {
     uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;

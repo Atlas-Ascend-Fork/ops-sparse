@@ -244,6 +244,7 @@ struct SpgemmRotationalGateOut {
     int32_t stride;
     uint32_t segLen;
     bool rotational;
+    bool c64VectorAllowed;
 };
 
 /**
@@ -294,21 +295,20 @@ template <uint32_t DA_FIXED>
 template <uint32_t DA_FIXED, typename T>
 [[gnu::always_inline]] __aicore__ inline SpgemmRotationalGateOut SpgemmMergeRowRotationalGate(
     const SpgemmSegments &seg, const int32_t (&head)[DA_FIXED], uint32_t cap,
-    uint32_t (&rank)[DA_FIXED], int32_t &aBase)
+    uint32_t (&rank)[DA_FIXED])
 {
     uint32_t eqBad = 0; int32_t minFirst = head[0]; int32_t maxFirst = head[0];
     SpgemmMergeRowRank<DA_FIXED>(head, rank, eqBad, minFirst, maxFirst);
     // 段首等差判据（只在复数实例计算，实数实例由各发射块入口内现算）。
-    constexpr bool kNeedAp = SpgemmValueOps<T>::kIsComplex && DA_FIXED >= 8u; int32_t hdStep = 0; uint32_t apOk = 0;
+    constexpr bool kNeedAp = SpgemmValueOps<T>::kIsComplex && DA_FIXED >= 8u;
+    int32_t hdStep = 0;
+    bool c64VectorAllowed = true;
     if constexpr (kNeedAp) {
         hdStep = head[1] - head[0]; uint32_t apBad = (hdStep > 0) ? 0u : 1u;
         for (uint32_t s = 2; s < DA_FIXED; s++) {
             apBad |= static_cast<uint32_t>(head[s] - head[s - 1] - hdStep);
         }
-        apOk = (apBad == 0u) ? 1u : 0u;
-        if (apOk == 0u) {
-            aBase = -1;
-        }
+        c64VectorAllowed = (apBad == 0u);
     }
     // 等步长轮转判定。
     int32_t stride = 0;
@@ -317,7 +317,7 @@ template <uint32_t DA_FIXED, typename T>
         stride = seg.apStride;
         rotational = (stride > 0) && (eqBad == 0) && (maxFirst - minFirst < stride) && (segLen * DA_FIXED <= cap);
     }
-    return SpgemmRotationalGateOut{hdStep, stride, segLen, rotational};
+    return SpgemmRotationalGateOut{hdStep, stride, segLen, rotational, c64VectorAllowed};
 }
 
 
@@ -333,11 +333,11 @@ template <uint32_t DA_FIXED, typename T, typename VEC>
     const AscendC::LocalTensor<T> &outVal, const AscendC::LocalTensor<float> &wideVal,
     uint32_t cap, const VEC &vec, uint32_t vecSlotOff,
     const AscendC::GlobalTensor<T> &aValGm, int32_t aBase, int32_t hdStep, int32_t stride,
-    uint32_t segLen, uint32_t total)
+    uint32_t segLen, uint32_t total, bool c64VectorAllowed)
 {
     int32_t outCount = 0;
     // complex64 向量发射块。
-    if (SpgemmMergeEmitVecC64<DA_FIXED, T, VEC>(bValGm, ops, seg, outCol, outVal, vec, vecSlotOff, aValGm,
+    if (c64VectorAllowed && SpgemmMergeEmitVecC64<DA_FIXED, T, VEC>(bValGm, ops, seg, outCol, outVal, vec, vecSlotOff, aValGm,
             aBase, head, hdStep, stride, segLen, total)) {
         return static_cast<int32_t>(total);
     }
@@ -374,7 +374,7 @@ template <uint32_t DA_FIXED, typename T, typename VEC>
     const AscendC::LocalTensor<T> &outVal, const AscendC::LocalTensor<float> &wideVal,
     uint32_t cap, const VEC &vec, uint32_t vecSlotOff,
     const AscendC::GlobalTensor<T> &aValGm, int32_t aBase, int32_t hdStep, int32_t stride,
-    uint32_t segLen)
+    uint32_t segLen, bool c64VectorAllowed)
 {
         const uint32_t total = segLen * DA_FIXED;
         // da 为 8 倍数的实型向量发射块。
@@ -405,7 +405,7 @@ template <uint32_t DA_FIXED, typename T, typename VEC>
         // 轮转尾段。
         return SpgemmMergeEmitRotationalTail<DA_FIXED, T, VEC>(bValGm, ops, seg, da, rank, head,
                 outCol, outVal, wideVal, cap, vec, vecSlotOff, aValGm, aBase, hdStep, stride,
-                segLen, total);
+                segLen, total, c64VectorAllowed);
 }
 
 
@@ -470,14 +470,14 @@ __aicore__ inline int32_t SpgemmMergeFusedRowImpl(const AscendC::GlobalTensor<in
     if constexpr (kFixed) {
         // 秩计算与轮转判定。
         uint32_t rank[DA_FIXED];
-        const SpgemmRotationalGateOut gate = SpgemmMergeRowRotationalGate<DA_FIXED, T>(seg, head, cap,
-                rank, aBase);
+        const SpgemmRotationalGateOut gate =
+            SpgemmMergeRowRotationalGate<DA_FIXED, T>(seg, head, cap, rank);
         const int32_t hdStep = gate.hdStep; const int32_t stride = gate.stride;
         const uint32_t segLen = gate.segLen; const bool rotational = gate.rotational;
         if (rotational) {
             return SpgemmMergeEmitRotational<DA_FIXED, T, VEC>(bValGm, ops, seg, da, rank, head,
                     outCol, outVal, wideVal, cap, vec, vecSlotOff, aValGm, aBase, hdStep, stride,
-                    segLen);
+                    segLen, gate.c64VectorAllowed);
         }
 
         // 不交叠快路径（按模板属性选择性保留）。
@@ -487,7 +487,7 @@ __aicore__ inline int32_t SpgemmMergeFusedRowImpl(const AscendC::GlobalTensor<in
         }
     }
 
-    // 通用 k 路归并兜底。
+    // 通用建段已载入 A values；固定段数的 Band 路径已在上方尾段补齐。
     return SpgemmMergeFusedRowGeneral<DA_FIXED, T>(bColIdxGm, bValGm, ops, seg, da, head, outCol, outVal, wideVal, cap, outCount);
 }
 

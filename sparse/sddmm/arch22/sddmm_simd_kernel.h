@@ -37,6 +37,11 @@ constexpr uint32_t kJTileCap = 128;
 // density; sparser patterns almost never yield runs longer than one.
 constexpr uint32_t kRunDensityNum = 4;
 constexpr uint32_t kHugeKCap = 8192;
+constexpr uint32_t kStreamKCap = 16448;
+// Include one extra vector repeat beyond 16K so a short tail can be reduced
+// with the main chunk. ReduceSum needs at most 257 first-stage partials;
+// 512 scratch elements cover their aligned layout and subsequent reduction.
+constexpr uint32_t kStreamReduceScratch = 512;
 constexpr int kACacheNone = 0;
 constexpr int kACacheSingle = 1;
 constexpr int kACacheFull = 2;
@@ -48,7 +53,9 @@ constexpr uint32_t kDmaAlignMask = kDmaAlignBytes - 1;
 // Strided GM->UB gather: DataCopyPad lands each element on its own 32B block, so
 // the staging buffer holds kStrideChunk elements at kStrideElemBytes pitch.
 constexpr uint32_t kStrideElemBytes = 32;
-constexpr uint32_t kStrideChunk = 64;
+// One 256-element padded gather amortizes DMA/event overhead for strided K
+// tails while keeping the worst-case FP32 UB footprint below 192 KiB.
+constexpr uint32_t kStrideChunk = 256;
 
 __aicore__ inline uint32_t AlignUp(uint32_t x, uint32_t a) {
     if (a == 0) {
@@ -60,8 +67,78 @@ __aicore__ inline uint32_t AlignUp(uint32_t x, uint32_t a) {
 __aicore__ inline uint32_t MinU32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
 }
+
+struct SddmmWorkRange {
+    uint32_t begin;
+    uint32_t count;
+};
+
+// Keep the uneven work split identical for the FP32 and FP16 kernels.  The
+// helper also makes the partition boundary explicit at each call site.
+__aicore__ inline SddmmWorkRange GetSddmmWorkRange(uint32_t perCore, uint32_t remainder) {
+    const uint32_t block = AscendC::GetBlockIdx();
+    const uint32_t extra = (block < remainder) ? 1u : 0u;
+    return {block * perCore + ((block < remainder) ? block : remainder), perCore + extra};
+}
+
+// Share the row traversal as well as its bounds across both precision paths.
+// Friendship grants access to ProcessRow without widening the kernel interface.
+template <typename Kernel>
+struct SddmmRowPartition {
+    __aicore__ static inline void Run(Kernel &kernel) {
+        const SddmmWorkRange range = GetSddmmWorkRange(kernel.rowsPerCore, kernel.remainderRows);
+        for (uint32_t g = range.begin;
+             g < range.begin + range.count && g < kernel.rowCount; ++g) {
+            kernel.ProcessRow(g);
+        }
+    }
+};
+
+// Shape checks and X contiguity are shared; Y contiguity stays path-specific.
+template <typename Kernel>
+struct SddmmCommonLayout {
+    __aicore__ static inline bool Setup(Kernel &kernel) {
+        if (kernel.nnz == 0 || kernel.rowCount == 0) {
+            return false;
+        }
+        const uint32_t innerA = (kernel.opAValue == 0) ? kernel.matACols : kernel.matARows;
+        const uint32_t innerB = (kernel.opBValue == 0) ? kernel.matBRows : kernel.matBCols;
+        if (innerA != innerB) {
+            return false;
+        }
+        kernel.K = innerA;
+        kernel.colCount = (kernel.opBValue == 0) ? kernel.matBCols : kernel.matBRows;
+        kernel.aContig = (kernel.orderXCol == 0 && kernel.opAValue == 0) ||
+                         (kernel.orderXCol == 1 && kernel.opAValue == 1);
+        return true;
+    }
+};
+
+template <AscendC::HardEvent Event>
+__aicore__ inline void SyncSddmmEvent() {
+    event_t event = static_cast<event_t>(GetTPipePtr()->FetchEventID(Event));
+    AscendC::SetFlag<Event>(event);
+    AscendC::WaitFlag<Event>(event);
+}
+
+template <typename RowOffsets>
+__aicore__ inline uint32_t FindSddmmRowForNnz(const RowOffsets &rowOffsets,
+                                               uint32_t rowCount, uint32_t nnzIndex) {
+    uint32_t lo = 0;
+    uint32_t hi = rowCount;
+    while (lo < hi) {
+        const uint32_t mid = (lo + hi) / 2;
+        if (rowOffsets.GetValue(mid + 1) <= static_cast<int32_t>(nnzIndex)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
 } // namespace
 
+template <bool StridedB>
 class KernelSparseSddmm {
 public:
     __aicore__ inline KernelSparseSddmm() {}
@@ -71,7 +148,12 @@ public:
                                 const SddmmTilingData &td, AscendC::TPipe *pipeIn) {
         pipe = pipeIn;
         CopyTiling(td);
+        BindGlobalBuffers(matA, matB, csrRowOffsets, csrColIndices, csrValues);
+        InitBuffers();
+    }
 
+    __aicore__ inline void BindGlobalBuffers(GM_ADDR matA, GM_ADDR matB, GM_ADDR csrRowOffsets,
+                                              GM_ADDR csrColIndices, GM_ADDR csrValues) {
         matAGm.SetGlobalBuffer((__gm__ float *)matA,
                                static_cast<uint64_t>(matARows) * ldx);
         const uint64_t bGmSize = static_cast<uint64_t>(matBRows) *
@@ -81,38 +163,86 @@ public:
                                      static_cast<uint64_t>(rowCount + 1));
         colIndicesGm.SetGlobalBuffer((__gm__ int32_t *)csrColIndices, nnz);
         csrValuesGm.SetGlobalBuffer((__gm__ float *)csrValues, nnz);
+    }
 
+    __aicore__ inline void InitBuffers() {
+        const uint32_t effectiveK = (opAValue == 0) ? matACols : matARows;
+        // Above the full-row cache capacity, stream larger vectors and avoid
+        // allocating the unused full-A cache.
+        if (effectiveK > kHugeKCap) {
+            kBlockLen = kStreamKCap;
+        }
         const uint32_t kbuf = AlignUp(kBlockLen, kAlign);
         kbufAligned = kbuf;
-        pipe->InitBuffer(aRowBuf, kbuf * sizeof(float));
+        hugeKPath = effectiveK > kBlockLen && effectiveK <= kHugeKCap;
+        // The huge-K full-cache path never reads aRowBuf.  Reclaim that UB for
+        // a single full-width B vector and reduction workspace.
+        const bool fullKStorage = hugeKPath;
+        const uint32_t aRowElems = fullKStorage ? kAlign : kbuf;
+        uint32_t bColElems = fullKStorage ? kHugeKCap :
+                             (effectiveK > kHugeKCap ? kbuf : 2 * kbuf);
+        if constexpr (!StridedB) {
+            // A complete 128-column tile avoids a third short segment at
+            // K=65..128. The maximum extra 32KiB still fits the arch22 UB.
+            if (effectiveK <= 128u) {
+                const uint32_t fullTile = kJTileCap * AlignUp(effectiveK, kAlign);
+                bColElems = bColElems > fullTile ? bColElems : fullTile;
+            }
+        }
+        bTileCapacity = bColElems;
+        InitPrimaryBuffers(aRowElems, bColElems);
+        InitRowBuffers(effectiveK, kbuf, fullKStorage);
+        InitGatherBuffers(effectiveK);
+    }
+
+    __aicore__ inline void InitPrimaryBuffers(uint32_t aRowElems, uint32_t bColElems) {
+        pipe->InitBuffer(aRowBuf, aRowElems * sizeof(float));
         // Doubles as the double-buffered scalar B column pair and as the batched B tile.
-        pipe->InitBuffer(bColBuf, 2 * kbuf * sizeof(float));
-        hugeKPath = (matARows > kBlockLen) || (matACols > kBlockLen);
+        pipe->InitBuffer(bColBuf, bColElems * sizeof(float));
         if (hugeKPath) {
             pipe->InitBuffer(aFullBuf, AlignUp(kHugeKCap, kAlign) * sizeof(float));
         }
-        pipe->InitBuffer(inQueueCsr, 1, kOutStageCap * sizeof(float));
-        pipe->InitBuffer(outQueueY, 1, kOutStageCap * sizeof(float));
-        pipe->InitBuffer(colIndBuf, kOutStageCap * sizeof(int32_t));
+    }
+
+    __aicore__ inline void InitRowBuffers(uint32_t effectiveK, uint32_t kbuf,
+                                          bool fullKStorage) {
+        const uint32_t reduceTmpElems = effectiveK > kHugeKCap ? kStreamReduceScratch :
+                                        (fullKStorage ? kHugeKCap : kbuf);
+        if (nnzPartition == 0) {
+            pipe->InitBuffer(inQueueCsr, 1, kOutStageCap * sizeof(float));
+            pipe->InitBuffer(colIndBuf, kOutStageCap * sizeof(int32_t));
+        }
+        if (nnzPartition != 0) {
+            pipe->InitBuffer(scalarOutputBuf, kAlign * sizeof(float));
+        } else {
+            pipe->InitBuffer(outQueueY, 1, kOutStageCap * sizeof(float));
+        }
         // mulBuf holds either one K-length product vector (scalar path) or
         // kJTileCap product rows of kElemPerRep each (batched path).
-        const uint32_t mulElems = (kJTileCap * kElemPerRep > kbuf) ? (kJTileCap * kElemPerRep) : kbuf;
+        const uint32_t mulElems = effectiveK > kHugeKCap ? kAlign :
+                                 ((kJTileCap * kElemPerRep > kbuf) ? (kJTileCap * kElemPerRep) : kbuf);
         pipe->InitBuffer(mulBuf, mulElems * sizeof(float));
-        pipe->InitBuffer(reduceTmpBuf, kbuf * sizeof(float));
+        pipe->InitBuffer(reduceTmpBuf, reduceTmpElems * sizeof(float));
         pipe->InitBuffer(reduceDstBuf, kAlign * sizeof(float));
         // Dot-product accumulator, kept separate from reduceTmpBuf because
         // ReduceSum overwrites its sharedTmpBuffer argument.
-        pipe->InitBuffer(accBuf, AlignUp(kJTileCap, kAlign) * sizeof(float));
-        pipe->InitBuffer(partialBuf, AlignUp(kJTileCap, kAlign) * sizeof(float));
+        if (nnzPartition == 0) {
+            pipe->InitBuffer(accBuf, AlignUp(kJTileCap, kAlign) * sizeof(float));
+            pipe->InitBuffer(partialBuf, AlignUp(kJTileCap, kAlign) * sizeof(float));
+        }
+    }
+
+    __aicore__ inline void InitGatherBuffers(uint32_t effectiveK) {
         // The strided gather is only reachable when a row of X or a column of Y is
         // non-contiguous in GM; skip its staging buffers otherwise so contiguous
         // shapes (notably the huge-K path) keep the UB headroom.
         const bool aCtg = (orderXCol == 0 && opAValue == 0) || (orderXCol == 1 && opAValue == 1);
         const bool bCtg = (orderYCol == 0 && opBValue == 1) || (orderYCol == 1 && opBValue == 0);
         needStrideGather = (!aCtg || !bCtg);
-        if (needStrideGather) {
-            pipe->InitBuffer(stridePadBuf, kStrideChunk * kStrideElemBytes);
-            pipe->InitBuffer(strideOffsetBuf, kStrideChunk * sizeof(int32_t));
+        strideCapacity = (StridedB && effectiveK <= 256) ? 1024 : kStrideChunk;
+        if (needStrideGather || StridedB) {
+            pipe->InitBuffer(stridePadBuf, strideCapacity * kStrideElemBytes);
+            pipe->InitBuffer(strideOffsetBuf, strideCapacity * sizeof(int32_t));
         }
     }
 
@@ -121,33 +251,25 @@ public:
         if (!SetupLayout()) {
             return;
         }
-        SetupBatchPlan();
         if (nnzPartition != 0) {
             RunNnzPartition();
         } else {
+            SetupBatchPlan();
             RunRowPartition();
         }
     }
 
 private:
+    friend struct SddmmRowPartition<KernelSparseSddmm>;
+    friend struct SddmmCommonLayout<KernelSparseSddmm>;
 
     // Split the reduction dimension K and the contiguity flags out of the tiling
     // data. Returns false when there is nothing to do or the shapes disagree.
     __aicore__ inline bool SetupLayout() {
-        if (nnz == 0 || rowCount == 0) {
+        if (!SddmmCommonLayout<KernelSparseSddmm>::Setup(*this)) {
             return false;
         }
-        const uint32_t innerA = (opAValue == 0) ? matACols : matARows;
-        const uint32_t innerB = (opBValue == 0) ? matBRows : matBCols;
-        if (innerA != innerB) {
-            return false;
-        }
-        K = innerA;
-        colCount = (opBValue == 0) ? matBCols : matBRows;
-        // A row (resp. B column) is contiguous in GM when the memory order and the
-        // requested transpose agree.
-        aContig = (orderXCol == 0 && opAValue == 0) || (orderXCol == 1 && opAValue == 1);
-        bContig = (orderYCol == 0 && opBValue == 1) || (orderYCol == 1 && opBValue == 0);
+        bContig = !StridedB;
         // The strided gather (and hence its offset table) is only reachable when a
         // row of X or a column of Y is non-contiguous in GM.
         if (needStrideGather) {
@@ -159,29 +281,17 @@ private:
     // Each core takes a contiguous slice of nonzeros; used for huge-K shapes where
     // a single row would not fill the cores.
     __aicore__ inline void RunNnzPartition() {
-        const uint32_t coreIdx = AscendC::GetBlockIdx();
-        const uint32_t extraN = (coreIdx < remainderNnz) ? 1u : 0u;
-        const uint32_t myNnz = nnzPerCore + extraN;
-        const uint32_t myBase = coreIdx * nnzPerCore +
-                                ((coreIdx < remainderNnz) ? coreIdx : remainderNnz);
-        for (uint32_t j = 0; j < myNnz; ++j) {
-            if (myBase + j < nnz) {
-                ProcessNnz(myBase + j);
+        const SddmmWorkRange range = GetSddmmWorkRange(nnzPerCore, remainderNnz);
+        for (uint32_t j = 0; j < range.count; ++j) {
+            if (range.begin + j < nnz) {
+                ProcessNnz(range.begin + j, j + 1u < range.count);
             }
         }
     }
 
     // Each core takes a contiguous slice of rows (the common case).
     __aicore__ inline void RunRowPartition() {
-        const uint32_t totalRows = rowCount;
-        const uint32_t coreIdx = AscendC::GetBlockIdx();
-        const uint32_t extra = (coreIdx < remainderRows) ? 1u : 0u;
-        const uint32_t myCount = rowsPerCore + extra;
-        const uint32_t myBase = coreIdx * rowsPerCore +
-                                ((coreIdx < remainderRows) ? coreIdx : remainderRows);
-        for (uint32_t g = myBase; g < myBase + myCount && g < totalRows; ++g) {
-            ProcessRow(g);
-        }
+        SddmmRowPartition<KernelSparseSddmm>::Run(*this);
     }
 
     // Contiguous small-K loads are only worth a DMA above a size threshold.
@@ -224,7 +334,7 @@ private:
     // stall that dominates the scalar path.
     __aicore__ inline void SetupBatchPlan() {
         batchEnabled = false;
-        if (!bContig || K == 0 || K > kBlockLen) {
+        if (K == 0 || K > kBlockLen || (StridedB && K > strideCapacity)) {
             return;
         }
         kPitch = AlignUp(K, kAlign);
@@ -236,8 +346,9 @@ private:
             return;
         }
         // B tile lives in bColBuf (2 * kbufAligned floats).
-        const uint32_t byTile = (2u * kbufAligned) / kPitch;
-        const uint32_t cap = MinU32(byTile, kJTileCap);
+        const uint32_t byTile = bTileCapacity / kPitch;
+        const uint32_t stridedCap = StridedB ? (strideCapacity / kPitch) : kJTileCap;
+        const uint32_t cap = MinU32(byTile, stridedCap);
         if (cap == 0) {
             return;
         }
@@ -256,10 +367,11 @@ private:
     // Computed once per kernel invocation.
     __aicore__ inline void InitStrideOffsets() {
         AscendC::LocalTensor<int32_t> offs = strideOffsetBuf.Get<int32_t>();
-        AscendC::CreateVecIndex<int32_t>(offs, 0, kStrideChunk);
+        const uint32_t count = StridedB ? strideCapacity : MinU32(K, kStrideChunk);
+        AscendC::CreateVecIndex<int32_t>(offs, 0, count);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Muls(offs, offs, static_cast<int32_t>(kStrideElemBytes),
-                      static_cast<int32_t>(kStrideChunk));
+                      static_cast<int32_t>(count));
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -268,7 +380,8 @@ private:
     // ub[0..len). Vectorised throughout — no per-element scalar access.
     __aicore__ inline void GatherChunk(AscendC::LocalTensor<float> &ub,
                                        AscendC::GlobalTensor<float> &gm,
-                                       uint64_t off, uint32_t stride, uint32_t len) {
+                                       uint64_t off, uint32_t stride, uint32_t len,
+                                       bool protectFinalReuse = true) {
         if (stride == 1u) {
             CopyContig(ub, gm, off, len);
             return;
@@ -286,6 +399,9 @@ private:
             SyncMte2ToV();
             AscendC::Gather<float>(ub[base], pad32, offsU, 0, cnt);
             AscendC::PipeBarrier<PIPE_V>();
+            if (base + cnt < len || protectFinalReuse) {
+                SyncVToMte2();
+            }
         }
     }
 
@@ -320,65 +436,112 @@ private:
     }
 
     __aicore__ inline void SyncMte2ToV() {
-        event_t ev = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V));
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(ev);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(ev);
+        SyncSddmmEvent<AscendC::HardEvent::MTE2_V>();
     }
 
     __aicore__ inline void SyncMte2ToS() {
-        event_t ev = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_S));
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(ev);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(ev);
+        SyncSddmmEvent<AscendC::HardEvent::MTE2_S>();
     }
 
     __aicore__ inline void SyncVToS() {
-        event_t ev = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(ev);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(ev);
+        SyncSddmmEvent<AscendC::HardEvent::V_S>();
+    }
+
+    __aicore__ inline void SyncVToMte2() {
+        SyncSddmmEvent<AscendC::HardEvent::V_MTE2>();
+    }
+
+    __aicore__ inline void SyncSToMte3() {
+        SyncSddmmEvent<AscendC::HardEvent::S_MTE3>();
+    }
+
+    __aicore__ inline void SyncMte3ToS() {
+        SyncSddmmEvent<AscendC::HardEvent::MTE3_S>();
     }
 
     __aicore__ inline float DotProduct(uint64_t aOff, uint32_t aStride, uint64_t bOff,
                                        uint32_t bStride, int aCache) {
+        if (aCache == kACacheFull && bStride == 1u && K <= kHugeKCap) {
+            return DotProductFullCache(bOff);
+        }
+        return DotProductByChunks(aOff, aStride, bOff, bStride, aCache);
+    }
+
+    __aicore__ inline float DotProductFullCache(uint64_t bOff) {
+        AscendC::LocalTensor<float> bC = bColBuf.Get<float>();
+        AscendC::LocalTensor<float> ml = K > kHugeKCap ? bC : mulBuf.Get<float>();
+        AscendC::LocalTensor<float> rt = reduceTmpBuf.Get<float>();
+        AscendC::LocalTensor<float> rd = reduceDstBuf.Get<float>();
+        AscendC::LocalTensor<float> aFull = aFullBuf.Get<float>();
+        CopyContig(bC, matBGm, bOff, K);
+        SyncMte2ToV();
+        AscendC::Mul(ml, aFull, bC, K);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::ReduceSum<float, true>(rd, ml, rt, static_cast<int32_t>(K));
+        SyncVToS();
+        return rd.GetValue(0);
+    }
+
+    __aicore__ inline float DotProductByChunks(uint64_t aOff, uint32_t aStride, uint64_t bOff,
+                                                uint32_t bStride, int aCache) {
         AscendC::LocalTensor<float> aC = aRowBuf.Get<float>();
         AscendC::LocalTensor<float> bC = bColBuf.Get<float>();
-        AscendC::LocalTensor<float> ml = mulBuf.Get<float>();
+        AscendC::LocalTensor<float> ml = K > kHugeKCap ? bC : mulBuf.Get<float>();
         AscendC::LocalTensor<float> rt = reduceTmpBuf.Get<float>();
         AscendC::LocalTensor<float> rd = reduceDstBuf.Get<float>();
         float acc = 0.0f;
         const bool bUseDma = (bStride == 1u && (aCache == kACacheFull || smallKContigBDma));
         for (uint32_t base = 0; base < K; base += kBlockLen) {
             const uint32_t len = (K - base < kBlockLen) ? (K - base) : kBlockLen;
-            AscendC::LocalTensor<float> aOp = aC;
-            if (aCache == kACacheNone) {
-                GatherChunk(aC, matAGm, aOff + static_cast<uint64_t>(base) * aStride, aStride, len);
-            } else if (aCache == kACacheFull) {
-                aOp = aFullBuf.Get<float>()[base];
+            if (K > kHugeKCap && len < kAlign) {
+                for (uint32_t i = 0; i < len; ++i) {
+                    const float av = matAGm.GetValue(aOff + static_cast<uint64_t>(base + i) * aStride);
+                    const float bv = matBGm.GetValue(bOff + static_cast<uint64_t>(base + i) * bStride);
+                    acc += av * bv;
+                }
+                break;
             }
-            if (bUseDma) {
-                CopyContig(bC, matBGm, bOff + static_cast<uint64_t>(base) * bStride, len);
-                AscendC::PipeBarrier<PIPE_MTE2>();
-            } else {
-                GatherChunk(bC, matBGm, bOff + static_cast<uint64_t>(base) * bStride, bStride, len);
-            }
-            AscendC::Mul(ml, aOp, bC, len);
-            AscendC::ReduceSum<float, true>(rd, ml, rt, static_cast<int32_t>(len));
-            acc += rd.GetValue(0);
+            acc += DotProductChunk(aC, bC, ml, rt, rd, aOff, aStride, bOff, bStride,
+                                   base, len, aCache, bUseDma);
         }
         return acc;
     }
 
-    __aicore__ inline void ProcessNnz(uint32_t gnnz) {
-        uint32_t lo = 0;
-        uint32_t hi = rowCount;
-        while (lo < hi) {
-            uint32_t mid = (lo + hi) / 2;
-            if (rowOffsetsGm.GetValue(mid + 1) <= static_cast<int32_t>(gnnz)) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
+    __aicore__ inline float DotProductChunk(AscendC::LocalTensor<float> aC,
+                                            AscendC::LocalTensor<float> bC,
+                                            AscendC::LocalTensor<float> product,
+                                            AscendC::LocalTensor<float> temporary,
+                                            AscendC::LocalTensor<float> result,
+                                            uint64_t aOff, uint32_t aStride, uint64_t bOff,
+                                            uint32_t bStride, uint32_t base, uint32_t len,
+                                            int aCache, bool bUseDma) {
+        AscendC::LocalTensor<float> aOp = aC;
+        if (aCache == kACacheNone) {
+            GatherChunk(aC, matAGm, aOff + static_cast<uint64_t>(base) * aStride, aStride, len);
+        } else if (aCache == kACacheFull) {
+            aOp = aFullBuf.Get<float>()[base];
         }
-        const uint32_t row = lo;
+        if (bUseDma) {
+            CopyContig(bC, matBGm, bOff + static_cast<uint64_t>(base) * bStride, len);
+        } else {
+            GatherChunk(bC, matBGm, bOff + static_cast<uint64_t>(base) * bStride, bStride, len, false);
+        }
+        if (bStride == 1u) {
+            SyncMte2ToV();
+        }
+        AscendC::Mul(product, aOp, bC, len);
+        AscendC::PipeBarrier<PIPE_V>();
+        if (len <= kElemPerRep) {
+            AscendC::WholeReduceSum<float>(result, product, static_cast<int32_t>(len), 1, 1, 1, 8);
+        } else {
+            AscendC::ReduceSum<float, true>(result, product, temporary, static_cast<int32_t>(len));
+        }
+        SyncVToS();
+        return result.GetValue(0);
+    }
+
+    __aicore__ inline void ProcessNnz(uint32_t gnnz, bool reuseOutput) {
+        const uint32_t row = FindSddmmRowForNnz(rowOffsetsGm, rowCount, gnnz);
         const uint64_t aOff = aContig ? static_cast<uint64_t>(row) * ldx : static_cast<uint64_t>(row);
         const uint32_t aStride = aContig ? 1u : ldx;
         int aCache = kACacheNone;
@@ -405,14 +568,18 @@ private:
             const uint32_t bStr = bContig ? 1u : ldy;
             dot = DotProduct(aOff, aStride, bOff, bStr, aCache);
         }
-        const float cVal = csrValuesGm.GetValue(gnnz);
-        AscendC::LocalTensor<float> y = outQueueY.AllocTensor<float>();
-        y.SetValue(0, alphaValue * dot + betaValue * cVal);
-        outQueueY.EnQue(y);
-        AscendC::LocalTensor<float> yo = outQueueY.DeQue<float>();
+        float value = alphaValue * dot;
+        if (betaValue != 0.0f) {
+            value += betaValue * csrValuesGm.GetValue(gnnz);
+        }
+        AscendC::LocalTensor<float> y = scalarOutputBuf.Get<float>();
+        y.SetValue(0, value);
+        SyncSToMte3();
         AscendC::DataCopyExtParams op{1, (uint32_t)sizeof(float), 0, 0, 0};
-        AscendC::DataCopyPad(csrValuesGm[gnnz], yo, op);
-        outQueueY.FreeTensor(yo);
+        AscendC::DataCopyPad(csrValuesGm[gnnz], y, op);
+        if (reuseOutput) {
+            SyncMte3ToS();
+        }
     }
 
     // Load the A row (or A column when opA/order make it strided) into UB once per row.
@@ -425,7 +592,9 @@ private:
             if (smallKContigADma || (batchEnabled && aStride == 1u)) {
                 CopyContig(a, matAGm, aOff, K);
             } else {
-                GatherChunk(a, matAGm, aOff, aStride, K);
+                // Contiguous batched B does not overwrite the gather pad.
+                // The next segment acquires the input queue before pad reuse.
+                GatherChunk(a, matAGm, aOff, aStride, K, !(batchEnabled && !StridedB));
             }
             return kACacheSingle;
         }
@@ -434,7 +603,9 @@ private:
             if (aStride == 1u) {
                 CopyContig(a, matAGm, aOff, K);
             } else {
-                GatherChunk(a, matAGm, aOff, aStride, K);
+                // Contiguous batched B does not overwrite the gather pad.
+                // The next segment acquires the input queue before pad reuse.
+                GatherChunk(a, matAGm, aOff, aStride, K, !(batchEnabled && !StridedB));
             }
             return kACacheFull;
         }
@@ -454,7 +625,6 @@ private:
                                                  AscendC::LocalTensor<float> &acc) {
         AscendC::LocalTensor<float> bTile = bColBuf.Get<float>();
         StageBTile(colInd, segBase, segNnz, bBB, bTile);
-        SyncMte2ToV();
         ReduceBTile(bTile, aOp, acc, segNnz);
     }
 
@@ -465,6 +635,34 @@ private:
     __aicore__ inline void StageBTile(AscendC::LocalTensor<int32_t> &colInd,
                                       uint32_t segBase, uint32_t segNnz, uint64_t bBB,
                                       AscendC::LocalTensor<float> &bTile) {
+        if constexpr (StridedB) {
+            AscendC::LocalTensor<float> pad32 = stridePadBuf.Get<float>();
+            const uint32_t srcGapBytes = (ldy - 1u) * (uint32_t)sizeof(float);
+            for (uint32_t j = 0; j < segNnz; ++j) {
+                const int32_t col = colInd.GetValue(segBase + j);
+                if (col < 0 || static_cast<uint32_t>(col) >= colCount) {
+                    continue;
+                }
+                AscendC::DataCopyExtParams cp{static_cast<uint16_t>(K), (uint32_t)sizeof(float),
+                                              srcGapBytes, 0, 0};
+                AscendC::DataCopyPadExtParams<float> pd{false, 0, 0, 0.0f};
+                AscendC::DataCopyPad(pad32[j * kPitch * kAlign],
+                                     matBGm[bBB + static_cast<uint64_t>(col)], cp, pd);
+            }
+            SyncMte2ToV();
+            AscendC::LocalTensor<int32_t> offs = strideOffsetBuf.Get<int32_t>();
+            AscendC::LocalTensor<uint32_t> offsU = offs.ReinterpretCast<uint32_t>();
+            AscendC::Gather<float>(bTile, pad32, offsU, 0, segNnz * kPitch);
+            AscendC::PipeBarrier<PIPE_V>();
+            for (uint32_t j = 0; j < segNnz; ++j) {
+                const int32_t col = colInd.GetValue(segBase + j);
+                if (col < 0 || static_cast<uint32_t>(col) >= colCount) {
+                    AscendC::Duplicate(bTile[j * kPitch], 0.0f, static_cast<int32_t>(kPitch));
+                }
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            return;
+        }
         uint32_t j = 0;
         while (j < segNnz) {
             const int32_t col = colInd.GetValue(segBase + j);
@@ -483,6 +681,7 @@ private:
             CopyBRun(bTile[j * kPitch], bBB + static_cast<uint64_t>(col) * ldy, run);
             j += run;
         }
+        SyncMte2ToV();
     }
 
     // Multiply the staged tile by the cached A row and collapse each staged row to
@@ -533,7 +732,8 @@ private:
     __aicore__ inline void ComputeSegmentScalar(AscendC::LocalTensor<int32_t> &colInd,
                                                  uint32_t segBase, uint32_t segNnz,
                                                  uint64_t bBB, uint64_t aOff, uint32_t aStride,
-                                                 int aCache, AscendC::LocalTensor<float> &acc) {
+                                                 int aCache, AscendC::LocalTensor<float> &csrStage,
+                                                 AscendC::LocalTensor<float> &yStage) {
         for (uint32_t j = 0; j < segNnz; ++j) {
             const int32_t col = colInd.GetValue(segBase + j);
             float dot = 0.0f;
@@ -543,7 +743,8 @@ private:
                 const uint32_t bStr = bContig ? 1u : ldy;
                 dot = DotProduct(aOff, aStride, bOff, bStr, aCache);
             }
-            acc.SetValue(j, dot);
+            const float cv = (betaValue != 0.0f) ? csrStage.GetValue(j) : 0.0f;
+            yStage.SetValue(j, alphaValue * dot + betaValue * cv);
         }
     }
 
@@ -593,7 +794,7 @@ private:
         }
 
         const uint32_t segCap = batchEnabled ? jTile : kOutStageCap;
-        const int aCache = LoadARow(aOff, aStride);
+        int aCache = kACacheNone;
         for (uint32_t segBase = 0; segBase < rowNnz; segBase += segCap) {
             const uint32_t segNnz = MinU32(rowNnz - segBase, segCap);
             ProcessSegment(static_cast<uint64_t>(start) + segBase, segNnz,
@@ -604,41 +805,38 @@ private:
     // Load one segment's column indices (and C values when beta != 0), compute the
     // dot products, then write back y = alpha * dot + beta * C.
     __aicore__ inline void ProcessSegment(uint64_t segOff, uint32_t segNnz, uint64_t bBB,
-                                          uint64_t aOff, uint32_t aStride, int aCache) {
+                                          uint64_t aOff, uint32_t aStride, int &aCache) {
         AscendC::LocalTensor<int32_t> colInd = colIndBuf.Get<int32_t>();
         AscendC::DataCopyExtParams cp{1, segNnz * (uint32_t)sizeof(int32_t), 0, 0, 0};
         AscendC::DataCopyPadExtParams<int32_t> cpd{false, 0, 0, 0};
         AscendC::DataCopyPad(colInd, colIndicesGm[segOff], cp, cpd);
 
         AscendC::LocalTensor<float> csrIn = inQueueCsr.AllocTensor<float>();
+        // Alloc consumes the preceding FreeTensor V->MTE2 event before
+        // reusing any A/B/gather staging in this segment.
+        if (aCache == kACacheNone) {
+            aCache = LoadARow(aOff, aStride);
+        }
         if (betaValue != 0.0f) {
             AscendC::DataCopyExtParams p{1, segNnz * (uint32_t)sizeof(float), 0, 0, 0};
             AscendC::DataCopyPadExtParams<float> pad{false, 0, 0, 0.0f};
             AscendC::DataCopyPad(csrIn, csrValuesGm[segOff], p, pad);
         }
-        if (batchEnabled) {
-            // colInd is read by the scalar unit while staging B; csrStage is
-            // consumed by the vector unit. Wait for both DMAs once.
-            SyncMte2ToS();
-        } else {
-            AscendC::PipeBarrier<PIPE_MTE2>();
-        }
+        // Both the batch staging and scalar fallback read column indices on S.
+        SyncMte2ToS();
         inQueueCsr.EnQue(csrIn);
         AscendC::LocalTensor<float> csrStage = inQueueCsr.DeQue<float>();
 
         AscendC::LocalTensor<float> yStage = outQueueY.AllocTensor<float>();
-        AscendC::LocalTensor<float> acc = accBuf.Get<float>();
         if (batchEnabled) {
+            AscendC::LocalTensor<float> acc = accBuf.Get<float>();
             AscendC::LocalTensor<float> aOp = (aCache == kACacheFull) ? aFullBuf.Get<float>()
                                                                      : aRowBuf.Get<float>();
             ComputeSegmentBatched(colInd, 0, segNnz, bBB, aOp, acc);
             CombineBatched(yStage, acc, csrStage, segNnz);
         } else {
-            ComputeSegmentScalar(colInd, 0, segNnz, bBB, aOff, aStride, aCache, acc);
-            for (uint32_t j = 0; j < segNnz; ++j) {
-                const float cv = (betaValue != 0.0f) ? csrStage.GetValue(j) : 0.0f;
-                yStage.SetValue(j, alphaValue * acc.GetValue(j) + betaValue * cv);
-            }
+            ComputeSegmentScalar(colInd, 0, segNnz, bBB, aOff, aStride, aCache, csrStage, yStage);
+            SyncSToMte3();
         }
         inQueueCsr.FreeTensor(csrStage);
 
@@ -673,6 +871,7 @@ private:
     AscendC::TBuf<AscendC::TPosition::VECCALC> colIndBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> accBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> partialBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarOutputBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> stridePadBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> strideOffsetBuf;
     bool needStrideGather = false;
@@ -704,6 +903,7 @@ private:
     bool aContig = true;
     bool bContig = true;
     bool batchEnabled = false;
+    uint32_t strideCapacity = kStrideChunk;
     bool runBatchable = false;
     uint32_t nnzPartition = 0;
     uint32_t nnzPerCore = 0;
@@ -712,6 +912,7 @@ private:
     uint32_t ldy = 0;
     uint32_t orderXCol = 0;
     uint32_t orderYCol = 0;
+    uint32_t bTileCapacity = 0;
     uint32_t kbufAligned = 0;
     uint32_t kPitch = 0;
     uint32_t jTile = 0;

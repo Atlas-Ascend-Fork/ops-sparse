@@ -943,6 +943,13 @@ def test_complex_conjugate_grad_output():
     torch.testing.assert_close(_gradient_values(b.grad), expected_b)
 
 
+def test_band_single_segment_uses_a_values():
+    a = csr(CsrData([0, 1, 2, 3], [0, 1, 0], [1.5, -0.5, 2.], (3, 2)), torch.float32)
+    b = csr(CsrData([0, 2, 4], [0, 1, 0, 1], [0.2, 1.3, -0.7, 2.], (2, 2)), torch.float32)
+    _, _, values = cpu_parts(torch.sparse.mm(a, b))
+    torch.testing.assert_close(values, torch.tensor([0.3, 1.95, 0.35, -1., 0.4, 2.6]))
+
+
 @pytest.mark.parametrize('dtype', VALUE_DTYPES)
 def test_duplicate_coo_first_order_values(dtype):
     complex_values = dtype == torch.complex64
@@ -960,6 +967,19 @@ def test_duplicate_coo_first_order_values(dtype):
         torch.testing.assert_close(_gradient_values(a.grad), torch.tensor([4., 5.], dtype=dtype))
     else:
         torch.testing.assert_close(values.grad.cpu(), torch.tensor([4., 4., 5.], dtype=dtype))
+
+
+def test_complex_band_da8_non_arithmetic_heads():
+    columns = [0, 1, 2, 3, 5, 6, 7, 8]
+    values = [complex(i + 1, 0.1 * (i + 1)) for i in range(8)]
+    a = csr(CsrData([0, 8], columns, values, (1, 9)), torch.complex64)
+    b_columns = [col for row in range(9) for col in (row, row + 10)]
+    b_values = [value for _ in range(9) for value in (1 + 0.2j, 2 - 0.1j)]
+    b = csr(CsrData(list(range(0, 19, 2)), b_columns, b_values, (9, 19)), torch.complex64)
+    _, col, result = cpu_parts(torch.sparse.mm(a, b))
+    assert col == columns + [column + 10 for column in columns]
+    expected = torch.tensor([v * (1 + 0.2j) for v in values] + [v * (2 - 0.1j) for v in values])
+    torch.testing.assert_close(result, expected)
 
 
 @pytest.mark.parametrize('sparse_dims', [1, 2, 3])
@@ -1000,6 +1020,44 @@ def test_csr_gradients_accumulate_across_backward_calls(dtype):
     for _ in range(2):
         torch.sparse.mm(a, b).backward(grad)
     torch.testing.assert_close(_gradient_values(a.grad), torch.tensor([8., 10.], dtype=dtype))
+
+
+@pytest.mark.parametrize("row,col", [([1, 1, 2], [0, 1]),
+                                     ([0, 3, 2], [0, 1]),
+                                     ([0, 1, 2], [-1, 1]),
+                                     ([0, 2, 2], [1, 0])])
+def test_stream_ordered_validation_rejects_invalid_indices(row, col):
+    bad = csr(CsrData(row, col, [1.0, 2.0], (2, 2)), torch.float32,
+              index_dtype=torch.int64)
+    good = csr(CsrData([0, 1, 2], [0, 1], [1.0, 1.0], (2, 2)), torch.float32)
+    with pytest.raises(RuntimeError, match="aclsparseSpGEMMWorkEstimation"):
+        torch.sparse.mm(bad, good)
+
+
+@pytest.mark.parametrize("beta", [0, 1])
+def test_stream_ordered_validation_checks_addend(beta):
+    good = csr(CsrData([0, 1, 2], [0, 1], [1.0, 1.0], (2, 2)), torch.float32)
+    bad = csr(CsrData([0, 1, 2], [0, 2], [1.0, 1.0], (2, 2)), torch.float32,
+              index_dtype=torch.int64)
+    if beta == 0:
+        result = torch.sparse.addmm(bad, good, good, beta=0)
+        torch.testing.assert_close(result.values().cpu(), torch.tensor([1.0, 1.0]))
+    else:
+        with pytest.raises(RuntimeError, match="aclsparseSpGEMMWorkEstimation"):
+            torch.sparse.addmm(bad, good, good, beta=beta)
+
+
+def test_index_conversion_is_ordered_on_non_default_stream():
+    stream = torch.npu.Stream()
+    with torch.npu.stream(stream):
+        for _ in range(30):
+            a = csr(CsrData([0, 1, 2], [0, 1], [2.0, 3.0], (2, 2)), torch.float32,
+                    index_dtype=torch.int64)
+            # Produce values asynchronously as well as narrowing indices.
+            a.values().mul_(2)
+            result = torch.sparse.mm(a, a)
+            torch.testing.assert_close(result.values().cpu(), torch.tensor([16.0, 36.0]))
+    stream.synchronize()
 
 
 @pytest.mark.parametrize("api_name", ["mm", "sparse.mm"])
@@ -1048,6 +1106,25 @@ def test_dense_mm_zero_grad_preserves_nonfinite_values(value, dtype):
         torch.testing.assert_close(result.cpu(), reference, equal_nan=True)
 
 
+@pytest.mark.parametrize('dtype', VALUE_DTYPES)
+def test_five_way_fused_merge_overlaps_and_skips_empty_b_row(dtype):
+    values = [0.5, -1.0, 1.5, -2.0, 2.5] * 2 + [99.0, 7.0]
+    if dtype == torch.complex64:
+        values = [complex(x, x / 8) for x in values]
+    a_data = CsrData([0, 5, 11, 12], list(range(5)) + list(range(6)) + [5], values, (3, 6))
+    b_values = [x for i in range(5) for x in (1.0 + i / 8, 2.0 - i / 8)]
+    if dtype == torch.complex64:
+        b_values = [complex(x, x / 16) for x in b_values]
+    b_data = CsrData([0, 2, 4, 6, 8, 10, 10], [0, 1] * 5, b_values, (6, 3))
+    a, b = csr(a_data, dtype), csr(b_data, dtype)
+    result = torch.sparse.mm(a, b)
+    reference_dtype = torch.complex128 if dtype == torch.complex64 else torch.float64
+    ac = csr(a_data, dtype, device='cpu').to_dense().to(reference_dtype)
+    bc = csr(b_data, dtype, device='cpu').to_dense().to(reference_dtype)
+    torch.testing.assert_close(_gradient_dense_cpu(result), (ac @ bc).to(dtype),
+                               rtol=tolerance(dtype), atol=tolerance(dtype))
+
+
 def test_complex_non_arithmetic_heads_with_contiguous_segments():
     heads = [0, 1, 2, 3, 5, 6, 7, 8]
     values = [complex(i + 1, (i + 1) / 10) for i in range(8)]
@@ -1059,3 +1136,42 @@ def test_complex_non_arithmetic_heads_with_contiguous_segments():
     assert columns == heads + [head + 10 for head in heads]
     expected = torch.tensor([v * (1 + 0.2j) for v in values] + [v * (2 - 0.1j) for v in values])
     torch.testing.assert_close(result, expected)
+
+
+@pytest.mark.parametrize('dtype', VALUE_DTYPES)
+def test_band_or_bound_false_positive_keeps_valid_eight_way_row(dtype):
+    # B's band prefix is 9; OR(1..8) == 15 exceeds it although every A index is valid.
+    heads = list(range(9)) + [10]
+    values = [i / 8 for i in range(1, 9)]
+    if dtype == torch.complex64:
+        values = [complex(x, x / 8) for x in values]
+    a_data = CsrData([0, 8], list(range(1, 9)), values, (1, 10))
+    b_data = CsrData(list(range(0, 21, 2)),
+                     [column for head in heads for column in (head, head + 12)],
+                     [1.0, 2.0] * 10, (10, 23))
+    result = torch.sparse.mm(csr(a_data, dtype), csr(b_data, dtype))
+    reference_dtype = torch.complex128 if dtype == torch.complex64 else torch.float64
+    ac = csr(a_data, dtype, device='cpu').to_dense().to(reference_dtype)
+    bc = csr(b_data, dtype, device='cpu').to_dense().to(reference_dtype)
+    torch.testing.assert_close(_gradient_dense_cpu(result), (ac @ bc).to(dtype),
+                               rtol=tolerance(dtype), atol=tolerance(dtype))
+
+
+@pytest.mark.parametrize('dtype', VALUE_DTYPES)
+def test_five_way_band_or_bound_false_positive(dtype):
+    # Five entries require General value loading even with a valid B band.
+    # All indices are below prefix=9 despite their OR being 15.
+    heads = list(range(9)) + [10]
+    values = [0.5, -1.0, 1.5, -2.0, 2.5]
+    if dtype == torch.complex64:
+        values = [complex(x, x / 8) for x in values]
+    a_data = CsrData([0, 5], [1, 2, 3, 4, 8], values, (1, 10))
+    b_data = CsrData(list(range(0, 21, 2)),
+                     [column for head in heads for column in (head, head + 12)],
+                     [1.0, 2.0] * 10, (10, 23))
+    result = torch.sparse.mm(csr(a_data, dtype), csr(b_data, dtype))
+    reference_dtype = torch.complex128 if dtype == torch.complex64 else torch.float64
+    ac = csr(a_data, dtype, device='cpu').to_dense().to(reference_dtype)
+    bc = csr(b_data, dtype, device='cpu').to_dense().to(reference_dtype)
+    torch.testing.assert_close(_gradient_dense_cpu(result), (ac @ bc).to(dtype),
+                               rtol=tolerance(dtype), atol=tolerance(dtype))

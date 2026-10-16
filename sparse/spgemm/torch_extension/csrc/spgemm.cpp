@@ -327,9 +327,8 @@ at::Tensor RunSpGemm(const c10::optional<at::Tensor> &self, const at::Tensor &ma
 {
     return RunAclSparse(mat1, [&](AclSparseContext &context) {
         SpGemmPlan plan = MakePlan(self, mat1, mat2, beta, alpha);
-        // MakePlan 通过 PyTorch 入队索引窄化，会进入 torch_npu 的任务队列。
-        // WorkEstimation 以阻塞 D2H 读取验证 CSR 结构，需先排空队列，
-        // 否则读取会与转换竞争。stream(true) 提交队列任务，非设备同步。
+        // Submit torch_npu's queue before calling ACLSparse directly. The
+        // library orders CSR validation copies on this same handle stream.
         (void)c10_npu::getCurrentNPUStream(mat1.device().index()).stream(true);
         context.RecordTensors(plan.a.rowOffsets, plan.a.colIndices, plan.a.values, plan.b.rowOffsets,
             plan.b.colIndices, plan.b.values, plan.cIn.rowOffsets, plan.cIn.colIndices, plan.cIn.values,

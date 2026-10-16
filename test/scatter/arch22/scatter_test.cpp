@@ -266,7 +266,13 @@ int32_t Verification(const std::vector<T> &cpuGolden,
         if (!std::isnan(npuVal) && !std::isnan(cpuVal)) {
             float aError = std::fabs(npuVal - cpuVal);
             float rError = aError / (std::fabs(cpuVal) + 1e-7f);
-            if (rError > MARE) { worstIdx = i; worstGolden = cpuVal; worstNpu = npuVal; worstIsNaN = false; }
+            if (rError > MARE) {
+                MARE = rError;
+                worstIdx = i;
+                worstGolden = cpuVal;
+                worstNpu = npuVal;
+                worstIsNaN = false;
+            }
             MERE += rError;
         }
 

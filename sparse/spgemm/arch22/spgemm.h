@@ -198,20 +198,22 @@ static inline SpgemmArch22Ws1Layout SpgemmArch22ComputeWs1(uint32_t M, uint32_t 
 {
     SpgemmArch22Ws1Layout off;
     off.tilingOff      = 64;
-    off.binEdgeOff     = off.tilingOff + (int64_t)SPGEMM_ROUNDUP(sizeof(SpgemmArch22TilingData), 64);
-    off.rowProductsOff = off.binEdgeOff + (int64_t)SPGEMM_ROUNDUP(((uint64_t)blockDim + 1) * 4, 64);
-    off.rowNnzOff      = off.rowProductsOff + (int64_t)SPGEMM_ROUNDUP((uint64_t)M * 8, 64);
+    off.binEdgeOff     = off.tilingOff +
+                         (int64_t)SPGEMM_ROUNDUP(sizeof(SpgemmArch22TilingData), 64);
+    off.rowProductsOff = off.binEdgeOff +
+                         (int64_t)SPGEMM_ROUNDUP(((uint64_t)blockDim + 1) * 4, 64);
+    off.rowNnzOff      = off.rowProductsOff +
+                         (int64_t)SPGEMM_ROUNDUP((uint64_t)M * 8, 64);
     off.coreSumOff     = off.rowNnzOff + (int64_t)SPGEMM_ROUNDUP((uint64_t)M * 4, 64);
     off.scratchBaseOff = off.coreSumOff + (int64_t)SPGEMM_ROUNDUP(((uint64_t)blockDim + 1) * 4, 64);
     off.bApStrideOff   = off.scratchBaseOff + (int64_t)SPGEMM_ROUNDUP(((uint64_t)blockDim + 1) * 8, 64);
     off.bHeadOff       = off.bApStrideOff +
                          (int64_t)SPGEMM_ROUNDUP((uint64_t)((K > 0) ? K : 1) * 4, 64);
-    // bStat：int32 × (blockDim × 16)，count Kernel 内部跨核 B 行长统计交换区。
-    // 每核跨距 16 个 int32 = 64B = 一整条 cacheline，防伪共享。
-    off.bStatOff       = off.bHeadOff +
-                         (int64_t)SPGEMM_ROUNDUP((uint64_t)((K > 0) ? K : 1) * 4, 64);
     // syncOff：SyncAll 的显式 GM 屏障区。每核 32B（8 个 int32）是该原语的约定。
-    off.syncOff        = off.bStatOff + (int64_t)SPGEMM_ROUNDUP((uint64_t)blockDim * 64, 64);
+    off.bStatOff   = off.bHeadOff +
+                     (int64_t)SPGEMM_ROUNDUP((uint64_t)((K > 0) ? K : 1) * 4, 64);
+    off.syncOff    = off.bStatOff +
+                     (int64_t)SPGEMM_ROUNDUP((uint64_t)blockDim * 64, 64);
     off.totalBytes     = (uint64_t)off.syncOff +
                          SPGEMM_ROUNDUP((uint64_t)blockDim * 32, 64);
     return off;

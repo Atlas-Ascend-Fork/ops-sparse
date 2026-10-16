@@ -198,8 +198,8 @@ template <typename T, typename VEC> __aicore__ inline void SpgemmVecLoadBWindow(
 
 
 /**
- * 融合归并的段数分派。特化集合 {2,3,4,6,7,8} 与计数版保持一致。
- * 没有 da == 1 的快路径：融合版仍需逐元素读值累加，无法跳过归并循环。
+ * 融合归并的段数分派。da=1/5 也固定实例化，消除 Band 回退行的
+ * 动态段数索引；数值加载仍由后续路径按需完成。
  */
 template <typename T, typename VEC> __aicore__ inline int32_t SpgemmMergeFusedRow(
     const AscendC::GlobalTensor<int32_t> &bColIdxGm, const AscendC::GlobalTensor<T> &bValGm,
@@ -213,11 +213,15 @@ template <typename T, typename VEC> __aicore__ inline int32_t SpgemmMergeFusedRo
     }
     // aBase 必须传给每个实例（带路径建段不再读 A 值，冷路径按 aBase 惰性载入）。
     switch (da) {
+        case 1:  return SpgemmMergeFusedRowImpl<1, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+                     outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
         case 2:  return SpgemmMergeFusedRowImpl<2, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
         case 3:  return SpgemmMergeFusedRowImpl<3, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
         case 4:  return SpgemmMergeFusedRowImpl<4, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+                     outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
+        case 5:  return SpgemmMergeFusedRowImpl<5, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
         case 6:  return SpgemmMergeFusedRowImpl<6, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
@@ -351,7 +355,7 @@ template <typename T> __aicore__ inline bool SpgemmLoadSegmentsGmWithVal(const A
             seg.cur[i] = bs;
             // 带路径下不写 seg.end[]：冷分支入口处按 cur + segLenAll 就地补齐。
             seg.first[i] = band.head + kx;
-            // 带路径下不在此读 A 值：向量发射块直接从 GM 搬 A，冷回退按 aBase 就地补齐。
+            // 成功的向量发射块直接从 GM 搬 A；标量回退路径在入口补齐 A values。
         }
         uint32_t bad = 0;
         if (orAcc >= band.prefix) {

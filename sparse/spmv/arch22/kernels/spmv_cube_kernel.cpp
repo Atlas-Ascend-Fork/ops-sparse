@@ -17,6 +17,7 @@
 #include "seg_sum_vec_revert_kernel.h"
 #include "tcuscan_utils.h"
 #include "tiling_spmv_cube.h"
+#include "spmv_cube_kernel.h"
 
 using namespace AscendC;
 using namespace tcuscan;

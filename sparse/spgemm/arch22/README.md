@@ -77,8 +77,23 @@ complex64 的 `accBytes` 为 8，故 `chunkWidth` 自动缩小。UB 占用固定
 
 ```
 [header 64B][SpgemmArch22TilingData][binEdge int32×(blockDim+1)]
-[rowProducts int64×M][rowNnz int32×M][coreSum int32×(blockDim+1)]
+[rowProducts int64×M]
+[rowNnz int32×M][coreSum int32×(blockDim+1)]
+[scratchBase int64×(blockDim+1)][bApStride int32×max(K,1)]
+[bHead int32×max(K,1)][bStat int32×(blockDim×16)][sync int32×(blockDim×8)]
 ```
+
+各段分别按 64B 对齐。Host 对 A/B/C 仍执行完整 CSR 内容校验（偏移单调、列索引范围、
+行内非降），但不再按 A 行长度或 complex64 的列间距收紧 B 的 Band 证书。
+
+Band 建段只解析 B 的段范围和首列；成功的向量发射直接批量搬运 A values。若行回退到
+标量或 General 归并，Kernel 才一次性将对应 A values 装入 `seg.val*`。因此 da=1/5、
+complex64 da=8 的非等差段首，以及其它未命中向量路径的行都能使用正确值，同时正常
+Band 快路径不会重复读取 A values。
+
+WorkEstimation 末尾仅上传分核边界，不再次上传 tiling。
+乘积数量和容量查询使用 host 描述符与 `rowProducts`；Compute 执行前重新构造并
+完整上传 tiling。因此普通和风险输入均省去一次没有消费者的 H2D 上传。
 
 ### buffer2（Compute 申请，Copy 结束前不得释放）
 

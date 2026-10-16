@@ -36,9 +36,6 @@ dense = sparse.to_dense()  # 首次调用触发 JIT
 前置环境与完整命令见
 [`test/sparse2dense/python/README.md`](../../../../test/sparse2dense/python/README.md)。
 
-```sh
-source /usr/local/Ascend/cann/set_env.sh
-bash scripts/ci/run_sparsetodense_torch_extension.sh
-```
+先加载 CANN 环境，再按上述测试文档执行构建、安装和 pytest 命令。
 
 底层 C API 语义见 [`../../../../sparse/sparse2dense/README.md`](../../../../sparse/sparse2dense/README.md)。

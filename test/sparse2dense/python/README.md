@@ -26,13 +26,7 @@ source /usr/local/Ascend/cann/set_env.sh
 
 ## 运行
 
-在仓库根目录：
-
-```bash
-bash scripts/ci/run_sparsetodense_torch_extension.sh
-```
-
-或分步：
+在仓库根目录执行以下构建和测试步骤：
 
 ```bash
 CMAKE_BUILD_TYPE=Release bash build.sh --ops=sparse2dense --soc="${SOC:-ascend950}"

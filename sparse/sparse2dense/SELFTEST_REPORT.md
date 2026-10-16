@@ -80,4 +80,4 @@ python3 scripts/ci/run_sparsetodense_selftest_500.py
 
 - Kernel：同 stream SIMT zero → scatter（CSR 行 / CSC 列 / COO nnz）
 - Host：nnz>0 热路径无 `aclrtMemsetAsync`
-- torch_extension：`OpBuilder` JIT + `aten::_to_dense`；一键脚本 `scripts/ci/run_sparsetodense_torch_extension.sh`
+- torch_extension：`OpBuilder` JIT + `aten::_to_dense`

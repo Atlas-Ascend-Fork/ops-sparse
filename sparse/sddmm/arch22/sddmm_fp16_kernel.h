@@ -22,7 +22,12 @@ public:
                                 const SddmmTilingData &td, AscendC::TPipe *pipeIn) {
         pipe = pipeIn;
         CopyTiling(td);
+        BindGlobalBuffers(matA, matB, csrRowOffsets, csrColIndices, csrValues);
+        InitBuffers();
+    }
 
+    __aicore__ inline void BindGlobalBuffers(GM_ADDR matA, GM_ADDR matB, GM_ADDR csrRowOffsets,
+                                              GM_ADDR csrColIndices, GM_ADDR csrValues) {
         matAGm.SetGlobalBuffer((__gm__ half *)matA,
                                static_cast<uint64_t>(matARows) * ldx);
         const uint64_t bGmSize = static_cast<uint64_t>(matBRows) *
@@ -32,7 +37,9 @@ public:
                                      static_cast<uint64_t>(rowCount + 1));
         colIndicesGm.SetGlobalBuffer((__gm__ int32_t *)csrColIndices, nnz);
         csrValuesGm.SetGlobalBuffer((__gm__ half *)csrValues, nnz);
+    }
 
+    __aicore__ inline void InitBuffers() {
         const uint32_t kbuf = AlignUp(kBlockLen, kAlign);
         pipe->InitBuffer(aRowBuf, kbuf * sizeof(float));
         pipe->InitBuffer(bColBuf, kbuf * sizeof(float));
@@ -40,10 +47,15 @@ public:
         pipe->InitBuffer(inQueueCsr, 1, kOutStageCap * sizeof(float));
         pipe->InitBuffer(outQueueY, 1, kOutStageCap * sizeof(float));
         pipe->InitBuffer(colIndBuf, kOutStageCap * sizeof(int32_t));
-        pipe->InitBuffer(mulBuf, kbuf * sizeof(float));
+        pipe->InitBuffer(mulBuf, AlignUp(kbuf, kElemPerRep) * sizeof(float));
         pipe->InitBuffer(reduceTmpBuf, kbuf * sizeof(float));
         pipe->InitBuffer(reduceDstBuf, kAlign * sizeof(float));
         pipe->InitBuffer(halfBuf, AlignUp(kBlockLen, static_cast<uint32_t>(16)) * sizeof(half));
+        // One aligned reduction slot per nonzero; compact a segment only after
+        // all dot products have completed, keeping results in the vector pipe.
+        pipe->InitBuffer(dotStageBuf, kVectorSegmentCap * kAlign * sizeof(float));
+        pipe->InitBuffer(dotOffsetBuf, kVectorSegmentCap * sizeof(int32_t));
+        pipe->InitBuffer(clampMaskBuf, kVectorSegmentCap / 8);
         // The strided gather is only reachable when a row of X or a column of Y is
         // non-contiguous in GM; skip its staging buffers otherwise so contiguous
         // shapes (notably the huge-K path) keep the UB headroom.
@@ -51,8 +63,8 @@ public:
         const bool bCtg = (orderYCol == 0 && opBValue == 1) || (orderYCol == 1 && opBValue == 0);
         needStrideGather = (!aCtg || !bCtg);
         if (needStrideGather) {
-            pipe->InitBuffer(stridePadBuf, kStrideChunk * kStrideElemBytes);
-            pipe->InitBuffer(strideOffsetBuf, kStrideChunk * sizeof(int32_t));
+            pipe->InitBuffer(stridePadBuf, kFp16StrideChunk * kStrideElemBytes);
+            pipe->InitBuffer(strideOffsetBuf, kFp16StrideChunk * sizeof(int32_t));
         }
     }
 
@@ -69,23 +81,15 @@ public:
     }
 
 private:
+    friend struct SddmmRowPartition<KernelSparseSddmmFp16>;
+    friend struct SddmmCommonLayout<KernelSparseSddmmFp16>;
 
     // Split the reduction dimension K and the contiguity flags out of the tiling
     // data. Returns false when there is nothing to do or the shapes disagree.
     __aicore__ inline bool SetupLayout() {
-        if (nnz == 0 || rowCount == 0) {
+        if (!SddmmCommonLayout<KernelSparseSddmmFp16>::Setup(*this)) {
             return false;
         }
-        const uint32_t innerA = (opAValue == 0) ? matACols : matARows;
-        const uint32_t innerB = (opBValue == 0) ? matBRows : matBCols;
-        if (innerA != innerB) {
-            return false;
-        }
-        K = innerA;
-        colCount = (opBValue == 0) ? matBCols : matBRows;
-        // A row (resp. B column) is contiguous in GM when the memory order and the
-        // requested transpose agree.
-        aContig = (orderXCol == 0 && opAValue == 0) || (orderXCol == 1 && opAValue == 1);
         bContig = (orderYCol == 0 && opBValue == 1) || (orderYCol == 1 && opBValue == 0);
         // The strided gather (and hence its offset table) is only reachable when a
         // row of X or a column of Y is non-contiguous in GM.
@@ -98,29 +102,17 @@ private:
     // Each core takes a contiguous slice of nonzeros; used for huge-K shapes where
     // a single row would not fill the cores.
     __aicore__ inline void RunNnzPartition() {
-        const uint32_t coreIdx = AscendC::GetBlockIdx();
-        const uint32_t extraN = (coreIdx < remainderNnz) ? 1u : 0u;
-        const uint32_t myNnz = nnzPerCore + extraN;
-        const uint32_t myBase = coreIdx * nnzPerCore +
-                                ((coreIdx < remainderNnz) ? coreIdx : remainderNnz);
-        for (uint32_t j = 0; j < myNnz; ++j) {
-            if (myBase + j < nnz) {
-                ProcessNnz(myBase + j);
+        const SddmmWorkRange range = GetSddmmWorkRange(nnzPerCore, remainderNnz);
+        for (uint32_t j = 0; j < range.count; ++j) {
+            if (range.begin + j < nnz) {
+                ProcessNnz(range.begin + j);
             }
         }
     }
 
     // Each core takes a contiguous slice of rows (the common case).
     __aicore__ inline void RunRowPartition() {
-        const uint32_t totalRows = rowCount;
-        const uint32_t coreIdx = AscendC::GetBlockIdx();
-        const uint32_t extra = (coreIdx < remainderRows) ? 1u : 0u;
-        const uint32_t myCount = rowsPerCore + extra;
-        const uint32_t myBase = coreIdx * rowsPerCore +
-                                ((coreIdx < remainderRows) ? coreIdx : remainderRows);
-        for (uint32_t g = myBase; g < myBase + myCount && g < totalRows; ++g) {
-            ProcessRow(g);
-        }
+        SddmmRowPartition<KernelSparseSddmmFp16>::Run(*this);
     }
 
     // The FP16 path has no small-K DMA specialisation; nothing extra to set up.
@@ -154,103 +146,57 @@ private:
     // of the gathered type, so for half the 32B block pitch is 16 elements.
     __aicore__ inline void InitStrideOffsets() {
         AscendC::LocalTensor<int32_t> offs = strideOffsetBuf.Get<int32_t>();
-        AscendC::CreateVecIndex<int32_t>(offs, 0, kStrideChunk);
+        const uint32_t count = MinU32(K, kFp16StrideChunk);
+        AscendC::CreateVecIndex<int32_t>(offs, 0, count);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Muls(offs, offs, static_cast<int32_t>(kStrideElemBytes),
-                      static_cast<int32_t>(kStrideChunk));
+                      static_cast<int32_t>(count));
         AscendC::PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void SyncMte2ToV() {
-        event_t ev = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V));
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(ev);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(ev);
+        SyncSddmmEvent<AscendC::HardEvent::MTE2_V>();
     }
 
-    __aicore__ inline void Gather16(AscendC::LocalTensor<float> &ub,
-                                    AscendC::GlobalTensor<half> &gm,
-                                    uint64_t off, uint32_t stride, uint32_t len) {
-        if (stride == 1u && len > 0) {
-            AscendC::LocalTensor<half> hBuf = halfBuf.Get<half>();
-            AscendC::DataCopyExtParams copyParams{1, static_cast<uint32_t>(len * sizeof(half)),
-                                                  0, 0, 0};
-            AscendC::DataCopyPadExtParams<half> padParams{false, 0, 0, static_cast<half>(0.0f)};
-            AscendC::DataCopyPad(hBuf, gm[off], copyParams, padParams);
-            AscendC::PipeBarrier<PIPE_MTE2>();
-            AscendC::Cast<float, half>(ub, hBuf, AscendC::RoundMode::CAST_NONE, len);
-            AscendC::PipeBarrier<PIPE_V>();
-            return;
-        }
-        // Strided: DataCopyPad lands each half on its own 32B block, one Gather
-        // compacts them, then a single Cast converts the run to fp32.
-        AscendC::LocalTensor<half> pad32 = stridePadBuf.Get<half>();
-        AscendC::LocalTensor<half> hBuf = halfBuf.Get<half>();
-        AscendC::LocalTensor<int32_t> offs = strideOffsetBuf.Get<int32_t>();
-        AscendC::LocalTensor<uint32_t> offsU = offs.ReinterpretCast<uint32_t>();
-        const uint32_t srcGapBytes = (stride - 1u) * (uint32_t)sizeof(half);
-        for (uint32_t base = 0; base < len; base += kStrideChunk) {
-            const uint32_t cnt = MinU32(len - base, kStrideChunk);
-            AscendC::DataCopyExtParams cp{static_cast<uint16_t>(cnt), (uint32_t)sizeof(half),
-                                          srcGapBytes, 0, 0};
-            AscendC::DataCopyPadExtParams<half> pd{false, 0, 0, static_cast<half>(0.0f)};
-            AscendC::DataCopyPad(pad32, gm[off + static_cast<uint64_t>(base) * stride], cp, pd);
-            SyncMte2ToV();
-            AscendC::Gather<half>(hBuf[base], pad32, offsU, 0, cnt);
-            AscendC::PipeBarrier<PIPE_V>();
-        }
-        AscendC::Cast<float, half>(ub, hBuf, AscendC::RoundMode::CAST_NONE, len);
-        AscendC::PipeBarrier<PIPE_V>();
+    __aicore__ inline void SyncVToMte2() {
+        SyncSddmmEvent<AscendC::HardEvent::V_MTE2>();
     }
 
-    __aicore__ inline float DotProduct(uint64_t aOff, uint32_t aStride, uint64_t bOff,
-                                       uint32_t bStride, int aCache) {
-        if (K <= kBlockLen) {
-            return DotProductSingle(aOff, aStride, bOff, bStride, aCache);
-        }
-        return DotProductScalar(aOff, aStride, bOff, bStride);
+    __aicore__ inline void SyncMte2ToS() {
+        SyncSddmmEvent<AscendC::HardEvent::MTE2_S>();
     }
 
-    // Vectorized single-chunk dot product (K <= kBlockLen, proven correct).
-    __aicore__ inline float DotProductSingle(uint64_t aOff, uint32_t aStride, uint64_t bOff,
-                                             uint32_t bStride, int aCache) {
-        AscendC::LocalTensor<float> aC = aRowBuf.Get<float>();
-        AscendC::LocalTensor<float> bC = bColBuf.Get<float>();
-        AscendC::LocalTensor<float> ml = mulBuf.Get<float>();
-        AscendC::LocalTensor<float> rt = reduceTmpBuf.Get<float>();
-        AscendC::LocalTensor<float> rd = reduceDstBuf.Get<float>();
-        AscendC::LocalTensor<float> aOp = aC;
-        if (aCache == kACacheSingle) {
-            // A already loaded into aRowBuf
-        } else if (aCache == kACacheNone) {
-            Gather16(aC, matAGm, aOff, aStride, K);
-        }
-        Gather16(bC, matBGm, bOff, bStride, K);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::Mul(ml, aOp, bC, K);
-        AscendC::ReduceSum<float, true>(rd, ml, rt, static_cast<int32_t>(K));
-        return rd.GetValue(0);
+    __aicore__ inline void SyncVToS() {
+        SyncSddmmEvent<AscendC::HardEvent::V_S>();
     }
 
-    // Scalar dot product for K > kBlockLen (hugeK FP16 path).
-    // Loads A and B elements via chunk-based Gather16 but accumulates the dot
-    // product chunk-by-chunk using separate A and B buffers.
-    __aicore__ inline float DotProductScalar(uint64_t aOff, uint32_t aStride,
-                                             uint64_t bOff, uint32_t bStride) {
-        AscendC::LocalTensor<float> aC = aRowBuf.Get<float>();
-        AscendC::LocalTensor<float> bC = bColBuf.Get<float>();
-        float acc = 0.0f;
-        for (uint32_t base = 0; base < K; base += kBlockLen) {
-            const uint32_t len = (K - base < kBlockLen) ? (K - base) : kBlockLen;
-            Gather16(aC, matAGm, aOff + static_cast<uint64_t>(base) * aStride, aStride, len);
-            AscendC::PipeBarrier<PIPE_ALL>();
-            Gather16(bC, matBGm, bOff + static_cast<uint64_t>(base) * bStride, bStride, len);
-            AscendC::PipeBarrier<PIPE_ALL>();
-            for (uint32_t i = 0; i < len; ++i) {
-                acc += aC.GetValue(i) * bC.GetValue(i);
-            }
-        }
-        return acc;
+    __aicore__ inline void SyncSToV() {
+        SyncSddmmEvent<AscendC::HardEvent::S_V>();
     }
+
+    __aicore__ inline void SyncVToMte3() {
+        SyncSddmmEvent<AscendC::HardEvent::V_MTE3>();
+    }
+
+    __aicore__ inline void SyncSToMte3() {
+        SyncSddmmEvent<AscendC::HardEvent::S_MTE3>();
+    }
+
+    __aicore__ inline void SyncMte3ToS() {
+        SyncSddmmEvent<AscendC::HardEvent::MTE3_S>();
+    }
+
+    __aicore__ inline void SyncMte3ToV() {
+        SyncSddmmEvent<AscendC::HardEvent::MTE3_V>();
+    }
+
+    __aicore__ inline void SyncMte3ToMte2() {
+        SyncSddmmEvent<AscendC::HardEvent::MTE3_MTE2>();
+    }
+
+    // This private implementation fragment is included in the class because
+    // every routine operates on this kernel's UB buffers and state.
+#include "sddmm_fp16_data_path.inc"
 
     static constexpr float FP16_MAX_VALUE = 65504.0f;
 
@@ -264,30 +210,9 @@ private:
         return v;
     }
 
-    // Load a full-length vector (up to kHugeKCap) into dst by chunking through
-    // halfBuf in kBlockLen-sized pieces, avoiding halfBuf overflow.
-    __aicore__ inline void GatherFull16(AscendC::LocalTensor<float> &dst,
-                                        AscendC::GlobalTensor<half> &gm,
-                                        uint64_t off, uint32_t stride, uint32_t len) {
-        for (uint32_t base = 0; base < len; base += kBlockLen) {
-            const uint32_t chunk = MinU32(len - base, kBlockLen);
-            AscendC::LocalTensor<float> slice = dst[base];
-            Gather16(slice, gm, off + static_cast<uint64_t>(base) * stride, stride, chunk);
-        }
-    }
 
     __aicore__ inline void ProcessNnz(uint32_t gnnz) {
-        uint32_t lo = 0;
-        uint32_t hi = rowCount;
-        while (lo < hi) {
-            uint32_t mid = (lo + hi) / 2;
-            if (rowOffsetsGm.GetValue(mid + 1) <= static_cast<int32_t>(gnnz)) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        const uint32_t row = lo;
+        const uint32_t row = FindSddmmRowForNnz(rowOffsetsGm, rowCount, gnnz);
         const uint64_t aOff = aContig ? static_cast<uint64_t>(row) * ldx : static_cast<uint64_t>(row);
         const uint32_t aStride = aContig ? 1u : ldx;
         int aCache = kACacheNone;
@@ -303,26 +228,39 @@ private:
                                           : static_cast<uint64_t>(col);
             dot = DotProduct(aOff, aStride, bOff, bContig ? 1u : ldy, aCache);
         }
-        const float cVal = static_cast<float>(csrValuesGm.GetValue(gnnz));
-        csrValuesGm.SetValue(gnnz, static_cast<half>(Saturate(alphaValue * dot + betaValue * cVal)));
+        const float cVal = betaValue != 0.0f ? static_cast<float>(csrValuesGm.GetValue(gnnz)) : 0.0f;
+        AscendC::LocalTensor<float> y = outQueueY.AllocTensor<float>();
+        AcquireScalarOutput();
+        AscendC::LocalTensor<half> yh = y.ReinterpretCast<half>();
+        yh.SetValue(0, static_cast<half>(Saturate(alphaValue * dot + betaValue * cVal)));
+        StoreScalarHalf(gnnz, 1, yh);
+        outQueueY.FreeTensor(y);
     }
 
     // Stage the row's C values (fp16 -> fp32) and column indices into UB.
     __aicore__ inline void LoadRowStage(uint64_t rowOff, uint32_t rowNnz,
                                         AscendC::LocalTensor<float> &csrIn,
-                                        AscendC::LocalTensor<int32_t> &colInd) {
-        AscendC::LocalTensor<half> hBuf = halfBuf.Get<half>();
-        AscendC::DataCopyExtParams p{1, static_cast<uint32_t>(rowNnz * sizeof(half)), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<half> pad{false, 0, 0, static_cast<half>(0.0f)};
-        AscendC::DataCopyPad(hBuf, csrValuesGm[rowOff], p, pad);
-        AscendC::PipeBarrier<PIPE_MTE2>();
-        AscendC::Cast<float, half>(csrIn, hBuf, AscendC::RoundMode::CAST_NONE, rowNnz);
-        AscendC::PipeBarrier<PIPE_V>();
+                                        AscendC::LocalTensor<int32_t> &colInd,
+                                        bool scalarConsumer = true, bool needColumns = true) {
+        if (betaValue != 0.0f) {
+            AscendC::LocalTensor<half> hBuf = halfBuf.Get<half>();
+            AscendC::DataCopyExtParams p{1, static_cast<uint32_t>(rowNnz * sizeof(half)), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<half> pad{false, 0, 0, static_cast<half>(0.0f)};
+            AscendC::DataCopyPad(hBuf, csrValuesGm[rowOff], p, pad);
+            SyncMte2ToV();
+            AscendC::Cast<float, half>(csrIn, hBuf, AscendC::RoundMode::CAST_NONE, rowNnz);
+            SyncVToMte2();
+            if (scalarConsumer) {
+                SyncVToS();
+            }
+        }
 
-        AscendC::DataCopyExtParams cp{1, rowNnz * (uint32_t)sizeof(int32_t), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<int32_t> cpd{false, 0, 0, 0};
-        AscendC::DataCopyPad(colInd, colIndicesGm[rowOff], cp, cpd);
-        AscendC::PipeBarrier<PIPE_MTE2>();
+        if (needColumns) {
+            AscendC::DataCopyExtParams cp{1, rowNnz * (uint32_t)sizeof(int32_t), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<int32_t> cpd{false, 0, 0, 0};
+            AscendC::DataCopyPad(colInd, colIndicesGm[rowOff], cp, cpd);
+            SyncMte2ToS();
+        }
     }
 
     // Load the A row (or column) into UB once; returns the cache mode used.
@@ -338,15 +276,40 @@ private:
         return kACacheNone;
     }
 
+    __aicore__ inline void AcquireScalarOutput() {
+        // A preceding vector row/segment may still be reading this queue slot
+        // in its output Cast. Only the V->S transition needs this fence.
+        if (vectorOutputPending) {
+            SyncVToS();
+            vectorOutputPending = false;
+        }
+    }
+
+    // Scalar results are already rounded to half; write their exact bytes
+    // without a second vector conversion or shared half staging buffer.
+    __aicore__ inline void StoreScalarHalf(uint64_t off, uint32_t count,
+                                           AscendC::LocalTensor<half> &values) {
+        SyncSToMte3();
+        AscendC::DataCopyExtParams params{1, static_cast<uint32_t>(count * sizeof(half)), 0, 0, 0};
+        AscendC::DataCopyPad(csrValuesGm[off], values, params);
+        SyncMte3ToS();
+    }
+
     // Cast the fp32 results back to fp16 (with saturation) and write them out.
     __aicore__ inline void StoreRow16(uint64_t rowOff, uint32_t rowNnz,
-                                      AscendC::LocalTensor<float> &yOut) {
+                                      AscendC::LocalTensor<float> &yOut,
+                                      bool scalarProducer = true) {
         AscendC::LocalTensor<half> hBuf = halfBuf.Get<half>();
+        if (scalarProducer) {
+            SyncSToV();
+        }
         AscendC::Cast<half, float>(hBuf, yOut, AscendC::RoundMode::CAST_RINT, rowNnz);
-        AscendC::PipeBarrier<PIPE_V>();
+        SyncVToMte3();
         AscendC::DataCopyExtParams p{1, static_cast<uint32_t>(rowNnz * sizeof(half)), 0, 0, 0};
         AscendC::DataCopyPad(csrValuesGm[rowOff], hBuf, p);
-        AscendC::PipeBarrier<PIPE_MTE3>();
+        SyncMte3ToMte2();
+        SyncMte3ToV();
+        vectorOutputPending = true;
     }
 
     __aicore__ inline void ProcessRow(uint32_t row) {
@@ -361,15 +324,113 @@ private:
         const uint32_t aStride = aContig ? 1u : ldx;
 
         const int aCache = LoadARow16(aOff, aStride);
-        for (uint32_t segBase = 0; segBase < rowNnz; segBase += kOutStageCap) {
-            const uint32_t segNnz = MinU32(rowNnz - segBase, kOutStageCap);
-            ProcessRowSegment(rowOff + segBase, segNnz, aOff, aStride, aCache);
+        const uint32_t segCap = (alphaValue == 0.0f || (K <= kBlockLen && rowNnz >= kVectorMinNnz))
+                                    ? kVectorSegmentCap : kOutStageCap;
+        for (uint32_t segBase = 0; segBase < rowNnz; segBase += segCap) {
+            const uint32_t segNnz = MinU32(rowNnz - segBase, segCap);
+            if (segCap == kVectorSegmentCap) {
+                ProcessVectorSegment(rowOff + segBase, segNnz, aOff, aStride, aCache);
+            } else {
+                ProcessRowSegment(rowOff + segBase, segNnz, aOff, aStride, aCache);
+            }
         }
+    }
+
+    __aicore__ inline void InitDotOffsets(uint32_t count) {
+        const uint32_t needed = AlignUp(count, kElemPerRep);
+        if (needed <= dotOffsetsCount) {
+            return;
+        }
+        AscendC::LocalTensor<int32_t> offsets = dotOffsetBuf.Get<int32_t>();
+        AscendC::CreateVecIndex<int32_t>(offsets, 0, needed);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Muls(offsets, offsets, static_cast<int32_t>(kDmaAlignBytes),
+                      static_cast<int32_t>(needed));
+        AscendC::PipeBarrier<PIPE_V>();
+        dotOffsetsCount = needed;
+    }
+
+    // Preserve NaNs while applying the same finite/Inf saturation as Saturate.
+    __aicore__ inline void SaturateVector(AscendC::LocalTensor<float> &values, uint32_t count) {
+        const uint32_t aligned = AlignUp(count, kElemPerRep);
+        AscendC::LocalTensor<float> limits = dotStageBuf.Get<float>();
+        AscendC::LocalTensor<uint8_t> mask = clampMaskBuf.Get<uint8_t>();
+        AscendC::Duplicate(limits, FP16_MAX_VALUE, aligned);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Compare(mask, values, limits, AscendC::CMPMODE::GT, aligned);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Select(values, mask, limits, values, AscendC::SELMODE::VSEL_TENSOR_TENSOR_MODE, aligned);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Duplicate(limits, -FP16_MAX_VALUE, aligned);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Compare(mask, values, limits, AscendC::CMPMODE::LT, aligned);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Select(values, mask, limits, values, AscendC::SELMODE::VSEL_TENSOR_TENSOR_MODE, aligned);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void ProcessVectorSegment(uint64_t segOff, uint32_t segNnz,
+                                                uint64_t aOff, uint32_t aStride, int aCache) {
+        if (alphaValue != 0.0f) {
+            InitDotOffsets(segNnz);
+        }
+        AscendC::LocalTensor<float> csrIn = inQueueCsr.AllocTensor<float>();
+        AscendC::LocalTensor<int32_t> colInd = colIndBuf.Get<int32_t>();
+        LoadRowStage(segOff, segNnz, csrIn, colInd, false, alphaValue != 0.0f);
+        inQueueCsr.EnQue(csrIn);
+        AscendC::LocalTensor<float> csrStage = inQueueCsr.DeQue<float>();
+        AscendC::LocalTensor<float> yStage = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> dots = dotStageBuf.Get<float>();
+        if (alphaValue == 0.0f) {
+            AscendC::Duplicate(yStage, 0.0f, AlignUp(segNnz, kAlign));
+            AscendC::PipeBarrier<PIPE_V>();
+        } else {
+            AscendC::LocalTensor<float> a = aRowBuf.Get<float>();
+            AscendC::LocalTensor<float> b = bColBuf.Get<float>();
+            AscendC::LocalTensor<float> product = mulBuf.Get<float>();
+            AscendC::LocalTensor<float> temp = reduceTmpBuf.Get<float>();
+            for (uint32_t j = 0; j < segNnz; ++j) {
+                const int32_t col = colInd.GetValue(j);
+                AscendC::LocalTensor<float> result = dots[j * kAlign];
+                if (col < 0 || static_cast<uint32_t>(col) >= colCount) {
+                    AscendC::Duplicate(result, 0.0f, kAlign);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    continue;
+                }
+                const uint64_t bOff = bContig ? static_cast<uint64_t>(col) * ldy
+                                              : static_cast<uint64_t>(col);
+                // The reverse fence only protects half staging. The next DMA
+                // can overlap this dot's float vector computation.
+                Gather16(b, matBGm, bOff, bContig ? 1u : ldy, K);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Mul(product, a, b, K);
+                AscendC::PipeBarrier<PIPE_V>();
+                ReduceDot16(result, product, temp);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            AscendC::LocalTensor<uint32_t> offsets = dotOffsetBuf.Get<int32_t>().ReinterpretCast<uint32_t>();
+            AscendC::Gather<float>(yStage, dots, offsets, 0, segNnz);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Muls(yStage, yStage, alphaValue, segNnz);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        if (betaValue != 0.0f) {
+            AscendC::Axpy<float, float>(yStage, csrStage, betaValue, segNnz);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        SaturateVector(yStage, segNnz);
+        inQueueCsr.FreeTensor(csrStage);
+        StoreRow16(segOff, segNnz, yStage, false);
+        outQueueY.FreeTensor(yStage);
     }
 
     // Process one segment (up to kOutStageCap nonzeros) of a row.
     __aicore__ inline void ProcessRowSegment(uint64_t segOff, uint32_t segNnz,
                                               uint64_t aOff, uint32_t aStride, int aCache) {
+        if (alphaValue == 0.0f || (K <= kBlockLen && segNnz >= kVectorMinNnz)) {
+            ProcessVectorSegment(segOff, segNnz, aOff, aStride, aCache);
+            return;
+        }
         AscendC::LocalTensor<float> csrIn = inQueueCsr.AllocTensor<float>();
         AscendC::LocalTensor<int32_t> colInd = colIndBuf.Get<int32_t>();
         LoadRowStage(segOff, segNnz, csrIn, colInd);
@@ -377,6 +438,8 @@ private:
         AscendC::LocalTensor<float> csrStage = inQueueCsr.DeQue<float>();
 
         AscendC::LocalTensor<float> yStage = outQueueY.AllocTensor<float>();
+        AcquireScalarOutput();
+        AscendC::LocalTensor<half> yHalf = yStage.ReinterpretCast<half>();
         for (uint32_t i = 0; i < segNnz; ++i) {
             const int32_t col = colInd.GetValue(i);
             float dot = 0.0f;
@@ -385,16 +448,23 @@ private:
                                               : static_cast<uint64_t>(col);
                 dot = DotProduct(aOff, aStride, bOff, bContig ? 1u : ldy, aCache);
             }
-            yStage.SetValue(i, Saturate(alphaValue * dot + betaValue * csrStage.GetValue(i)));
+            const float cv = (betaValue != 0.0f) ? csrStage.GetValue(i) : 0.0f;
+            yHalf.SetValue(i, static_cast<half>(Saturate(alphaValue * dot + betaValue * cv)));
         }
         inQueueCsr.FreeTensor(csrStage);
 
-        outQueueY.EnQue(yStage);
-        AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
-        StoreRow16(segOff, segNnz, yOut);
-        outQueueY.FreeTensor(yOut);
+        StoreScalarHalf(segOff, segNnz, yHalf);
+        outQueueY.FreeTensor(yStage);
     }
 
+    static constexpr uint32_t kFp16StrideChunk = 128;
+    static constexpr uint32_t kVectorSegmentCap = 512;
+    static constexpr uint32_t kVectorMinNnz = 8;
+    uint32_t dotOffsetsCount = 0;
+    bool vectorOutputPending = false;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> dotStageBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> dotOffsetBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> clampMaskBuf;
     AscendC::TPipe *pipe = nullptr;
     AscendC::TBuf<AscendC::TPosition::VECCALC> aRowBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> bColBuf;

@@ -249,15 +249,15 @@ aclsparseStatus_t SddmmValidateCommon(
 // Pick the core count. Tiny problems stay single-core to avoid launch overhead
 // dominating; huge-K shapes partition by nonzero instead of by row. The result is
 // always >= 1 so the caller's division by blockDim is safe.
-uint32_t SddmmSelectBlockDim(uint32_t totalRows, uint32_t nnz, uint32_t maxK, bool nnzPartition) {
-    const uint32_t aivNum = SddmmGetBlockDim();
+uint32_t SddmmSelectBlockDim(uint32_t totalRows, uint32_t nnz, uint32_t maxK,
+                              bool nnzPartition, bool isFp16, uint32_t aivNum) {
     const bool hugeK = (maxK > kKBlockLen);
     const uint64_t nnzKProduct = static_cast<uint64_t>(nnz) * maxK;
 
     uint32_t blockDim;
     if (nnzPartition) {
         blockDim = (aivNum < nnz) ? aivNum : nnz;
-    } else if (totalRows <= kSmallRowsThreshold && !hugeK && nnzKProduct < kNnzKMulticoreThreshold) {
+    } else if (!isFp16 && totalRows <= kSmallRowsThreshold && !hugeK && nnzKProduct < kNnzKMulticoreThreshold) {
         blockDim = 1;
     } else {
         blockDim = (aivNum < totalRows) ? aivNum : totalRows;
@@ -284,10 +284,16 @@ SddmmTilingData SddmmBuildTiling(
     const uint32_t totalRows = rowCount;
 
     const uint32_t maxK = (matACols > matARows) ? matACols : matARows;
-    const bool hugeK = (maxK > kKBlockLen);
     const bool isFp16 = (matX->valueType == ACL_FLOAT16);
-    const bool nnzPartition = hugeK && (nnz > totalRows) && !isFp16;
-    uint32_t blockDim = SddmmSelectBlockDim(totalRows, nnz, maxK, nnzPartition);
+    const uint32_t innerK = (opX == ACL_SPARSE_OP_NON_TRANSPOSE) ? matACols : matARows;
+    const uint32_t aivNum = SddmmGetBlockDim();
+    // A single-chunk FP16 row can expose one independent dot product per core
+    // when all nonzeros fit on the device and row partitioning leaves cores idle.
+    const bool fp16SingleWave = isFp16 && innerK == kKBlockLen &&
+                                totalRows < aivNum && nnz <= aivNum;
+    const bool nnzPartition = innerK >= kKBlockLen && (nnz > totalRows) &&
+                              (!isFp16 || fp16SingleWave);
+    uint32_t blockDim = SddmmSelectBlockDim(totalRows, nnz, maxK, nnzPartition, isFp16, aivNum);
     if (blockDim == 0) {
         blockDim = 1u;
     }

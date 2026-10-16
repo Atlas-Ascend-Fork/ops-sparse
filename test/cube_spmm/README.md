@@ -24,7 +24,8 @@ ops-sparse 仓库中的 **Cube SpMM** 算子实现了稀疏矩阵与稠密矩阵
 ├── test/cube_spmm
 │   ├── CMakeLists.txt          // 编译工程文件
 │   ├── README.md               // 说明文档
-│   └── cube_spmm_test.cpp      // 算子调用样例与精度测试
+│   └── arch22
+│       └── cube_spmm_test.cpp  // arch22 算子调用样例与精度测试
 ```
 
 源码实现位于：

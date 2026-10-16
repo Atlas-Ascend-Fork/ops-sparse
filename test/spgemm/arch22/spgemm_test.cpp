@@ -858,6 +858,124 @@ SpgemmRefCsr SpgemmMakeCsrOnes(int32_t cols,
     return m;
 }
 
+/** A 的三行分别覆盖 da=1、da=5 和 da=8 非等差段首。 */
+SpgemmRefCsr MakeBandLazyValuesA(aclDataType dt)
+{
+    SpgemmRefCsr a;
+    a.rows = 3;
+    a.cols = 10;
+    a.rowPtr = {0, 1, 6, 14};
+    a.colIdx = {0, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6, 8};
+    a.valRe = {0.5, -0.75, 1.25, 0.625, -1.5, 0.875,
+               0.25, -0.5, 1.0, 1.5, -0.25, 0.75, -1.25, 0.375};
+    a.valIm = {0.125, -0.25, 0.375, -0.125, 0.5, -0.375,
+               0.25, 0.125, -0.5, 0.375, -0.25, 0.5, -0.125, 0.25};
+    SpgemmQuantizeCsr(a, dt);
+    return a;
+}
+
+/** B 的各行采用一致的 Band 模式。 */
+SpgemmRefCsr MakeBandLazyValuesB(aclDataType dt)
+{
+    SpgemmRefCsr b;
+    b.rows = 10;
+    b.cols = 32;
+    b.rowPtr.push_back(0);
+    for (int32_t k = 0; k < b.rows; ++k) {
+        for (int32_t j = 0; j < 3; ++j) {
+            b.colIdx.push_back(k + 10 * j);
+            b.valRe.push_back(0.25 * (k + 1) + 0.5 * j);
+            b.valIm.push_back(0.125 * (j + 1) - 0.0625 * k);
+        }
+        b.rowPtr.push_back(static_cast<int32_t>(b.colIdx.size()));
+    }
+    SpgemmQuantizeCsr(b, dt);
+    return b;
+}
+
+/** beta 非零时参与累加的 C 输入。 */
+SpgemmRefCsr MakeBandLazyValuesCInput(aclDataType dt)
+{
+    SpgemmRefCsr cIn;
+    cIn.rows = 3;
+    cIn.cols = 32;
+    cIn.rowPtr = {0, 2, 4, 6};
+    cIn.colIdx = {1, 31, 2, 30, 3, 29};
+    cIn.valRe = {0.5, -0.25, 0.75, -0.5, 0.125, 1.0};
+    cIn.valIm = {-0.125, 0.25, -0.375, 0.5, 0.25, -0.5};
+
+    SpgemmQuantizeCsr(cIn, dt);
+    return cIn;
+}
+
+/**
+ * Band 值加载回归：同一 B 触发 uniform Band，A 分别覆盖 da=1、da=5 和
+ * complex64 da=8 段首非等差。后二者不能共享 C64 vector 发射资格，必须在
+ * 标量/General 回退前按需装入 A values。
+ */
+bool TestBandLazyValues(aclsparseHandle_t handle, aclDataType dt, bool betaNonZero)
+{
+    const SpgemmRefCsr a = MakeBandLazyValuesA(dt);
+    const SpgemmRefCsr b = MakeBandLazyValuesB(dt);
+    const SpgemmRefCsr cIn = MakeBandLazyValuesCInput(dt);
+    SpgemmTestScalars sc;
+    InitAlphaBetaScalars(sc, dt);
+    if (betaNonZero) {
+        sc.betaF[0] = 1.0f;
+        sc.betaH = (dt == ACL_BF16) ? SpgemmF32ToBf16Bits(1.0f) : SpgemmF32ToF16Bits(1.0f);
+    }
+
+    HostResult got;
+    const std::string tag = std::string("band-lazy-values/") + SpgemmDtypeName(dt) +
+                            (betaNonZero ? "/beta1" : "/beta0");
+    if (!RunSpgemmStages(handle, a, b, betaNonZero ? &cIn : nullptr, dt,
+                         ACL_SPARSE_SPGEMM_DEFAULT, sc.alpha, sc.beta, got, nullptr)) {
+        return false;
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0,
+                                               betaNonZero ? 1.0 : 0.0, 0.0,
+                                               betaNonZero ? &cIn : nullptr, dt == ACL_COMPLEX64);
+    if (!CompareResult(got, ref, dt, tag.c_str())) {
+        return false;
+    }
+    std::printf("  [ok] %-42s da={1,5,8-nonAP} nnz=%ld\n", tag.c_str(),
+                static_cast<long>(got.nnz));
+    return true;
+}
+
+/** A 命中空 B 行时，Band 不可用也必须跳过该段，四 dtype 均与参考一致。 */
+bool TestBandFallbackEmptyBRow(aclsparseHandle_t handle, aclDataType dt)
+{
+    const bool isComplex = (dt == ACL_COMPLEX64);
+    SpgemmRefCsr a;
+    a.rows = 1;
+    a.cols = 3;
+    a.rowPtr = {0, 3};
+    a.colIdx = {0, 1, 2};
+    a.valRe = {0.5, -1.0, 0.75};
+    a.valIm = {0.25, -0.125, 0.5};
+    SpgemmRefCsr b;
+    b.rows = 3;
+    b.cols = 8;
+    b.rowPtr = {0, 2, 2, 4};
+    b.colIdx = {0, 4, 2, 6};
+    b.valRe = {1.0, 0.5, -0.25, 0.75};
+    b.valIm = {0.25, -0.5, 0.125, 0.375};
+    SpgemmQuantizeCsr(a, dt);
+    SpgemmQuantizeCsr(b, dt);
+    SpgemmTestScalars sc;
+    InitAlphaBetaScalars(sc, dt);
+    HostResult got;
+    const std::string tag = std::string("band-fallback-empty-b/") + SpgemmDtypeName(dt);
+    if (!RunSpgemmStages(handle, a, b, nullptr, dt, ACL_SPARSE_SPGEMM_DEFAULT,
+                         sc.alpha, sc.beta, got, nullptr)) {
+        return false;
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 0.0, 0.0, nullptr,
+                                               isComplex);
+    return CompareResult(got, ref, dt, tag.c_str());
+}
+
 /**
  * complex64 向量化发射专项：用确定性伪随机复数值构造轮转行，
  * 验证复乘的交叉项（aIm·bIm、aIm·bRe）在非零虚部输入下正确。
@@ -2431,6 +2549,12 @@ TEST_F(SpGemmArch22Test, NoIntersection) {
 // ---- Rotational fast-path arithmetic check × 4 dtypes ----
 TEST_P(SpGemmArch22DtypeTest, RotationalNonArithmetic) {
     EXPECT_TRUE(TestRotationalNonArithmetic(s_handle_, GetParam().type));
+}
+
+TEST_P(SpGemmArch22DtypeTest, BandLazyValues) {
+    EXPECT_TRUE(TestBandLazyValues(s_handle_, GetParam().type, false));
+    EXPECT_TRUE(TestBandLazyValues(s_handle_, GetParam().type, true));
+    EXPECT_TRUE(TestBandFallbackEmptyBRow(s_handle_, GetParam().type));
 }
 
 TEST_P(SpGemmArch22DtypeTest, AlphaScalingFusedPath) {

@@ -13,18 +13,4 @@ if(NOT SOC_VERSION_LOWER MATCHES "^ascend910b")
     return()
 endif()
 
-add_executable(cube_spmm_test
-    cube_spmm_test.cpp
-)
-
-target_include_directories(cube_spmm_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/sparse/common
-    ${CMAKE_SOURCE_DIR}/sparse/cube_spmm/arch22
-    $ENV{LINUX_INCLUDE_PATH}
-)
-
-target_link_libraries(cube_spmm_test PRIVATE
-    ${OPS_SPARSE}
-    $ENV{EAGER_LIBRARY_PATH}/libascendcl.so
-)
+ops_sparse_add_test(cube_spmm ${OPS_SPARSE})

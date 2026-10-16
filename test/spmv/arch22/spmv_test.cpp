@@ -21,6 +21,7 @@
 #include <memory>
 #include <type_traits>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
@@ -125,7 +126,13 @@ struct bfloat16_t {
             float f;
             uint32_t u;
         } x = {f};
-        bits = static_cast<uint16_t>(x.u >> 16);
+        // Match CAST_ROUND: round to nearest, ties to even. Truncation here
+        // biased the CPU golden by one BF16 ULP, especially for large outputs.
+        if ((x.u & 0x7f800000u) == 0x7f800000u && (x.u & 0x007fffffu) != 0) {
+            bits = static_cast<uint16_t>((x.u >> 16) | 0x0040u);
+        } else {
+            bits = static_cast<uint16_t>((x.u + 0x7fffu + ((x.u >> 16) & 1u)) >> 16);
+        }
         return *this;
     }
 };
@@ -185,7 +192,7 @@ void GenerateCsr(uint32_t numRows, uint32_t numCols, float sparsity,
                  std::vector<int32_t> &csrRowPtr,
                  std::vector<int32_t> &csrColInd,
                  std::vector<T> &csrVal,
-                 float emptyRowProb = 0.0f) {
+                 float emptyRowProb = 0.0f, uint32_t seed = 0) {
     if (sparsity < 0.0f || sparsity > 1.0f) {
         std::cerr << "[ERROR] sparsity must be in [0, 1], got " << sparsity << "\n";
         return;
@@ -202,7 +209,7 @@ void GenerateCsr(uint32_t numRows, uint32_t numCols, float sparsity,
     csrColInd.reserve(expectedNNZ);
     csrVal.reserve(expectedNNZ);
 
-    std::mt19937 rng(static_cast<uint32_t>(
+    std::mt19937 rng(seed != 0 ? seed : static_cast<uint32_t>(
         std::chrono::steady_clock::now().time_since_epoch().count()));
 
     std::binomial_distribution<int> nnzDist(numCols, density);
@@ -274,17 +281,21 @@ std::vector<OutT> SpmvTransCpu(const std::vector<int32_t> &csrRowPtr,
                                const std::vector<OutT> &yVec,
                                uint32_t numRows, uint32_t numCols,
                                CompT alpha = static_cast<CompT>(1), CompT beta = static_cast<CompT>(0)) {
-    std::vector<OutT> z = yVec;
+    // Accumulate in computeType, matching the API contract. Narrow output
+    // storage must not round every intermediate contribution.
+    std::vector<CompT> accum(numCols);
     for (uint32_t j = 0; j < numCols; ++j)
-        z[j] = static_cast<OutT>(static_cast<CompT>(beta) * static_cast<CompT>(z[j]));
+        accum[j] = beta * static_cast<CompT>(yVec[j]);
     for (uint32_t i = 0; i < numRows; ++i) {
-        CompT xVal = static_cast<CompT>(alpha) * static_cast<CompT>(xVec[i]);
+        CompT xVal = alpha * static_cast<CompT>(xVec[i]);
         if (xVal == static_cast<CompT>(0))
             continue;
         for (uint32_t k = csrRowPtr[i]; k < csrRowPtr[i + 1]; ++k)
-            z[csrColInd[k]] = static_cast<OutT>(
-                static_cast<CompT>(z[csrColInd[k]]) + xVal * static_cast<CompT>(csrVal[k]));
+            accum[csrColInd[k]] += xVal * static_cast<CompT>(csrVal[k]);
     }
+    std::vector<OutT> z(numCols);
+    for (uint32_t j = 0; j < numCols; ++j)
+        z[j] = static_cast<OutT>(accum[j]);
     return z;
 }
 
@@ -478,6 +489,105 @@ aclDataType AclTypeOf<half>() { return ACL_FLOAT16; }
 template <>
 aclDataType AclTypeOf<bfloat16_t>() { return ACL_BF16; }
 
+template <typename ValT, typename OutT>
+struct SpmvTestInput {
+    std::vector<ValT> csrVal;
+    std::vector<int32_t> csrColInd;
+    std::vector<int32_t> csrRowPtr;
+    std::vector<ValT> xVec;
+    std::vector<OutT> yVec;
+    uint32_t xSize = 0;
+    uint32_t ySize = 0;
+};
+
+template <typename ValT>
+int PrepareCsrInput(size_t M, size_t N, float sparsity, int fixedSyncInput,
+                    uint32_t seed, std::vector<int32_t> *csrRowPtr,
+                    std::vector<int32_t> *csrColInd, std::vector<ValT> *csrVal)
+{
+    if (fixedSyncInput == 2) {
+        if (N < 2) {
+            LOG_PRINT("fixed Sync regression requires N >= 2; rejecting invalid M=%zu, N=%zu\n",
+                      M, N);
+            return ACL_ERROR_INVALID_PARAM;
+        }
+        csrRowPtr->resize(M + 1);
+        csrColInd->resize(M * 2);
+        csrVal->assign(M * 2, static_cast<ValT>(0.125f));
+        for (size_t i = 0; i <= M; ++i)
+            (*csrRowPtr)[i] = static_cast<int32_t>(2 * i);
+        for (size_t i = 0; i < M; ++i) {
+            (*csrColInd)[2 * i] = 0;
+            (*csrColInd)[2 * i + 1] = 1;
+        }
+        return ACL_SUCCESS;
+    }
+    if (fixedSyncInput != 0) {
+        if (N == 0) {
+            LOG_PRINT("fixed Sync regression requires N >= 1; rejecting invalid M=%zu, N=%zu\n",
+                      M, N);
+            return ACL_ERROR_INVALID_PARAM;
+        }
+        csrRowPtr->resize(M + 1);
+        csrColInd->resize(M);
+        csrVal->assign(M, static_cast<ValT>(2));
+        for (size_t i = 0; i <= M; ++i)
+            (*csrRowPtr)[i] = static_cast<int32_t>(i);
+        for (size_t i = 0; i < M; ++i)
+            (*csrColInd)[i] = static_cast<int32_t>((i + 1) % N);
+        return ACL_SUCCESS;
+    }
+    GenerateCsr<ValT>(M, N, sparsity, *csrRowPtr, *csrColInd, *csrVal, 0.0f, seed);
+    return ACL_SUCCESS;
+}
+
+template <typename ValT, typename OutT>
+void PrepareDenseInput(size_t M, size_t N, bool transpose, int fixedSyncInput,
+                       uint32_t seed, SpmvTestInput<ValT, OutT> *input)
+{
+    input->xSize = transpose ? static_cast<uint32_t>(M) : static_cast<uint32_t>(N);
+    input->ySize = transpose ? static_cast<uint32_t>(N) : static_cast<uint32_t>(M);
+    if (fixedSyncInput != 0) {
+        input->xVec.resize(input->xSize);
+        for (uint32_t i = 0; i < input->xSize; ++i)
+            input->xVec[i] = static_cast<ValT>(fixedSyncInput == 2 ? 1 : i % 7 + 1);
+        input->yVec.assign(input->ySize, static_cast<OutT>(5));
+        return;
+    }
+    std::mt19937 rng(seed != 0 ? seed : static_cast<uint32_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    GenerateDenseVector<ValT>(input->xSize, input->xVec, rng);
+    GenerateDenseVector<OutT>(input->ySize, input->yVec, rng);
+}
+
+template <typename CompT, typename ValT, typename OutT>
+int ExecuteAndVerifySpmv(aclsparseHandle_t handle, aclsparseOperation_t op,
+                         const void *alpha, aclsparseSpMatDescr_t matDesc,
+                         aclsparseDnVecDescr_t vecXDesc, const void *beta,
+                         aclsparseDnVecDescr_t vecYDesc, aclDataType compDt,
+                         aclsparseSpMVAlg_t alg, void *externalBuffer,
+                         aclrtStream stream, uint8_t *yDevice, uint8_t *yHost,
+                         size_t yBytes, const std::vector<OutT> &expected,
+                         bool productsInValT, int fixedSyncInput, float &mare,
+                         float &mere, std::string *worstInfo)
+{
+    aclsparseStatus_t sparseRet = aclsparseSpMV(handle, op, alpha, matDesc, vecXDesc,
+                                                 beta, vecYDesc, compDt, alg, externalBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return sparseRet);
+    const int aclRet = aclrtSynchronizeStream(stream);
+    CHECK_RET(aclRet == ACL_SUCCESS,
+              LOG_PRINT("[ERROR] aclsparseSpMV: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
+              return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+    const int copyRet = aclrtMemcpy(yHost, yBytes, yDevice, yBytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    CHECK_RET(copyRet == ACL_SUCCESS, return copyRet);
+    std::vector<OutT> result(reinterpret_cast<OutT *>(yHost),
+                             reinterpret_cast<OutT *>(yHost + yBytes));
+    const MixedToleranceParams tolerance = fixedSyncInput
+        ? MixedToleranceParams{0.0f, 0.0f, 0.0f, 1.0f}
+        : (productsInValT ? GetMixedToleranceParams<ValT>() : GetMixedToleranceParams<OutT>());
+    return Verification<OutT>(expected, result, mare, mere, tolerance, worstInfo);
+}
+
 // ===================== 主测试函数 =====================
 
 /**
@@ -494,6 +604,7 @@ int Test(const size_t M, const size_t N, const float sparsity,
          std::string *worstInfo = nullptr,
          aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT,
          bool productsInValT = false,
+         int fixedSyncInput = 0, uint32_t seed = 0, bool useHandleWorkspace = false,
          bool deviceScalarStreamOrder = false) {
     const char *label = transpose ? " Transpose"
                                   : (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE ? " Cube" : "");
@@ -503,20 +614,19 @@ int Test(const size_t M, const size_t N, const float sparsity,
               << " alpha = " << alphaVal
               << " beta = " << betaVal << "====\n";
 
-    std::vector<ValT> csrVal;
-    std::vector<int32_t> csrColInd, csrRowPtr;
-    GenerateCsr<ValT>(M, N, sparsity, csrRowPtr, csrColInd, csrVal);
+    SpmvTestInput<ValT, OutT> input;
+    int inputRet = PrepareCsrInput<ValT>(M, N, sparsity, fixedSyncInput, seed,
+                                         &input.csrRowPtr, &input.csrColInd, &input.csrVal);
+    CHECK_RET(inputRet == ACL_SUCCESS, return inputRet);
+    PrepareDenseInput(M, N, transpose, fixedSyncInput, seed, &input);
 
-    uint32_t xSize = transpose ? static_cast<uint32_t>(M) : static_cast<uint32_t>(N);
-    uint32_t ySize = transpose ? static_cast<uint32_t>(N) : static_cast<uint32_t>(M);
-
-    std::vector<ValT> xVec;
-    std::vector<OutT> yVec; {
-        std::mt19937 rng(static_cast<uint32_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
-        GenerateDenseVector<ValT>(xSize, xVec, rng);
-        GenerateDenseVector<OutT>(ySize, yVec, rng);
-    }
+    const auto &csrVal = input.csrVal;
+    const auto &csrColInd = input.csrColInd;
+    const auto &csrRowPtr = input.csrRowPtr;
+    const auto &xVec = input.xVec;
+    const auto &yVec = input.yVec;
+    const uint32_t xSize = input.xSize;
+    const uint32_t ySize = input.ySize;
 
     std::vector<OutT> output_cpu;
     if (transpose)
@@ -601,7 +711,7 @@ int Test(const size_t M, const size_t N, const float sparsity,
               return sparseRet);
 
     void *externalBuffer = nullptr;
-    if (bufferSize > 0) {
+    if (bufferSize > 0 && !useHandleWorkspace) {
         aclRet = aclrtMalloc(&externalBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
         CHECK_RET(aclRet == ACL_SUCCESS,
                   LOG_PRINT("[ERROR] externalBuffer aclrtMalloc failed, ret=%d\n", aclRet);
@@ -654,26 +764,10 @@ int Test(const size_t M, const size_t N, const float sparsity,
         betaPtr = deviceBeta;
     }
 
-    sparseRet = aclsparseSpMV(spHandle, op, alphaPtr, matDesc, vecXDesc,
-                              betaPtr, vecYDesc, compDt,
-                              alg, externalBuffer);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return sparseRet);
-
-    // ==================== 同步 ====================
-    aclRet = aclrtSynchronizeStream(stream);
-    CHECK_RET(aclRet == ACL_SUCCESS,
-                LOG_PRINT("[ERROR] aclsparseSpMV: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
-                return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-
-    aclRet = aclrtMemcpy(yHost, totalYByteSize, yDevice, totalYByteSize, ACL_MEMCPY_DEVICE_TO_HOST);
-    CHECK_RET(aclRet == ACL_SUCCESS, return aclRet);
-    std::vector<OutT> yResult;
-    yResult.assign((OutT *)yHost, (OutT *)(yHost + totalYByteSize));
-
-    // 乘积在输入精度下计算时（cube 版 fp16），按输入类型而非输出类型取容差。
-    const MixedToleranceParams toleranceParams =
-        productsInValT ? GetMixedToleranceParams<ValT>() : GetMixedToleranceParams<OutT>();
-    int verifyRet = Verification<OutT>(output_cpu, yResult, MARE, MERE, toleranceParams, worstInfo);
+    const int verifyRet = ExecuteAndVerifySpmv<CompT, ValT, OutT>(
+        spHandle, op, alphaPtr, matDesc, vecXDesc, betaPtr, vecYDesc, compDt, alg,
+        externalBuffer, stream, yDevice, yHost, totalYByteSize, output_cpu,
+        productsInValT, fixedSyncInput, MARE, MERE, worstInfo);
 
     aclsparseDestroySpMat(matDesc);
     aclsparseDestroyDnVec(vecXDesc);
@@ -700,11 +794,13 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
                 TestStats &stats, aclrtStream stream, const std::string &tag = "",
                 aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT,
                 bool productsInValT = false,
+                int fixedSyncInput = 0, uint32_t seed = 0, bool useHandleWorkspace = false,
                 bool deviceScalarStreamOrder = false) {
     float MARE = 0, MERE = 0;
     std::string worstInfo;
     int ret = Test<CompT, ValT, OutT>(M, N, sparsity, alpha, beta, transpose, MARE, MERE, stream,
-                                      &worstInfo, alg, productsInValT, deviceScalarStreamOrder);
+                                      &worstInfo, alg, productsInValT, fixedSyncInput, seed,
+                                      useHandleWorkspace, deviceScalarStreamOrder);
 
     stats.total++;
     if (ret == 0) {
@@ -761,6 +857,89 @@ void RunRandomParams(int numCases, const std::string &tagPrefix, bool transpose,
     }
 }
 
+void RunFixedSyncRegression(TestStats &stats, aclrtStream stream) {
+    std::cout << "\n======== Fixed SpMV Pipeline Sync Regression ========\n";
+    for (int rep = 0; rep < 3; ++rep) {
+        for (size_t n : {size_t{32}, size_t{512}}) {
+            for (bool transpose : {false, true}) {
+                for (int beta : {0, 1, 2}) {
+                    const std::string tag = "sync-fixed-n" + std::to_string(n) +
+                                            "-trans" + std::to_string(transpose) +
+                                            "-beta" + std::to_string(beta) +
+                                            "-rep" + std::to_string(rep);
+                    RunAndTrack<float>(n, n, 0.0f, 1.0f, static_cast<float>(beta), transpose,
+                                       stats, stream, tag + "-f32", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                    RunAndTrack<int32_t>(n, n, 0.0f, 1, beta, transpose,
+                                         stats, stream, tag + "-i32", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                    RunAndTrack<float, half, float>(n, n, 0.0f, 1.0f, static_cast<float>(beta), transpose,
+                                                     stats, stream, tag + "-f16-f32", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                    RunAndTrack<float, bfloat16_t, float>(n, n, 0.0f, 1.0f, static_cast<float>(beta), transpose,
+                                                           stats, stream, tag + "-bf16-f32", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                    RunAndTrack<float, int32_t, float>(n, n, 0.0f, 1.0f, static_cast<float>(beta), transpose,
+                                                        stats, stream, tag + "-i32-f32", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                    RunAndTrack<float, half, half>(n, n, 0.0f, 1.0f, static_cast<float>(beta), transpose,
+                                                    stats, stream, tag + "-f16-f16", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                    RunAndTrack<float, bfloat16_t, bfloat16_t>(n, n, 0.0f, 1.0f, static_cast<float>(beta), transpose,
+                                                                stats, stream, tag + "-bf16-bf16", ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                }
+            }
+        }
+    }
+}
+
+void RunFixedSyncInvalidShapeRegression(TestStats &stats, aclrtStream stream) {
+    std::cout << "\n======== Fixed SpMV Invalid Shape Regression ========\n";
+    float mare = 0.0f;
+    float mere = 0.0f;
+    const int ret = Test<float>(1, 0, 0.0f, 1.0f, 0.0f, false, mare, mere,
+                                stream, nullptr, ACL_SPARSE_SPMV_ALG_DEFAULT,
+                                false, 1);
+    ++stats.total;
+    if (ret == ACL_ERROR_INVALID_PARAM) {
+        ++stats.passed;
+        return;
+    }
+    ++stats.failed;
+    stats.failedCases.emplace_back("fixed-sync-n0 must be rejected before CSR generation");
+}
+
+void RunTransposePrecisionRegression(TestStats &stats, aclrtStream stream) {
+    for (float beta : {0.0f, 1.0f, 2.0f}) {
+        RunAndTrack<float>(512, 513, 1.0f, 1, beta, true, stats, stream,
+            "transpose-empty-f32");
+        RunAndTrack<float, half, half>(512, 513, 1.0f, 1, beta, true, stats, stream,
+            "transpose-empty-f16");
+        RunAndTrack<float, bfloat16_t, bfloat16_t>(512, 513, 1.0f, 1, beta, true, stats, stream,
+            "transpose-empty-bf16");
+    }
+
+    RunAndTrack<float, half, half>(512, 512, 0, 1, 2, true, stats, stream,
+        "transpose-handle-workspace-f16", ACL_SPARSE_SPMV_ALG_DEFAULT, false, 2, 0, true);
+    RunAndTrack<float, bfloat16_t, bfloat16_t>(512, 512, 0, 1, 2, true, stats, stream,
+        "transpose-handle-workspace-bf16", ACL_SPARSE_SPMV_ALG_DEFAULT, false, 2, 0, true);
+
+    for (int rep = 0; rep < 3; ++rep) {
+        for (float beta : {0.0f, 1.0f, 2.0f}) {
+            const std::string tag = "transpose-collision-rep" + std::to_string(rep);
+            RunAndTrack<float>(512, 512, 0, 1, beta, true, stats, stream, tag,
+                               ACL_SPARSE_SPMV_ALG_DEFAULT, false, 2);
+            RunAndTrack<float, half, half>(512, 512, 0, 1, beta, true, stats, stream, tag,
+                                          ACL_SPARSE_SPMV_ALG_DEFAULT, false, 2);
+            RunAndTrack<float, bfloat16_t, bfloat16_t>(512, 512, 0, 1, beta, true, stats, stream, tag,
+                                                     ACL_SPARSE_SPMV_ALG_DEFAULT, false, 2);
+        }
+        for (size_t n : {size_t{512}, size_t{4096}}) {
+            const float sparsity = 1.0f - 16.0f / n;
+            for (float beta : {0.0f, 2.0f}) {
+                RunAndTrack<float, half, half>(n, n, sparsity, 1, beta, true, stats, stream,
+                    "transpose-seed12345-f16", ACL_SPARSE_SPMV_ALG_DEFAULT, false, 0, 12345);
+                RunAndTrack<float, bfloat16_t, bfloat16_t>(n, n, sparsity, 1, beta, true, stats, stream,
+                    "transpose-seed12345-bf16", ACL_SPARSE_SPMV_ALG_DEFAULT, false, 0, 12345);
+            }
+        }
+    }
+}
+
 // ===================== main =====================
 
 int main(int32_t /*argc*/, char * /*argv*/[]) {
@@ -773,6 +952,17 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     }
 
     TestStats stats;
+    RunFixedSyncRegression(stats, stream);
+    RunFixedSyncInvalidShapeRegression(stats, stream);
+    RunTransposePrecisionRegression(stats, stream);
+    if (const char *syncOnly = std::getenv("SPMV_TEST_ONLY_SYNC");
+        syncOnly != nullptr && std::string(syncOnly) == "1") {
+        std::cout << "Sync regression summary: total=" << stats.total
+                  << " passed=" << stats.passed
+                  << " failed=" << stats.failed << "\n";
+        Finalize(deviceId, stream);
+        return stats.failed == 0 ? 0 : 1;
+    }
 
     std::cout << "\n"
               << "###########################################################\n"
@@ -809,10 +999,10 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     std::cout << "\n======== Float Cube Algorithm Tests ========\n";
     constexpr aclsparseSpMVAlg_t kCube = ACL_SPARSE_SPMV_CSR_ALG_CUBE;
     RunAndTrack<float>(1, 1, 0.0f, 2.0f, 1.0f, false, stats, stream,
-                       "device-scalar-stream-order-float-cube", kCube, false, true);
+                       "device-scalar-stream-order-float-cube", kCube, false, 0, 0, false, true);
     RunAndTrack<int32_t>(1, 1, 0.0f, 2, 1, false, stats, stream,
                          "device-scalar-stream-order-int32-vector",
-                         ACL_SPARSE_SPMV_ALG_DEFAULT, false, true);
+                         ACL_SPARSE_SPMV_ALG_DEFAULT, false, 0, 0, false, true);
     RunAndTrack<float>(512, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "cube-default", kCube);
     RunAndTrack<float>(512, 1024, 0.0f, 1.0f, 0.0f, false, stats, stream, "cube-dense", kCube);
     RunAndTrack<float>(512, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "cube-sparse", kCube);

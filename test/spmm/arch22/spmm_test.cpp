@@ -363,8 +363,11 @@ static double prepare_host_data_and_cpu_baseline(
     uint64_t M, uint64_t K, uint64_t N, uint64_t nnz, CsrDist dist,
     float alpha, float beta,
     int **hA_offsets, int **hA_indices, float **hA_values,
-    float **hB, float **hC, float **hY, float **hYBase)
+    float **hB, float **hC, float **hY, float **hYBase, int cpu_repeat)
 {
+    if (cpu_repeat <= 0) {
+        cpu_repeat = 1;
+    }
     if (!allocate_test_buffers(M, K, N, nnz,
             hA_offsets, hA_indices, hA_values, hB, hC, hY, hYBase)) {
         return 0.0;
@@ -382,20 +385,32 @@ static double prepare_host_data_and_cpu_baseline(
         (*hC)[i] = 0.01f * (i % 100);
     }
 
-    const int repeat = 10;
+    // A single host calculation is sufficient to produce the golden output.
+    // Repeating it only makes the displayed host benchmark less noisy; it does
+    // not increase accuracy coverage and made the default presmoke exceed its
+    // time budget on wide matrices.  Keep the old ten-run benchmark available
+    // explicitly for performance investigation.
     struct timespec ts0, ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts0);
-    for (int r = 0; r < repeat; r++) {
+    for (int r = 0; r < cpu_repeat; r++) {
         spmm_csr_cpu(M, K, N, *hA_offsets, *hA_indices, *hA_values,
                      *hB, *hC, *hYBase, alpha, beta);
     }
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    return ((ts1.tv_sec - ts0.tv_sec) * 1e3 + (ts1.tv_nsec - ts0.tv_nsec) / 1e6) / repeat;
+    const double elapsed_ms = (ts1.tv_sec - ts0.tv_sec) * 1e3 +
+                              (ts1.tv_nsec - ts0.tv_nsec) / 1e6;
+    if (cpu_repeat > 0) {
+        return elapsed_ms / cpu_repeat;
+    }
+    return elapsed_ms;
 }
 
 int run_spmm_test(uint64_t M, uint64_t K, uint64_t N, uint64_t nnz,
-    float alpha, float beta, CsrDist dist, aclrtStream stream)
+    float alpha, float beta, CsrDist dist, aclrtStream stream, int cpu_repeat)
 {
+    if (cpu_repeat <= 0) {
+        cpu_repeat = 1;
+    }
     const char *dist_name = (dist == DIST_POWERLAW) ? "powerlaw" : "uniform";
     printf("--- Test: M=%lu K=%lu N=%lu nnz=%lu alpha=%.1f beta=%.1f dist=%s ---\n",
            M, K, N, nnz, alpha, beta, dist_name);
@@ -409,15 +424,17 @@ int run_spmm_test(uint64_t M, uint64_t K, uint64_t N, uint64_t nnz,
     float *hA_values, *hB, *hC, *hY, *hYBase;
     double cpu_ms = prepare_host_data_and_cpu_baseline(M, K, N, nnz, dist,
         alpha, beta, &hA_offsets, &hA_indices, &hA_values,
-        &hB, &hC, &hY, &hYBase);
+        &hB, &hC, &hY, &hYBase, cpu_repeat);
 
     int error_count = 0;
     double npu_ms = run_npu_spmm_benchmark(M, K, N, nnz, alpha, beta,
         hA_offsets, hA_indices, hA_values, hB, hC, hY, hYBase,
         stream, &error_count);
 
-    double speedup = (npu_ms > 0.0) ? (cpu_ms / npu_ms) : 0.0;
-    printf("  CPU: %.3f ms  |  NPU: %.3f ms  |  Speedup: %.2fx\n", cpu_ms, npu_ms, speedup);
+    double relative_time = (npu_ms > 0.0) ? (cpu_ms / npu_ms) : 0.0;
+    printf("  CPU reference (%d run%s): %.3f ms  |  NPU benchmark (10 runs): %.3f ms"
+           "  |  Relative time: %.2fx\n",
+           cpu_repeat, cpu_repeat == 1 ? "" : "s", cpu_ms, npu_ms, relative_time);
     if (error_count > 0) {
         printf("  [Failed] test case accuracy is verification failed.\r\n\n");
     } else {
@@ -645,13 +662,52 @@ static const TestCaseParam kTestCases[] = {
     {8191, 32767, 8, 5367889, 3.3f, -2.4f, DIST_UNIFORM},
 };
 
-static int run_all_test_cases(aclrtStream stream)
+// The default suite is deliberately small enough for CI presmoke while still
+// retaining representative boundary, shape, distribution, coefficient and
+// large-workload coverage.  Set SPMM_TEST_FULL=1 to run every case in
+// kTestCases, including the exhaustive performance-stress cases.
+static const TestCaseParam kPresmokeCases[] = {
+    // Small and scalar boundaries.
+    {16, 16, 16, 128, 1.0f, 1.0f, DIST_UNIFORM},
+    {1, 1, 1, 1, 1.0f, 0.0f, DIST_UNIFORM},
+    {1, 16, 1, 8, 1.0f, 0.0f, DIST_UNIFORM},
+    {64, 64, 1, 32, 1.0f, 0.0f, DIST_UNIFORM},
+
+    // Coefficients and non-square / non-aligned shapes.
+    {512, 512, 128, 26214, 2.0f, 0.5f, DIST_UNIFORM},
+    {1024, 1024, 128, 52428, 0.0f, 1.0f, DIST_UNIFORM},
+    {1024, 1024, 128, 52428, -1.0f, 1.0f, DIST_UNIFORM},
+    {1024, 1024, 128, 52428, 2.5f, 1.5f, DIST_UNIFORM},
+    {256, 128, 128, 1638, 1.0f, 0.0f, DIST_UNIFORM},
+    {256, 128, 128, 1638, 1.0f, 0.0f, DIST_POWERLAW},
+    {4095, 2047, 255, 419123, 1.0f, 0.0f, DIST_UNIFORM},
+    {4095, 2047, 255, 419123, 1.0f, 0.0f, DIST_POWERLAW},
+    {2048, 128, 1024, 5242, 2.1f, -0.8f, DIST_POWERLAW},
+    {1023, 1024, 32, 1047, 3.2f, 2.9f, DIST_UNIFORM},
+    {4096, 4096, 128, 1, 1.0f, 0.0f, DIST_UNIFORM},
+    {4096, 4096, 128, 10, 1.0f, 0.0f, DIST_UNIFORM},
+
+    // Representative large workloads: both CSR distributions, wide output,
+    // high row count and dense-per-row stress.
+    {4096, 4096, 256, 1048576, 1.0f, 0.0f, DIST_UNIFORM},
+    {4096, 4096, 256, 1048576, 1.0f, 0.0f, DIST_POWERLAW},
+    {65536, 65536, 64, 16777216, 1.0f, 0.0f, DIST_UNIFORM},
+    {65536, 65536, 64, 16777216, 1.0f, 0.0f, DIST_POWERLAW},
+    {4096, 4096, 4096, 1048576, 1.0f, 0.0f, DIST_UNIFORM},
+    {4096, 4096, 4096, 1048576, 1.0f, 0.0f, DIST_POWERLAW},
+    {4096, 4096, 256, 8388608, 1.0f, 0.0f, DIST_UNIFORM},
+    {4096, 4096, 256, 8388608, 1.0f, 0.0f, DIST_POWERLAW},
+};
+
+static int run_test_cases(const TestCaseParam *test_cases, size_t case_count,
+    const char *suite_name, aclrtStream stream, int cpu_repeat)
 {
+    printf("========== SpMM %s suite: %zu cases ==========\n", suite_name, case_count);
     int fail = 0;
-    for (size_t i = 0; i < sizeof(kTestCases) / sizeof(kTestCases[0]); i++) {
-        const TestCaseParam &tc = kTestCases[i];
+    for (size_t i = 0; i < case_count; i++) {
+        const TestCaseParam &tc = test_cases[i];
         fail += run_spmm_test(tc.M, tc.K, tc.N, tc.nnz,
-            tc.alpha, tc.beta, tc.dist, stream);
+            tc.alpha, tc.beta, tc.dist, stream, cpu_repeat);
     }
     return fail;
 }
@@ -729,15 +785,36 @@ static int run_spmm_zero_dim_case(const char *name, uint64_t M, uint64_t K, uint
     return pass ? 0 : 1;
 }
 
-int main(void)
+// Read the process startup environment before ACL can create worker threads.
+// Pass the resulting values down explicitly; no runtime getenv calls are needed.
+static bool startup_option_enabled(char *const envp[], const char *name)
 {
+    if (envp == nullptr) {
+        return false;
+    }
+    const size_t name_length = strlen(name);
+    for (size_t i = 0; envp[i] != nullptr; ++i) {
+        if (strncmp(envp[i], name, name_length) == 0 && envp[i][name_length] == '=') {
+            return strcmp(envp[i] + name_length + 1, "1") == 0;
+        }
+    }
+    return false;
+}
+
+int main(int, char **, char **envp)
+{
+    const bool full_suite = startup_option_enabled(envp, "SPMM_TEST_FULL");
+    const int cpu_repeat = startup_option_enabled(envp, "SPMM_TEST_CPU_BENCHMARK") ? 10 : 1;
     int32_t deviceId = 0;
     aclrtStream stream = 0;
     CHECK_ACL(aclInit(NULL))
     CHECK_ACL(aclrtSetDevice(deviceId))
     CHECK_ACL(aclrtCreateStream(&stream))
 
-    int fail = run_all_test_cases(stream);
+    int fail = full_suite
+        ? run_test_cases(kTestCases, sizeof(kTestCases) / sizeof(kTestCases[0]), "full", stream, cpu_repeat)
+        : run_test_cases(kPresmokeCases, sizeof(kPresmokeCases) / sizeof(kPresmokeCases[0]),
+            "presmoke", stream, cpu_repeat);
     fail += run_spmm_zero_dim_case("zero_dim_m0", 0, 16, 8, stream);
     fail += run_spmm_zero_dim_case("zero_dim_k0", 8, 0, 8, stream);
     fail += run_spmm_zero_dim_case("zero_dim_n0", 8, 16, 0, stream);

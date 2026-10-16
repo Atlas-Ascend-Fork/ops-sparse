@@ -48,7 +48,6 @@ struct SpgemmArch22Context {
     float cachedBetaRe = 0.0f;
     float cachedBetaIm = 0.0f;
     uint32_t blockDim = 0;
-
     std::vector<int64_t> rowProducts;
     std::vector<int32_t> binEdge;
 

@@ -15,6 +15,70 @@
 #include "../spmv_tiling_data.h"
 
 constexpr uint32_t BUFFER_NUM = 1;
+constexpr uint32_t SPMV_ATOMIC_BATCH = 128;
+constexpr uint32_t SPMV_ATOMIC_ALIGNMENT = 32;
+
+// These helpers make the producer/consumer relationship explicit for temporary
+// UB buffers that cross hardware pipelines or are reused by another pipeline.
+// Reserve an ID for the complete Set/Wait pair, then release it.
+// Batching keeps this management outside the per-nonzero DMA loop.
+template <AscendC::HardEvent Event>
+__aicore__ inline void SpmvSyncEvent(AscendC::TPipe &pipe)
+{
+    event_t eventId = static_cast<event_t>(pipe.AllocEventID<Event>());
+    AscendC::SetFlag<Event>(eventId);
+    AscendC::WaitFlag<Event>(eventId);
+    pipe.ReleaseEventID<Event>(eventId);
+}
+
+// Same-type short rows use Scalar for immutable CSR/x/y reads and batch
+// independent row outputs. Each DMA source starts at a distinct 32-byte slot.
+template <typename T>
+__aicore__ inline void SpmvScalarRows(
+    AscendC::TPipe &pipe, AscendC::LocalTensor<T> batch,
+    AscendC::GlobalTensor<int32_t> &rowPtr, AscendC::GlobalTensor<int32_t> &columns,
+    AscendC::GlobalTensor<T> &values, AscendC::GlobalTensor<T> &x,
+    AscendC::GlobalTensor<T> &y, uint32_t rows, int32_t startValue, T alpha, T beta)
+{
+    constexpr uint32_t stride = SPMV_ATOMIC_ALIGNMENT / sizeof(T);
+    AscendC::DataCopyExtParams cp{1, static_cast<uint32_t>(sizeof(T)), 0, 0, 0};
+    for (uint32_t first = 0; first < rows; first += SPMV_ATOMIC_BATCH) {
+        uint32_t count = rows - first;
+        if (count > SPMV_ATOMIC_BATCH)
+            count = SPMV_ATOMIC_BATCH;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t row = first + i;
+            T sum = 0;
+            int32_t begin = rowPtr(row) - startValue;
+            int32_t end = rowPtr(row + 1) - startValue;
+            for (int32_t j = begin; j < end; ++j) {
+                if constexpr (std::is_same_v<T, int32_t>) {
+                    // Unsigned arithmetic defines INT32 wrap without C++ signed overflow.
+                    sum = static_cast<int32_t>(static_cast<uint32_t>(sum) +
+                        static_cast<uint32_t>(values(j)) * static_cast<uint32_t>(x(columns(j))));
+                } else {
+                    sum += values(j) * x(columns(j));
+                }
+            }
+            T result;
+            if constexpr (std::is_same_v<T, int32_t>) {
+                uint32_t v = static_cast<uint32_t>(sum) * static_cast<uint32_t>(alpha);
+                if (beta != 0)
+                    v += static_cast<uint32_t>(beta) * static_cast<uint32_t>(y(row));
+                result = static_cast<int32_t>(v);
+            } else {
+                result = alpha * sum;
+                if (beta != 0)
+                    result += beta * y(row);
+            }
+            batch.SetValue(i * stride, result);
+        }
+        SpmvSyncEvent<AscendC::HardEvent::S_MTE3>(pipe);
+        for (uint32_t i = 0; i < count; ++i)
+            AscendC::DataCopyPad(y[first + i], batch[i * stride], cp);
+        SpmvSyncEvent<AscendC::HardEvent::MTE3_S>(pipe);
+    }
+}
 
 /**
  * @brief CSR 格式稀疏矩阵-稠密向量乘法（SpMV）AscendC 算子
@@ -134,7 +198,8 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Init(
     pipe.InitBuffer(workQueueX, BUFFER_NUM, this->tileLength * sizeof(CompT));
     pipe.InitBuffer(workQueueReduce, BUFFER_NUM, this->tileLength * sizeof(float));
     pipe.InitBuffer(floatQueueReduce, BUFFER_NUM, this->tileLength * sizeof(float));
-    pipe.InitBuffer(outQueueY, BUFFER_NUM, sizeof(CompT));
+    pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLength <= 8 ?
+        SPMV_ATOMIC_BATCH * SPMV_ATOMIC_ALIGNMENT : sizeof(CompT));
 }
 
 template <typename CompT, typename ValT, typename OutT>
@@ -159,9 +224,12 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::CopyIn(int32_t currentRow,
             AscendC::DataCopyExtParams cpV{1, (uint32_t)(validNum * sizeof(ValT)), 0, 0, 0};
             AscendC::DataCopyPadExtParams<ValT> padV{false, 0, 0, 0};
             AscendC::DataCopyPad(valsTmp, csrValGm[offset], cpV, padV);
+            SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
             AscendC::Cast<CompT, ValT>(valsLocal, valsTmp,
                                        AscendC::RoundMode::CAST_NONE, validNum);
             AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
+            SpmvSyncEvent<AscendC::HardEvent::V_MTE2>(pipe);
             workQueueX.FreeTensor(valsTmp);
         }
     }
@@ -170,20 +238,29 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::CopyIn(int32_t currentRow,
 
     // Read y from GM for beta*y computation in Compute
     AscendC::LocalTensor<CompT> yLocal = outQueueY.AllocTensor<CompT>();
-    if constexpr (std::is_same_v<OutT, CompT>) {
-        AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(CompT), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<CompT> padParams{false, 0, 0, 0};
-        AscendC::DataCopyPad(yLocal, yVecGm[currentRow], cp, padParams);
-    }
-    else {
-        AscendC::LocalTensor<OutT> yTmp = workQueueX.AllocTensor<OutT>();
-        AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(OutT), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<OutT> padParams{false, 0, 0, 0};
-        AscendC::DataCopyPad(yTmp, yVecGm[currentRow], cp, padParams);
-        AscendC::Cast<CompT, OutT>(yLocal, yTmp,
-                                   AscendC::RoundMode::CAST_NONE, 1);
+    if (this->beta == static_cast<CompT>(0)) {
+        AscendC::Duplicate(yLocal, static_cast<CompT>(0), 1);
         AscendC::PipeBarrier<PIPE_V>();
-        workQueueX.FreeTensor(yTmp);
+    } else {
+        if constexpr (std::is_same_v<OutT, CompT>) {
+            AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(CompT), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<CompT> padParams{false, 0, 0, 0};
+            AscendC::DataCopyPad(yLocal, yVecGm[currentRow], cp, padParams);
+            SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
+        }
+        else {
+            AscendC::LocalTensor<OutT> yTmp = workQueueX.AllocTensor<OutT>();
+            AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(OutT), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<OutT> padParams{false, 0, 0, 0};
+            AscendC::DataCopyPad(yTmp, yVecGm[currentRow], cp, padParams);
+            SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
+            AscendC::Cast<CompT, OutT>(yLocal, yTmp,
+                                       AscendC::RoundMode::CAST_NONE, 1);
+            AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
+            SpmvSyncEvent<AscendC::HardEvent::V_MTE2>(pipe);
+            workQueueX.FreeTensor(yTmp);
+        }
     }
     outQueueY.EnQue(yLocal);
 }
@@ -193,6 +270,7 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::CopyOut(int32_t currentRow
     AscendC::LocalTensor<CompT> yLocal = outQueueY.DeQue<CompT>();
     if constexpr (std::is_same_v<CompT, OutT>) {
         AscendC::DataCopyExtParams copyParams{1, (uint32_t)sizeof(OutT), 0, 0, 0};
+        // VECOUT EnQue/DeQue already orders vector production before MTE3.
         AscendC::DataCopyPad(yVecGm[currentRow], yLocal, copyParams);
     }
     else {
@@ -200,10 +278,14 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::CopyOut(int32_t currentRow
         AscendC::Cast<OutT, CompT>(yOut, yLocal,
                                    AscendC::RoundMode::CAST_ROUND, 1);
         AscendC::PipeBarrier<PIPE_V>();
+        SpmvSyncEvent<AscendC::HardEvent::V_MTE3>(pipe);
         AscendC::DataCopyExtParams copyParams{1, (uint32_t)sizeof(OutT), 0, 0, 0};
         AscendC::DataCopyPad(yVecGm[currentRow], yOut, copyParams);
+        SpmvSyncEvent<AscendC::HardEvent::MTE3_S>(pipe);
         workQueueX.FreeTensor(yOut);
     }
+    // The next row reloads yLocal through MTE2 after this MTE3 store.
+    SpmvSyncEvent<AscendC::HardEvent::MTE3_MTE2>(pipe);
     outQueueY.FreeTensor(yLocal);
 }
 
@@ -212,6 +294,10 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Compute(int32_t currentRow
     AscendC::LocalTensor<int32_t> colIdxLocal = inQueueColIdx.DeQue<int32_t>();
     AscendC::LocalTensor<CompT> valsLocal = inQueueVals.DeQue<CompT>();
     AscendC::LocalTensor<CompT> xLocal = workQueueX.AllocTensor<CompT>();
+    // Delay the scalar dependency until consumption; CopyIn can first issue
+    // the independent values/y loads instead of stalling after the index DMA.
+    if (validNum > 0)
+        SpmvSyncEvent<AscendC::HardEvent::MTE2_S>(pipe);
     AscendC::LocalTensor<float> sharedTmpBuffer;
     AscendC::LocalTensor<float> floatTmpBuffer;
 
@@ -221,6 +307,7 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Compute(int32_t currentRow
                 ValT v = xVecGm(colIdxLocal(i));
                 xLocal.SetValue(i, v);
             }
+            SpmvSyncEvent<AscendC::HardEvent::S_V>(pipe);
         }
         else {
             // ValT≠CompT: Cast 转换，从 floatQueueReduce 分配 xTmp 避免 workQueueX 冲突
@@ -229,9 +316,11 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Compute(int32_t currentRow
                 ValT v = xVecGm(colIdxLocal(i));
                 xTmp.SetValue(i, v);
             }
-            AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::S_V>(pipe);
             AscendC::Cast<CompT, ValT>(xLocal, xTmp,
                                        AscendC::RoundMode::CAST_NONE, validNum);
+            AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
             floatQueueReduce.FreeTensor(xTmp);
         }
 
@@ -251,11 +340,19 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Compute(int32_t currentRow
 
             AscendC::LocalTensor<CompT> yLocal = outQueueY.DeQue<CompT>();
 
-            AscendC::Muls(floatTmpBuffer, floatTmpBuffer, this->alpha, 1);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Muls(yLocal, yLocal, this->beta, 1);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Add(yLocal, yLocal, floatTmpBuffer, 1);
+            if (this->alpha != static_cast<CompT>(1)) {
+                AscendC::Muls(floatTmpBuffer, floatTmpBuffer, this->alpha, 1);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            if (this->beta == static_cast<CompT>(0)) {
+                AscendC::Adds(yLocal, floatTmpBuffer, static_cast<CompT>(0), 1);
+            } else {
+                if (this->beta != static_cast<CompT>(1)) {
+                    AscendC::Muls(yLocal, yLocal, this->beta, 1);
+                    AscendC::PipeBarrier<PIPE_V>();
+                }
+                AscendC::Add(yLocal, yLocal, floatTmpBuffer, 1);
+            }
             AscendC::PipeBarrier<PIPE_V>();
 
             outQueueY.EnQue<CompT>(yLocal);
@@ -308,6 +405,16 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Process() {
     if (this->blockRowNum == 0)
         return;
 
+    if constexpr (std::is_same_v<CompT, ValT> && std::is_same_v<CompT, OutT>) {
+        if (tileLength <= 8) {
+            auto batch = outQueueY.AllocTensor<CompT>();
+            SpmvScalarRows(pipe, batch, csrRowPtrGm, csrColIndGm, csrValGm,
+                           xVecGm, yVecGm, blockRowNum, startValIdx, alpha, beta);
+            outQueueY.FreeTensor(batch);
+            return;
+        }
+    }
+
     for (int32_t m = 0; m < this->blockRowNum; m++) {
         int32_t validNum = csrRowPtrGm(m + 1) - csrRowPtrGm(m);
         CopyIn(m, validNum);
@@ -337,6 +444,8 @@ public:
     __aicore__ inline void Process();
 
 private:
+    __aicore__ inline void ProcessScalarSmallRows();
+    __aicore__ inline void FlushScalarBatch(AscendC::LocalTensor<CompT> &batch, uint32_t count);
     __aicore__ inline void ScaleBeta();
     __aicore__ inline void CopyIn(int32_t currentRow, int32_t validNum);
     __aicore__ inline void Compute(int32_t currentRow, int32_t validNum);
@@ -452,7 +561,7 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Init(
     pipe.InitBuffer(workQueueX, BUFFER_NUM, this->tileLength * sizeof(CompT));
     pipe.InitBuffer(workQueueReduce, BUFFER_NUM, this->tileLength * sizeof(float));
     pipe.InitBuffer(floatQueueReduce, BUFFER_NUM, this->tileLength * sizeof(float));
-    pipe.InitBuffer(outQueueY, BUFFER_NUM, sizeof(CompT));
+    pipe.InitBuffer(outQueueY, BUFFER_NUM, SPMV_ATOMIC_BATCH * SPMV_ATOMIC_ALIGNMENT);
 }
 
 /**
@@ -483,17 +592,22 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ScaleBeta() {
 
             AscendC::DataCopyExtParams cp{1, (uint32_t)(chunkSize * sizeof(CompT)), 0, 0, 0};
             AscendC::DataCopyPadExtParams<CompT> padParams{false, 0, 0, 0};
-            AscendC::DataCopyPad(yChunkLocal,
-                                 yVecGm[this->yBlockStart + offset],
-                                 cp, padParams);
-            AscendC::PipeBarrier<PIPE_V>();
-
-            AscendC::Muls(yChunkLocal, yChunkLocal, this->beta, chunkSize);
+            if (this->beta == static_cast<CompT>(0)) {
+                AscendC::Duplicate(yChunkLocal, static_cast<CompT>(0), chunkSize);
+            } else {
+                AscendC::DataCopyPad(yChunkLocal,
+                                     yVecGm[this->yBlockStart + offset],
+                                     cp, padParams);
+                SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
+                AscendC::Muls(yChunkLocal, yChunkLocal, this->beta, chunkSize);
+            }
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::DataCopyExtParams cp2{1, (uint32_t)(chunkSize * sizeof(CompT)), 0, 0, 0};
+            SpmvSyncEvent<AscendC::HardEvent::V_MTE3>(pipe);
             AscendC::DataCopyPad(yVecGm[this->yBlockStart + offset], yChunkLocal, cp2);
-            AscendC::PipeBarrier<PIPE_V>();
+            // The next chunk reloads this workQueueX buffer through MTE2.
+            SpmvSyncEvent<AscendC::HardEvent::MTE3_MTE2>(pipe);
 
             workQueueX.FreeTensor(yChunkLocal);
         }
@@ -509,10 +623,10 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ScaleBeta() {
             AscendC::DataCopyPad(yChunkOut,
                                  yVecGm[this->yBlockStart + offset],
                                  cp, padParams);
-            AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
 
             AscendC::Cast<CompT, OutT>(yChunkComp, yChunkOut,
-                                       AscendC::RoundMode::CAST_ROUND, chunkSize);
+                                       AscendC::RoundMode::CAST_NONE, chunkSize);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Muls(yChunkComp, yChunkComp, this->beta, chunkSize);
             AscendC::PipeBarrier<PIPE_V>();
@@ -521,8 +635,10 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ScaleBeta() {
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::DataCopyExtParams cp2{1, (uint32_t)(chunkSize * sizeof(OutT)), 0, 0, 0};
+            SpmvSyncEvent<AscendC::HardEvent::V_MTE3>(pipe);
             AscendC::DataCopyPad(yVecGm[this->yBlockStart + offset], yChunkOut, cp2);
-            AscendC::PipeBarrier<PIPE_V>();
+            // The next chunk reloads this workQueueX buffer through MTE2.
+            SpmvSyncEvent<AscendC::HardEvent::MTE3_MTE2>(pipe);
 
             floatQueueReduce.FreeTensor(yChunkComp);
             workQueueX.FreeTensor(yChunkOut);
@@ -551,9 +667,12 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::CopyIn(int32_t curren
             AscendC::DataCopyExtParams cpV{1, (uint32_t)(validNum * sizeof(ValT)), 0, 0, 0};
             AscendC::DataCopyPadExtParams<ValT> padV{false, 0, 0, 0};
             AscendC::DataCopyPad(valsTmp, csrValGm[offset], cpV, padV);
+            SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
             AscendC::Cast<CompT, ValT>(valsLocal, valsTmp,
                                        AscendC::RoundMode::CAST_NONE, validNum);
             AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
+            SpmvSyncEvent<AscendC::HardEvent::V_MTE2>(pipe);
             workQueueX.FreeTensor(valsTmp);
         }
     }
@@ -575,10 +694,11 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Compute(int32_t curre
             AscendC::LocalTensor<ValT> xTmp = outQueueY.AllocTensor<ValT>();
             AscendC::LocalTensor<CompT> cTmp = floatQueueReduce.AllocTensor<CompT>();
             xTmp.SetValue(0, xVecGm(this->startRow + currentRow));
-            AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::S_V>(pipe);
             AscendC::Cast<CompT, ValT>(cTmp, xTmp,
                                        AscendC::RoundMode::CAST_NONE, 1);
             AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
             xVal = cTmp.GetValue(0);
             outQueueY.FreeTensor(xTmp);
             floatQueueReduce.FreeTensor(cTmp);
@@ -589,6 +709,8 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Compute(int32_t curre
         AscendC::Muls(contribLocal, contribLocal,
                       this->alpha, validNum);
         AscendC::PipeBarrier<PIPE_V>();
+        // CopyOut reads contribLocal through scalar GetValue.
+        SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
     }
     workQueueX.EnQue(contribLocal);
     inQueueVals.FreeTensor(valsLocal);
@@ -600,14 +722,23 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::CopyOut(int32_t curre
     AscendC::LocalTensor<CompT> contribLocal = workQueueX.DeQue<CompT>();
 
     if (validNum > 0) {
+        SpmvSyncEvent<AscendC::HardEvent::MTE2_S>(pipe);
         if constexpr (std::is_same_v<CompT, OutT>) {
             AscendC::LocalTensor<CompT> atomicElem = outQueueY.AllocTensor<CompT>();
-            for (int j = 0; j < validNum; j++) {
-                atomicElem.SetValue(0, contribLocal(j));
-                AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(CompT), 0, 0, 0};
+            // Each UB source starts on a 32-byte boundary. Stage a batch
+            // before DMA so the source is never overwritten while MTE3 reads it.
+            constexpr uint32_t stride = SPMV_ATOMIC_ALIGNMENT / sizeof(CompT);
+            for (int base = 0; base < validNum; base += SPMV_ATOMIC_BATCH) {
+                int n = validNum - base < SPMV_ATOMIC_BATCH ? validNum - base : SPMV_ATOMIC_BATCH;
+                for (int j = 0; j < n; ++j)
+                    atomicElem.SetValue(j * stride, contribLocal(base + j));
+                SpmvSyncEvent<AscendC::HardEvent::S_MTE3>(pipe);
                 AscendC::SetAtomicAdd<CompT>();
-                AscendC::DataCopyPad(yVecGm[colIdxLocal(j)], atomicElem, cp);
+                AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(CompT), 0, 0, 0};
+                for (int j = 0; j < n; ++j)
+                    AscendC::DataCopyPad(yVecGm[colIdxLocal(base + j)], atomicElem[j * stride], cp);
                 AscendC::SetAtomicNone();
+                SpmvSyncEvent<AscendC::HardEvent::MTE3_S>(pipe);
             }
             outQueueY.FreeTensor(atomicElem);
         }
@@ -618,14 +749,23 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::CopyOut(int32_t curre
             AscendC::Cast<OutT, CompT>(oCast, contribLocal,
                                        AscendC::RoundMode::CAST_ROUND, validNum);
             AscendC::PipeBarrier<PIPE_V>();
+            SpmvSyncEvent<AscendC::HardEvent::V_S>(pipe);
 
             AscendC::LocalTensor<OutT> atomicElem = outQueueY.AllocTensor<OutT>();
-            for (int j = 0; j < validNum; j++) {
-                atomicElem.SetValue(0, oCast(j));
-                AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(OutT), 0, 0, 0};
+            // Each UB source starts on a 32-byte boundary. Stage a batch
+            // before DMA so the source is never overwritten while MTE3 reads it.
+            constexpr uint32_t stride = SPMV_ATOMIC_ALIGNMENT / sizeof(OutT);
+            for (int base = 0; base < validNum; base += SPMV_ATOMIC_BATCH) {
+                int n = validNum - base < SPMV_ATOMIC_BATCH ? validNum - base : SPMV_ATOMIC_BATCH;
+                for (int j = 0; j < n; ++j)
+                    atomicElem.SetValue(j * stride, oCast(base + j));
+                SpmvSyncEvent<AscendC::HardEvent::S_MTE3>(pipe);
                 AscendC::SetAtomicAdd<OutT>();
-                AscendC::DataCopyPad(yVecGm[colIdxLocal(j)], atomicElem, cp);
+                AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(OutT), 0, 0, 0};
+                for (int j = 0; j < n; ++j)
+                    AscendC::DataCopyPad(yVecGm[colIdxLocal(base + j)], atomicElem[j * stride], cp);
                 AscendC::SetAtomicNone();
+                SpmvSyncEvent<AscendC::HardEvent::MTE3_S>(pipe);
             }
             outQueueY.FreeTensor(atomicElem);
             floatQueueReduce.FreeTensor(oCast);
@@ -637,14 +777,85 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::CopyOut(int32_t curre
 }
 
 template <typename CompT, typename ValT, typename OutT>
+__aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::FlushScalarBatch(
+    AscendC::LocalTensor<CompT> &batch, uint32_t count)
+{
+    auto targets = batch.template ReinterpretCast<int32_t>();
+    constexpr uint32_t stride = SPMV_ATOMIC_ALIGNMENT / sizeof(CompT);
+    SpmvSyncEvent<AscendC::HardEvent::S_MTE3>(pipe);
+    AscendC::SetAtomicAdd<CompT>();
+    AscendC::DataCopyExtParams cp{1, static_cast<uint32_t>(sizeof(CompT)), 0, 0, 0};
+    for (uint32_t i = 0; i < count; ++i)
+        AscendC::DataCopyPad(yVecGm[targets(i * stride + 1)], batch[i * stride], cp);
+    AscendC::SetAtomicNone();
+    SpmvSyncEvent<AscendC::HardEvent::MTE3_S>(pipe);
+}
+
+template <typename CompT, typename ValT, typename OutT>
+__aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ProcessScalarSmallRows()
+{
+    // Short CSR rows do not amortize per-row vector setup. Immutable CSR/x
+    // inputs can be read by Scalar; only the staged output crosses to MTE3.
+    auto batch = outQueueY.AllocTensor<CompT>();
+    auto targets = batch.template ReinterpretCast<int32_t>();
+    constexpr uint32_t stride = SPMV_ATOMIC_ALIGNMENT / sizeof(CompT);
+    uint32_t pending = 0;
+    for (uint32_t row = 0; row < blockRowNum; ++row) {
+        int32_t begin = csrRowPtrGm(row) - startValIdx;
+        int32_t end = csrRowPtrGm(row + 1) - startValIdx;
+        if (end <= begin)
+            continue;
+        ValT rawX = xVecGm(startRow + row);
+        CompT xv;
+        if constexpr (std::is_same_v<ValT, bfloat16_t>)
+            xv = AscendC::Cast(rawX);
+        else
+            xv = static_cast<CompT>(rawX);
+        for (int32_t j = begin; j < end; ++j) {
+            ValT rawValue = csrValGm(j);
+            CompT value;
+            if constexpr (std::is_same_v<ValT, bfloat16_t>)
+                value = AscendC::Cast(rawValue);
+            else
+                value = static_cast<CompT>(rawValue);
+            if constexpr (std::is_same_v<CompT, int32_t>)
+                batch.SetValue(pending * stride, static_cast<int32_t>(
+                    static_cast<uint32_t>(value) * static_cast<uint32_t>(xv) * static_cast<uint32_t>(alpha)));
+            else
+                batch.SetValue(pending * stride, (value * xv) * alpha);
+            targets.SetValue(pending * stride + 1, csrColIndGm(j));
+            if (++pending == SPMV_ATOMIC_BATCH) {
+                FlushScalarBatch(batch, pending);
+                pending = 0;
+            }
+        }
+    }
+    if (pending > 0)
+        FlushScalarBatch(batch, pending);
+    outQueueY.FreeTensor(batch);
+}
+
+template <typename CompT, typename ValT, typename OutT>
 __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Process() {
     // 阶段 1：beta 缩放（多核分工无重叠，无需原子）
     ScaleBeta();
+    // SyncAll is issued by scalar; wait until every local beta write has left MTE3.
+    SpmvSyncEvent<AscendC::HardEvent::MTE3_S>(pipe);
     AscendC::SyncAll();
 
+    // Batch short rows across row boundaries rather than waiting per row.
+    if constexpr (std::is_same_v<CompT, OutT>) {
+        if (tileLength <= 8) {
+            ProcessScalarSmallRows();
+            AscendC::SyncAll();
+            return;
+        }
+    }
     // 阶段 2：逐行处理，每行贡献原子累加到 y
     for (int32_t m = 0; m < this->blockRowNum; m++) {
         int32_t validNum = csrRowPtrGm(m + 1) - csrRowPtrGm(m);
+        if (validNum <= 0)
+            continue;
         CopyIn(m, validNum);
         Compute(m, validNum);
         CopyOut(m, validNum);
@@ -655,6 +866,8 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Process() {
 // -------------------------------------------------------------------
 // 具体 Kernel 入口 + Host 端启动封装
 // -------------------------------------------------------------------
+
+#include "spmv_vector_kernel.h"
 
 // ---- per-type __global__ kernel 定义（各自 TU 展开一个实例） ----
 #define DEFINE_SPMV_KERNEL(CompT, ValT, OutT)                                                           \
@@ -673,9 +886,15 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Process() {
         }                                                                                               \
         else                                                                                            \
         {                                                                                               \
-            SpmvKernel<CompT, ValT, OutT> op;                                                           \
-            op.Init(csrRowPtr, csrColInd, csrVal, xVec, yVec, totalRowsNum, totalColNum, alpha, beta);  \
-            op.Process();                                                                               \
+            if constexpr (std::is_same_v<CompT, float>) {                                               \
+                SpmvVectorF32<ValT, OutT> op;                                                           \
+                op.Init(csrRowPtr, csrColInd, csrVal, xVec, yVec, totalRowsNum, totalColNum, alpha, beta); \
+                op.Process();                                                                           \
+            } else {                                                                                   \
+                SpmvKernel<CompT, ValT, OutT> op;                                                        \
+                op.Init(csrRowPtr, csrColInd, csrVal, xVec, yVec, totalRowsNum, totalColNum, alpha, beta); \
+                op.Process();                                                                           \
+            }                                                                                          \
         }                                                                                               \
     }
 

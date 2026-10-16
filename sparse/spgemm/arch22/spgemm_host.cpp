@@ -26,6 +26,7 @@
 
 #include <acl/acl.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <limits>
 #include <mutex>
@@ -227,84 +228,169 @@ void FillCommonTiling(SpgemmArch22TilingData &td, const StageContext &ctx,
 
 }  // namespace
 
-// CSR rowOffsets 内容校验：rowOffsets[0]==0、单调非降、rowOffsets[M]==nnz。
-// 任务书要求"非法索引必须返回确定错误"。在 WorkEstimation 执行模式调用。
-static aclsparseStatus_t ValidateCsrRowOffsets(const aclsparseSpMatDescr *mat)
+// Validate only after the handle stream has completed the index snapshots.
+// Pinned host storage is required by the asynchronous D2H copies.
+struct CsrValidationSnapshot {
+    const aclsparseSpMatDescr *mat = nullptr;
+    size_t rowBytes = 0;
+    size_t colBytes = 0;
+    int32_t *rowOffsets = nullptr;
+    int32_t *colIndices = nullptr;
+};
+
+static aclsparseStatus_t ValidateCsrRowOffsets(const CsrValidationSnapshot &snapshot)
 {
-    if (mat == nullptr || mat->ptrs == nullptr) {
+    const auto *mat = snapshot.mat;
+    if (mat == nullptr || mat->rows == 0) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     const int64_t rows = mat->rows;
     const int64_t nnz = static_cast<int64_t>(mat->nnz);
-    if (rows == 0) {
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    const size_t ptrBytes = (static_cast<size_t>(rows) + 1) * sizeof(int32_t);
-    std::vector<int32_t> rowPtr(static_cast<size_t>(rows) + 1);
-    if (aclrtMemcpy(rowPtr.data(), ptrBytes, mat->ptrs, ptrBytes,
-                    ACL_MEMCPY_DEVICE_TO_HOST) != ACL_ERROR_NONE) {
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-    if (rowPtr[0] != 0) {
+    const auto *row = snapshot.rowOffsets;
+    if (row[0] != 0 || row[rows] != static_cast<int32_t>(nnz)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (rowPtr[static_cast<size_t>(rows)] != static_cast<int32_t>(nnz)) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    for (int64_t i = 1; i <= rows; i++) {
-        if (rowPtr[i] < rowPtr[i - 1]) {
+    for (int64_t r = 1; r <= rows; ++r) {
+        if (row[r] < row[r - 1]) {
             return ACL_SPARSE_STATUS_INVALID_VALUE;
         }
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-// CSR colIndices 内容校验：所有值 >= 0 且 < cols，行内非降序。
-// 仅在 WorkEstimation 执行模式调用一次。
-static aclsparseStatus_t ValidateCsrColIndices(const aclsparseSpMatDescr *mat)
+static aclsparseStatus_t ValidateCsrColumnIndices(const CsrValidationSnapshot &snapshot)
 {
-    if (mat == nullptr) {
+    const auto *mat = snapshot.mat;
+    if (mat == nullptr || mat->nnz == 0) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     const int64_t rows = mat->rows;
-    const int64_t nnz = static_cast<int64_t>(mat->nnz);
-    const int32_t cols = static_cast<int32_t>(mat->cols);
-    if (nnz == 0 || mat->idxs == nullptr) {
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    if (mat->ptrs == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    const size_t ptrBytes = (static_cast<size_t>(rows) + 1) * sizeof(int32_t);
-    const size_t idxBytes = static_cast<size_t>(nnz) * sizeof(int32_t);
-    std::vector<int32_t> rowPtr(static_cast<size_t>(rows) + 1);
-    std::vector<int32_t> colIdx(static_cast<size_t>(nnz));
-    if (aclrtMemcpy(rowPtr.data(), ptrBytes, mat->ptrs, ptrBytes,
-                    ACL_MEMCPY_DEVICE_TO_HOST) != ACL_ERROR_NONE) {
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-    if (aclrtMemcpy(colIdx.data(), idxBytes, mat->idxs, idxBytes,
-                    ACL_MEMCPY_DEVICE_TO_HOST) != ACL_ERROR_NONE) {
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-
-    for (int64_t r = 0; r < rows; r++) {
-        const int32_t start = rowPtr[r];
-        const int32_t end = rowPtr[r + 1];
-        for (int32_t p = start; p < end; p++) {
-            const int32_t c = colIdx[p];
-            if (c < 0 || c >= cols) {
-                return ACL_SPARSE_STATUS_INVALID_VALUE;
-            }
-            // Non-decreasing within row (duplicates allowed per task book:
-            // "相同坐标的重复项累加并合并为一个条目")
-            if (p > start && c < colIdx[p - 1]) {
+    const auto *row = snapshot.rowOffsets;
+    const auto *col = snapshot.colIndices;
+    for (int64_t r = 0; r < rows; ++r) {
+        const int32_t rowBegin = row[r];
+        const int32_t rowEnd = row[r + 1];
+        for (int32_t p = rowBegin; p < rowEnd; ++p) {
+            // Duplicate columns are permitted; decreasing columns are not.
+            if (col[p] < 0 || col[p] >= mat->cols ||
+                (p > row[r] && col[p] < col[p - 1])) {
                 return ACL_SPARSE_STATUS_INVALID_VALUE;
             }
         }
     }
     return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateCsrHostContents(const CsrValidationSnapshot &snapshot)
+{
+    aclsparseStatus_t status = ValidateCsrRowOffsets(snapshot);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    return ValidateCsrColumnIndices(snapshot);
+}
+
+static aclError QueueCsrSnapshot(const CsrValidationSnapshot &snapshot, aclrtStream stream)
+{
+    aclError ret = ACL_SUCCESS;
+    if (snapshot.rowBytes > 0) {
+        ret = aclrtMemcpyAsync(snapshot.rowOffsets, snapshot.rowBytes, snapshot.mat->ptrs,
+                              snapshot.rowBytes, ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    }
+    if (ret == ACL_SUCCESS && snapshot.colBytes > 0) {
+        ret = aclrtMemcpyAsync(snapshot.colIndices, snapshot.colBytes, snapshot.mat->idxs,
+                              snapshot.colBytes, ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    }
+    return ret;
+}
+
+static aclsparseStatus_t PrepareCsrSnapshot(CsrValidationSnapshot &snapshot,
+                                            size_t &totalBytes)
+{
+    if (snapshot.mat == nullptr) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    const auto *mat = snapshot.mat;
+    if ((mat->rows > 0 && mat->ptrs == nullptr) ||
+        (mat->nnz > 0 && (mat->ptrs == nullptr || mat->idxs == nullptr))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    snapshot.rowBytes = mat->rows > 0
+        ? (static_cast<size_t>(mat->rows) + 1) * sizeof(int32_t) : 0;
+    snapshot.colBytes = static_cast<size_t>(mat->nnz) * sizeof(int32_t);
+    totalBytes += snapshot.rowBytes + snapshot.colBytes;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static void AssignCsrSnapshotStorage(std::array<CsrValidationSnapshot, 2> &snapshots,
+                                     void *storage)
+{
+    auto *cursor = static_cast<uint8_t *>(storage);
+    for (auto &snapshot : snapshots) {
+        snapshot.rowOffsets = reinterpret_cast<int32_t *>(cursor);
+        cursor += snapshot.rowBytes;
+        snapshot.colIndices = reinterpret_cast<int32_t *>(cursor);
+        cursor += snapshot.colBytes;
+    }
+}
+
+static aclError QueueCsrSnapshots(const std::array<CsrValidationSnapshot, 2> &snapshots,
+                                  aclrtStream stream)
+{
+    for (const auto &snapshot : snapshots) {
+        const aclError status = QueueCsrSnapshot(snapshot, stream);
+        if (status != ACL_SUCCESS) {
+            return status;
+        }
+    }
+    return ACL_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateCsrSnapshotResults(
+    const std::array<CsrValidationSnapshot, 2> &snapshots)
+{
+    for (const auto &snapshot : snapshots) {
+        const aclsparseStatus_t status = ValidateCsrHostContents(snapshot);
+        if (status != ACL_SPARSE_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateCsrMatrices(const aclsparseSpMatDescr *a,
+                                             const aclsparseSpMatDescr *b, aclrtStream stream)
+{
+    std::array<CsrValidationSnapshot, 2> snapshots{};
+    snapshots[0].mat = a;
+    snapshots[1].mat = b;
+    size_t totalBytes = 0;
+    for (auto &snapshot : snapshots) {
+        const aclsparseStatus_t status = PrepareCsrSnapshot(snapshot, totalBytes);
+        if (status != ACL_SPARSE_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    if (totalBytes == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    void *storage = nullptr;
+    if (aclrtMallocHost(&storage, totalBytes) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    AssignCsrSnapshotStorage(snapshots, storage);
+    const aclError copyRet = QueueCsrSnapshots(snapshots, stream);
+    // Also drain successfully queued copies when a later submission fails,
+    // before releasing their host destinations. A/B share this single wait.
+    const aclError syncRet = aclrtSynchronizeStream(stream);
+    aclsparseStatus_t status = ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    if (copyRet == ACL_SUCCESS && syncRet == ACL_SUCCESS) {
+        status = ValidateCsrSnapshotResults(snapshots);
+    }
+    if (aclrtFreeHost(storage) != ACL_SUCCESS && status == ACL_SPARSE_STATUS_SUCCESS) {
+        status = ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return status;
 }
 
 // ===========================================================================
@@ -320,37 +406,13 @@ struct SpgemmScalars {
     bool betaNonZero = false;
 };
 
-// CSR rowOffsets 内容校验（任务书：非法索引必须返回确定错误）。
-static aclsparseStatus_t ValidateCsrRowOffsetsBoth(const StageContext &ctx)
-{
-    aclsparseStatus_t st = ValidateCsrRowOffsets(ctx.a);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-    return ValidateCsrRowOffsets(ctx.b);
-}
-
-// CSR colIndices 内容校验：越界和行内有序性。
-static aclsparseStatus_t ValidateCsrColIndicesBoth(const StageContext &ctx)
-{
-    aclsparseStatus_t st = ValidateCsrColIndices(ctx.a);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-    return ValidateCsrColIndices(ctx.b);
-}
-
-// 执行模式下的全部 CSR 内容校验（A/B 的 rowOffsets + colIndices）。
+// Validate A/B together: each index array is copied once on the handle stream.
 static aclsparseStatus_t ValidateCsrContents(const StageContext &ctx)
 {
-    aclsparseStatus_t st = ValidateCsrRowOffsetsBoth(ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-    return ValidateCsrColIndicesBoth(ctx);
+    return ValidateCsrMatrices(ctx.a, ctx.b, ctx.stream);
 }
 
-// beta != 0 时 matC 同时是输入（C_in），对其 CSR 内容做与 A/B 等价的校验。
+// beta != 0 makes matC an input; beta == 0 must not read its contents.
 static aclsparseStatus_t ValidateCsrCIn(const StageContext &ctx)
 {
     if (ctx.c->nnz > static_cast<uint64_t>(kInt32Max)) {
@@ -359,11 +421,7 @@ static aclsparseStatus_t ValidateCsrCIn(const StageContext &ctx)
     if (ctx.c->nnz > 0 && (ctx.c->idxs == nullptr || ctx.c->values == nullptr)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    aclsparseStatus_t st = ValidateCsrRowOffsets(ctx.c);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-    return ValidateCsrColIndices(ctx.c);
+    return ValidateCsrMatrices(ctx.c, nullptr, ctx.stream);
 }
 
 // 校验 CSR 内容并读出 alpha/beta 标量（host 或 device pointerMode 均支持）。
@@ -429,41 +487,38 @@ static void FillEstimationTiling(SpgemmArch22TilingData &td, const SpgemmScalars
     td.nnzCIn = static_cast<uint32_t>(arch22ctx.nnzCIn);
 }
 
-// count Kernel 下发 + 同步回读 rowProducts。
-// 退化场景不下发 Kernel，只把描述符区显式清零。
-static aclsparseStatus_t RunCountStage(const StageContext &ctx,
-                                       SpgemmArch22Context &arch22ctx,
-                                       const SpgemmArch22TilingData &td,
-                                       const SpgemmArch22Ws1Layout &ws1, uint8_t *buf1,
-                                       uint32_t M, uint32_t Kdim, uint32_t blockDim,
-                                       bool degenerate)
+static aclsparseStatus_t RunCountKernel(const StageContext &ctx,
+                                        SpgemmArch22Context &arch22ctx,
+                                        const SpgemmArch22TilingData &td,
+                                        const SpgemmArch22Ws1Layout &ws1, uint8_t *buf1,
+                                        uint32_t M, uint32_t blockDim)
 {
-    arch22ctx.rowProducts.assign(M, 0);
-    if (!degenerate) {
-        // 中间乘积计数在 NPU 上完成：rowProducts[r] = Σ_{k∈A.cols(r)} nnz(B.row(k))
-        aclsparseStatus_t st = UploadTiling(buf1, ws1.tilingOff, td);
-        if (st != ACL_SPARSE_STATUS_SUCCESS) {
-            return st;
-        }
-        // count Kernel 的 SyncAll 要求屏障区入核前为零，故这里显式清零。
-        const size_t syncBytes = static_cast<size_t>(blockDim) * 32;
-        if (aclrtMemsetAsync(buf1 + ws1.syncOff, syncBytes, 0, syncBytes,
-                             ctx.stream) != ACL_ERROR_NONE) {
-            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        }
-        spgemm_arch22_count_launch(ctx.a->ptrs, ctx.a->idxs, ctx.b->ptrs, ctx.b->idxs,
-                                   buf1, buf1 + ws1.tilingOff, blockDim, ctx.stream);
-        // 装箱与 nnz 上界规划需要 host 侧看到 rowProducts，此处必须同步。
-        if (aclrtSynchronizeStream(ctx.stream) != ACL_ERROR_NONE) {
-            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        }
-        const size_t rpBytes = static_cast<size_t>(M) * sizeof(int64_t);
-        if (aclrtMemcpy(arch22ctx.rowProducts.data(), rpBytes, buf1 + ws1.rowProductsOff,
-                        rpBytes, ACL_MEMCPY_DEVICE_TO_HOST) != ACL_ERROR_NONE) {
-            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        }
-        return ACL_SPARSE_STATUS_SUCCESS;
+    const size_t rpBytes = static_cast<size_t>(M) * sizeof(int64_t);
+    aclsparseStatus_t status = UploadTiling(buf1, ws1.tilingOff, td);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
     }
+    const size_t syncBytes = static_cast<size_t>(blockDim) * 32;
+    if (aclrtMemsetAsync(buf1 + ws1.syncOff, syncBytes, 0, syncBytes,
+                         ctx.stream) != ACL_ERROR_NONE) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    spgemm_arch22_count_launch(ctx.a->ptrs, ctx.a->idxs, ctx.b->ptrs, ctx.b->idxs,
+                               buf1, buf1 + ws1.tilingOff, blockDim, ctx.stream);
+    if (aclrtSynchronizeStream(ctx.stream) != ACL_ERROR_NONE) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    if (aclrtMemcpy(arch22ctx.rowProducts.data(), rpBytes,
+                    buf1 + ws1.rowProductsOff, rpBytes,
+                    ACL_MEMCPY_DEVICE_TO_HOST) != ACL_ERROR_NONE) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ClearCountMetadata(const SpgemmArch22Ws1Layout &ws1,
+                                            uint8_t *buf1, uint32_t Kdim)
+{
     if (Kdim > 0) {
         const size_t apBytes = static_cast<size_t>(Kdim) * sizeof(int32_t);
         if (aclrtMemset(buf1 + ws1.bApStrideOff, apBytes, 0, apBytes) != ACL_ERROR_NONE) {
@@ -476,10 +531,25 @@ static aclsparseStatus_t RunCountStage(const StageContext &ctx,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-// 汇总 numProducts / maxRowProduct，按工作量划分 binEdge 并重传 tiling。
+// count Kernel 下发 + 同步回读 rowProducts。
+// 退化场景不下发 Kernel，只把描述符区显式清零。
+static aclsparseStatus_t RunCountStage(const StageContext &ctx,
+                                       SpgemmArch22Context &arch22ctx,
+                                       const SpgemmArch22TilingData &td,
+                                       const SpgemmArch22Ws1Layout &ws1, uint8_t *buf1,
+                                       uint32_t M, uint32_t Kdim, uint32_t blockDim,
+                                       bool degenerate)
+{
+    arch22ctx.rowProducts.assign(static_cast<size_t>(M), 0);
+    if (degenerate) {
+        return ClearCountMetadata(ws1, buf1, Kdim);
+    }
+    return RunCountKernel(ctx, arch22ctx, td, ws1, buf1, M, blockDim);
+}
+
+// 汇总 numProducts / maxRowProduct，按工作量划分并上传 binEdge。
 static aclsparseStatus_t FinishWorkEstimation(aclsparseSpGEMMDescr_t spgemmDescr,
                                               SpgemmArch22Context &arch22ctx,
-                                              SpgemmArch22TilingData &td,
                                               const SpgemmArch22Ws1Layout &ws1,
                                               uint8_t *buf1, uint32_t blockDim)
 {
@@ -493,17 +563,19 @@ static aclsparseStatus_t FinishWorkEstimation(aclsparseSpGEMMDescr_t spgemmDescr
     }
     spgemmDescr->numProducts = numProds;
     arch22ctx.maxRowProduct = maxRowProduct;
-    td.numProds = numProds;
 
     // 按 P_i 做连续区间等工作量划分，写回 binEdge 供符号/数值 Kernel 使用
     PartitionRowsByWork(arch22ctx.rowProducts, blockDim, arch22ctx.binEdge);
     const size_t beBytes = (static_cast<size_t>(blockDim) + 1) * sizeof(int32_t);
-    if (aclrtMemcpy(buf1 + ws1.binEdgeOff, beBytes, arch22ctx.binEdge.data(), beBytes,
+    if (aclrtMemcpy(buf1 + ws1.binEdgeOff, beBytes,
+                    arch22ctx.binEdge.data(), beBytes,
                     ACL_MEMCPY_HOST_TO_DEVICE) != ACL_ERROR_NONE) {
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
-    // numProds 已确定，重传 tiling（Kernel 侧数值阶段会读它做上界判定）
-    return UploadTiling(buf1, ws1.tilingOff, td);
+    // Subsequent capacity queries use the host descriptor and rowProducts.
+    // Compute fills and uploads the complete tiling before launching kernels,
+    // so uploading an intermediate tiling here would have no consumer.
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 // 填 Compute 阶段的 tiling：公共字段 + numProds + 上界判定 + 标量 + buffer2 偏移。
@@ -670,6 +742,69 @@ aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
 // ===========================================================================
 // 阶段 1：WorkEstimation
 // ===========================================================================
+struct WorkEstimationPlan {
+    StageContext ctx{};
+    uint32_t blockDim = 0;
+    uint32_t M = 0;
+    uint32_t Kdim = 0;
+    SpgemmArch22Ws1Layout ws1{};
+};
+
+static aclsparseStatus_t PrepareWorkEstimationPlan(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    aclsparseSpMatDescr_t matC, aclDataType computeType, aclsparseSpGEMMAlg_t alg,
+    aclsparseSpGEMMDescr_t spgemmDescr, WorkEstimationPlan &plan)
+{
+    aclsparseStatus_t status = PrepareStage(handle, matA, matB, matC, opA, opB,
+                                            computeType, alg, spgemmDescr, plan.ctx);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = GetSpgemmBlockDim(plan.blockDim);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    plan.M = static_cast<uint32_t>(plan.ctx.a->rows);
+    plan.Kdim = static_cast<uint32_t>(plan.ctx.a->cols);
+    plan.ws1 = SpgemmArch22ComputeWs1(plan.M, plan.Kdim, plan.blockDim);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t RunWorkEstimation(const WorkEstimationPlan &plan,
+                                           const void *alpha, const void *beta,
+                                           aclDataType computeType, aclsparseSpGEMMAlg_t alg,
+                                           aclsparseSpGEMMDescr_t spgemmDescr,
+                                           SpgemmArch22Context &arch22ctx,
+                                           size_t bufferSize1, void *buffer1)
+{
+    SpgemmScalars scalars;
+    aclsparseStatus_t status = ValidateAndReadScalars(plan.ctx, alpha, beta, scalars);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    spgemmDescr->state = AclsparseSpGemmState::CREATED;
+    RecordEstimatedStage(spgemmDescr, arch22ctx, plan.ctx, computeType, alg, buffer1,
+                         bufferSize1, plan.blockDim, plan.M, scalars);
+    SpgemmArch22TilingData tiling{};
+    FillCommonTiling(tiling, plan.ctx, &arch22ctx, plan.ws1);
+    FillEstimationTiling(tiling, scalars, arch22ctx);
+    const bool degenerate = (plan.M == 0) || (plan.ctx.a->cols == 0) ||
+                            (plan.ctx.b->cols == 0) || (plan.ctx.a->nnz == 0) ||
+                            (plan.ctx.b->nnz == 0);
+    auto *buffer = static_cast<uint8_t *>(buffer1);
+    status = RunCountStage(plan.ctx, arch22ctx, tiling, plan.ws1, buffer, plan.M,
+                           plan.Kdim, plan.blockDim, degenerate);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = FinishWorkEstimation(spgemmDescr, arch22ctx, plan.ws1, buffer, plan.blockDim);
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        spgemmDescr->state = AclsparseSpGemmState::WORK_ESTIMATED;
+    }
+    return status;
+}
+
 aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
     aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
@@ -680,67 +815,23 @@ aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
     if (bufferSize1 == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    StageContext ctx;
-    aclsparseStatus_t st = PrepareStage(handle, matA, matB, matC, opA, opB,
-                                       computeType, alg, spgemmDescr, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-
-    uint32_t blockDim = 0;
-    st = GetSpgemmBlockDim(blockDim);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
+    WorkEstimationPlan plan;
+    aclsparseStatus_t status = PrepareWorkEstimationPlan(handle, opA, opB, matA, matB,
+                                                          matC, computeType, alg,
+                                                          spgemmDescr, plan);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
     }
     SpgemmArch22Context &arch22ctx = GetOrCreateArch22Ctx(spgemmDescr);
-    const uint32_t M = static_cast<uint32_t>(ctx.a->rows);
-    const uint32_t Kdim = static_cast<uint32_t>(ctx.a->cols);
-    const SpgemmArch22Ws1Layout ws1 = SpgemmArch22ComputeWs1(M, Kdim, blockDim);
-
-    // ---- 查询模式：仅回填大小，不做任何计算，也不改描述符状态 ----
     if (externalBuffer1 == nullptr) {
-        *bufferSize1 = static_cast<size_t>(ws1.totalBytes);
+        *bufferSize1 = static_cast<size_t>(plan.ws1.totalBytes);
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    // ---- 执行模式：调用方给出的容量必须够 ----
-    if (*bufferSize1 < ws1.totalBytes) {
+    if (*bufferSize1 < plan.ws1.totalBytes) {
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
-
-    // CSR 内容校验（任务书：非法索引必须返回确定错误）+ alpha/beta 标量读取
-    SpgemmScalars sc;
-    st = ValidateAndReadScalars(ctx, alpha, beta, sc);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-
-    RecordEstimatedStage(spgemmDescr, arch22ctx, ctx, computeType, alg,
-                         externalBuffer1, *bufferSize1, blockDim, M, sc);
-
-    SpgemmArch22TilingData td{};
-    FillCommonTiling(td, ctx, &arch22ctx, ws1);
-    FillEstimationTiling(td, sc, arch22ctx);
-
-    auto *buf1 = static_cast<uint8_t *>(externalBuffer1);
-
-    // 退化场景：M/K/N 任一为 0，或 A/B 无非零元 → nnz(C) 必为 0（beta 分支除外）。
-    // 不下发 Kernel，直接把 rowProducts 视作全 0。
-    const bool degenerate = (M == 0) || (ctx.a->cols == 0) || (ctx.b->cols == 0) ||
-                            (ctx.a->nnz == 0) || (ctx.b->nnz == 0);
-
-    // 退化场景下清零描述符区，防止未初始化的描述符被后续阶段读到。
-    st = RunCountStage(ctx, arch22ctx, td, ws1, buf1, M, Kdim, blockDim, degenerate);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-
-    st = FinishWorkEstimation(spgemmDescr, arch22ctx, td, ws1, buf1, blockDim);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-
-    spgemmDescr->state = AclsparseSpGemmState::WORK_ESTIMATED;
-    return ACL_SPARSE_STATUS_SUCCESS;
+    return RunWorkEstimation(plan, alpha, beta, computeType, alg, spgemmDescr,
+                             arch22ctx, *bufferSize1, externalBuffer1);
 }
 
 // ===========================================================================

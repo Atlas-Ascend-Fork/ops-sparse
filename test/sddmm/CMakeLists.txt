@@ -8,4 +8,4 @@
 # ----------------------------------------------------------------------------------------------------------
 
 # aclsparseSDDMM GTest + CSV parameterized tests.
-ops_sparse_add_gtest_tests(sddmm ${OPS_SPARSE} VARIANT sddmm WARN_ON_MISSING_SRC)
+ops_sparse_add_gtest_tests(sddmm ${OPS_SPARSE} WARN_ON_MISSING_SRC)

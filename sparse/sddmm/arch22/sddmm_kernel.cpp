@@ -27,7 +27,19 @@ extern "C" __global__ __aicore__ void sddmm_kernel_f32(
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     AscendC::TPipe pipe;
-    KernelSparseSddmm op;
+    KernelSparseSddmm<false> op;
+    op.Init(matA, matB, csrRowOffsets, csrColIndices, csrValues, tiling, &pipe);
+    op.Process();
+}
+
+extern "C" __global__ __aicore__ void sddmm_kernel_f32_strided(
+    GM_ADDR matA, GM_ADDR matB,
+    GM_ADDR csrRowOffsets, GM_ADDR csrColIndices, GM_ADDR csrValues,
+    SddmmTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    AscendC::TPipe pipe;
+    KernelSparseSddmm<true> op;
     op.Init(matA, matB, csrRowOffsets, csrColIndices, csrValues, tiling, &pipe);
     op.Process();
 }
@@ -54,8 +66,15 @@ extern "C" aclsparseStatus_t sddmm_kernel_launch(
         sddmm_kernel_f16<<<numBlocks, nullptr, stream>>>(
             matA, matB, csrRowOffsets, csrColIndices, csrValues, tiling);
     } else {
-        sddmm_kernel_f32<<<numBlocks, nullptr, stream>>>(
-            matA, matB, csrRowOffsets, csrColIndices, csrValues, tiling);
+        const bool bContig = (tiling.orderY == 0u && tiling.opY == 1u) ||
+                             (tiling.orderY == 1u && tiling.opY == 0u);
+        if (bContig) {
+            sddmm_kernel_f32<<<numBlocks, nullptr, stream>>>(
+                matA, matB, csrRowOffsets, csrColIndices, csrValues, tiling);
+        } else {
+            sddmm_kernel_f32_strided<<<numBlocks, nullptr, stream>>>(
+                matA, matB, csrRowOffsets, csrColIndices, csrValues, tiling);
+        }
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
