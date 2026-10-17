@@ -7,17 +7,21 @@ SDDMM（Sampled Dense-Dense Matrix Multiplication，采样稠密-稠密矩阵乘
 数学表达式：
 
 ```
-C_out = (alpha * X * Y^T + beta * C) ∘ spy(C)
+C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
 ```
 
 其中：
 
-- X 为 m×k 稠密矩阵，Y 为 n×k 稠密矩阵（计算 X * Y^T，结果为 m×n）
+- `op(X)` 为 m×k、`op(Y)` 为 k×n 的稠密矩阵，结果为 m×n；原始描述符形状由
+  `opX`、`opY` 决定：`opX=NON_TRANSPOSE` 时 X 为 m×k，`opX=TRANSPOSE` 时 X
+  为 k×m；`opY=NON_TRANSPOSE` 时 Y 为 k×n，`opY=TRANSPOSE` 时 Y 为 n×k
 - C 为 m×n 稀疏矩阵（CSR 格式），spy(C) 为 C 的稀疏模式（非零位置为 1）
 - ∘ 表示 Hadamard 积（逐元素乘），即只在 C 的非零位置保存计算结果
 - alpha、beta 为标量缩放因子
 
-对 CSR 每个非零元素 p（行 i，列 j=colInd[p]），算子计算 X[i,:] 与 Y[j,:] 的 K 维度点积，结果为 `alpha * dot + beta * C_values[p]`，并原地写回 `csrValues[p]`。
+对 CSR 每个非零元素 p（行 i，列 j=colInd[p]），算子计算 `op(X)[i,:]` 与
+`op(Y)[:,j]` 的 K 维度点积，结果为 `alpha * dot + beta * C_values[p]`，并原地写回
+`csrValues[p]`。
 
 调用流程为三步法：
 
@@ -31,7 +35,7 @@ C_out = (alpha * X * Y^T + beta * C) ∘ spy(C)
 |--------|---------|
 | aclsparseSDDMMBufferSize | 查询 SDDMM 所需 workspace 大小（字节） |
 | aclsparseSDDMMPreprocess | 对稀疏矩阵进行预处理（行重排 + 贪心分箱），加速后续计算 |
-| aclsparseSDDMM | 执行采样矩阵乘法 C_out = (alpha * X * Y^T + beta * C) ∘ spy(C) |
+| aclsparseSDDMM | 执行采样矩阵乘法 C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C) |
 
 ## 算子执行接口
 
@@ -61,8 +65,8 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
 | opX | 输入 | aclsparseOperation_t | 稠密矩阵 X 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置，Host 内存 |
 | opY | 输入 | aclsparseOperation_t | 稠密矩阵 Y 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
-| matX | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 X 的描述符（m×k），Host 内存 |
-| matY | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 Y 的描述符（n×k），Host 内存 |
+| matX | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 X 的描述符：`opX=NON_TRANSPOSE` 时为 m×k，`opX=TRANSPOSE` 时为 k×m，Host 内存 |
+| matY | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 Y 的描述符：`opY=NON_TRANSPOSE` 时为 k×n，`opY=TRANSPOSE` 时为 n×k，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseSpMatDescr_t | 稀疏矩阵 C 的描述符（CSR 格式，m×n），values 数组原地更新，Host 内存 |
 | computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_FLOAT16`，Host 内存 |
@@ -82,13 +86,20 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
 - 数据类型组合仅支持以下两种（X/Y/C 三者数据类型须一致且与 computeType 一致）：
   - matX=ACL_FLOAT, matY=ACL_FLOAT, matC=ACL_FLOAT, computeType=ACL_FLOAT
   - matX=ACL_FLOAT16, matY=ACL_FLOAT16, matC=ACL_FLOAT16, computeType=ACL_FLOAT16
-- 维度匹配：X.rows == C.rows（m）、X.cols == Y.cols（k）、Y.rows == C.cols（n）
+- 维度匹配按操作后的有效形状检查：`op(X)` 为 m×k、`op(Y)` 为 k×n，且 C 为 m×n。
+  因此，`opX=NON_TRANSPOSE` 时 X 为 m×k，`opX=TRANSPOSE` 时 X 为 k×m；
+  `opY=NON_TRANSPOSE` 时 Y 为 k×n，`opY=TRANSPOSE` 时 Y 为 n×k。
 - 零维输入：X / Y / C 任一维度（rows/cols）为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（arch35 与 arch22 行为一致）
 - 各维度值不得超过 INT32_MAX
 
 > **与 cuSPARSE opB 的语义对照（迁移注意）**
 >
-> 本算子公式为 `C = α(X·Y^T) ∘ spy(C) + βC`，其中 Y 描述符的形态由 opY 决定：`opY=NON_TRANSPOSE` 时 Y 描述符为 k×n（直接参与乘积，实际计算 X·Y）；`opY=TRANSPOSE` 时 Y 描述符为 n×k（转置后参与乘积，实际计算 X·Y^T）。cuSPARSE `cusparseSDDMM` 公式为 `C = α(op(A)·op(B)) ∘ spy(C) + βC`，op(B) 形态由 opB 决定，语义与本接口 opY 一致，对应关系如下：
+> 本算子公式为 `C = α(op(X)·op(Y)) ∘ spy(C) + βC`。`opX`、`opY` 分别决定 X、Y
+> 描述符的原始形态和参与乘积的有效形态：`opX=NON_TRANSPOSE` 时 X 描述符为 m×k，
+> `opX=TRANSPOSE` 时为 k×m；`opY=NON_TRANSPOSE` 时 Y 描述符为 k×n，
+> `opY=TRANSPOSE` 时为 n×k。cuSPARSE `cusparseSDDMM` 公式为
+> `C = α(op(A)·op(B)) ∘ spy(C) + βC`，op(B) 形态由 opB 决定，语义与本接口 opY
+> 一致，对应关系如下：
 >
 > | 本接口 opY | 实际计算的乘积 | 等价的 cuSPARSE opB |
 > |-----------|---------------|---------------------|
@@ -133,8 +144,8 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
 | opX | 输入 | aclsparseOperation_t | 稠密矩阵 X 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置，Host 内存 |
 | opY | 输入 | aclsparseOperation_t | 稠密矩阵 Y 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
-| matX | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 X 的描述符（m×k），Host 内存 |
-| matY | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 Y 的描述符（n×k），Host 内存 |
+| matX | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 X 的描述符：`opX=NON_TRANSPOSE` 时为 m×k，`opX=TRANSPOSE` 时为 k×m，Host 内存 |
+| matY | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 Y 的描述符：`opY=NON_TRANSPOSE` 时为 k×n，`opY=TRANSPOSE` 时为 n×k，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseSpMatDescr_t | 稀疏矩阵 C 的描述符（CSR 格式，m×n），Host 内存 |
 | computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_FLOAT16`，Host 内存 |
@@ -183,8 +194,8 @@ aclsparseStatus_t aclsparseSDDMM(
 | opX | 输入 | aclsparseOperation_t | 稠密矩阵 X 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置，Host 内存 |
 | opY | 输入 | aclsparseOperation_t | 稠密矩阵 Y 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
-| matX | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 X 的描述符（m×k），Host 内存 |
-| matY | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 Y 的描述符（n×k），Host 内存 |
+| matX | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 X 的描述符：`opX=NON_TRANSPOSE` 时为 m×k，`opX=TRANSPOSE` 时为 k×m，Host 内存 |
+| matY | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 Y 的描述符：`opY=NON_TRANSPOSE` 时为 k×n，`opY=TRANSPOSE` 时为 n×k，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseSpMatDescr_t | 稀疏矩阵 C 的描述符（CSR 格式，m×n），values 数组原地更新为采样矩阵乘法结果，Host 内存 |
 | computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_FLOAT16`，Host 内存 |
@@ -329,7 +340,9 @@ int aclsparseSDDMMTest(AclContext& ctx)
     std::vector<int> hColIndC = {0, 2, 1, 0, 2};
     std::vector<float> hValC  = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
-    // X: 行主序 4x2, Y: 行主序 3x2
+    // 本示例使用 opX=NON_TRANSPOSE、opY=TRANSPOSE，因此 X 为 m×k (4x2)，Y 为 n×k (3x2)。
+    // 若切换操作类型，描述符原始形状也要随之切换：opX=TRANSPOSE 时 X 为 k×m，
+    // opY=NON_TRANSPOSE 时 Y 为 k×n。
     int64_t ldx = k, ldy = k;
     aclsparseOrder_t orderX = ACL_SPARSE_ORDER_ROW;
     aclsparseOrder_t orderY = ACL_SPARSE_ORDER_ROW;

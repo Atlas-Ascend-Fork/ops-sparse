@@ -865,8 +865,10 @@ aclsparseStatus_t aclsparseCubeSpmm(
 // ============================================================================
 // SDDMM (Sampled Dense-Dense Matrix Multiplication) Generic API
 // ============================================================================
-//  C_out = (alpha * X * Y^T + beta * C) ∘ spy(C)
-//  X: m×k dense, Y: n×k dense, C: m×n sparse (CSR), values updated in-place.
+//  C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
+//  opX/opY determine X/Y shapes: X=m×k (NON_TRANSPOSE) or k×m (TRANSPOSE);
+//  Y=k×n (NON_TRANSPOSE) or n×k (TRANSPOSE); C=m×n CSR.
+//  C values are updated in-place.
 
 // Algorithm enum for SDDMM.
 typedef enum aclsparseSDDMMAlg_t {
@@ -892,7 +894,7 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
     aclsparseSDDMMAlg_t alg, void *buffer);
 
 /**
- * @brief 采样稠密-稠密矩阵乘法：C = (alpha * X * Y^T + beta * C) ∘ spy(C)
+ * @brief 采样稠密-稠密矩阵乘法：C = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
  *
  * @note 线程安全：本接口内部使用 pattern cache 加速重复调用，该 cache 非线程安全。
  *       多 stream 并发调用时，调用者须保证串行访问，或使用独立的 matC 描述符。
