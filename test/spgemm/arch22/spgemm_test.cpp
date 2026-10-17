@@ -279,14 +279,21 @@ bool RunStageEstimateMemory(SpgemmStageRun &r)
     if (!(r.alg == ACL_SPARSE_SPGEMM_ALG2 || r.alg == ACL_SPARSE_SPGEMM_ALG3)) {
         return true;
     }
-    size_t bufSize3 = 0;
+    const size_t unwritten = static_cast<size_t>(-1);
+    size_t bufSize3 = unwritten;
+    r.bufSize2 = unwritten;
     aclsparseStatus_t st = aclsparseSpGEMMEstimateMemory(
         r.handle, ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
         r.alpha, r.matA, r.matB, r.beta, r.matC, r.dt, r.alg, r.descr,
         0.5f, &bufSize3, nullptr, &r.bufSize2);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        std::printf("  [FAIL] EstimateMemory query st=%d\n", st);
+    if (st != ACL_SPARSE_STATUS_SUCCESS || bufSize3 == unwritten ||
+        r.bufSize2 == unwritten || r.bufSize2 == 0) {
+        std::printf("  [FAIL] EstimateMemory query st=%d size2=%zu size3=%zu\n",
+                    st, r.bufSize2, bufSize3);
         return false;
+    }
+    if (bufSize3 == 0) {
+        return true;
     }
     if (!r.buf3.Alloc(bufSize3)) {
         std::printf("  [FAIL] alloc buffer3 failed\n");
@@ -2894,6 +2901,101 @@ bool TestScalarEncoding(aclsparseHandle_t handle, aclDataType dt)
     return true;
 }
 
+aclsparseStatus_t CallIssue236EstimateMemory(const SpgemmStageRun &r, size_t *size3,
+                                             void *buffer3, size_t *size2)
+{
+    return aclsparseSpGEMMEstimateMemory(
+        r.handle, ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        r.alpha, r.matA, r.matB, r.beta, r.matC, r.dt, r.alg, r.descr,
+        0.5f, size3, buffer3, size2);
+}
+
+bool CheckIssue236EstimateMemoryOutputPointers(const SpgemmStageRun &r)
+{
+    size_t ignored2 = 0;
+    size_t ignored3 = 0;
+    return ReportStageStatus("issue236-null-size3",
+        CallIssue236EstimateMemory(r, nullptr, nullptr, &ignored2),
+        ACL_SPARSE_STATUS_INVALID_VALUE) &&
+        ReportStageStatus("issue236-null-size2",
+            CallIssue236EstimateMemory(r, &ignored3, nullptr, nullptr),
+            ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+bool RunIssue236EstimateMemory(SpgemmStageRun &r, bool legacyBuffer3, DevBuf &placeholder3)
+{
+    const size_t unwritten = static_cast<size_t>(0xdeadbeefULL);
+    size_t size2 = unwritten;
+    size_t size3 = unwritten;
+    void *buffer3 = nullptr;
+    if (legacyBuffer3 && !placeholder3.Alloc(64)) {
+        std::printf("  [FAIL] issue236: alloc legacy buffer3 failed\n");
+        return false;
+    }
+    if (legacyBuffer3) {
+        buffer3 = placeholder3.Get();
+    }
+    const aclsparseStatus_t st = CallIssue236EstimateMemory(r, &size3, buffer3, &size2);
+    if (st != ACL_SPARSE_STATUS_SUCCESS || size3 != 0 || size2 == unwritten || size2 == 0) {
+        std::printf("  [FAIL] issue236 EstimateMemory st=%d size2=%zu size3=%zu\n",
+                    st, size2, size3);
+        return false;
+    }
+    r.bufSize2 = size2;
+    return true;
+}
+
+/** Copy/Download 完成后再查询，不能掩盖 EstimateMemory 到 Compute 的状态推进。 */
+bool CheckIssue236ComputeSize(const SpgemmStageRun &r)
+{
+    size_t queriedSize = 0;
+    const aclsparseStatus_t st = aclsparseSpGEMMCompute(
+        r.handle, ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        r.alpha, r.matA, r.matB, r.beta, r.matC, r.dt, r.alg, r.descr,
+        &queriedSize, nullptr);
+    if (st != ACL_SPARSE_STATUS_SUCCESS || queriedSize != r.bufSize2) {
+        std::printf("  [FAIL] issue236 Compute size st=%d got=%zu want=%zu\n",
+                    st, queriedSize, r.bufSize2);
+        return false;
+    }
+    return true;
+}
+
+/** Issue236：ALG2/ALG3 的空 buffer3 查询必须写回 buffer2 并可直接进入 Compute。 */
+bool TestEstimateMemoryNullBuffer3(aclsparseHandle_t handle, aclsparseSpGEMMAlg_t alg,
+                                   bool empty, bool legacyBuffer3)
+{
+    const int32_t degree = empty ? 0 : 1;
+    SpgemmRefCsr a = SpgemmRefBuildCsr(2, 2, degree, 1, 0, false, 236);
+    SpgemmRefCsr b = SpgemmRefBuildCsr(2, 2, degree, 1, 0, false, 237);
+    DeviceCsr dA;
+    DeviceCsr dB;
+    SpgemmMatCHolder c;
+    SPGEMM_EXPECT(UploadCsr(a, ACL_FLOAT, dA), "issue236: upload A failed");
+    SPGEMM_EXPECT(UploadCsr(b, ACL_FLOAT, dB), "issue236: upload B failed");
+    SPGEMM_EXPECT(SetupMatC(a, b, nullptr, ACL_FLOAT, c), "issue236: setup C failed");
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    SpgemmStageRun r{handle, dA.descr, dB.descr, c.descr, nullptr, ACL_FLOAT, alg,
+                     &alpha, &beta};
+    SPGEMM_ST(aclsparseSpGEMMCreateDescr(&r.descr));
+    DevBuf placeholder3;
+    HostResult got;
+    bool ok = RunStageWorkEstimation(r) && CheckIssue236EstimateMemoryOutputPointers(r) &&
+              RunIssue236EstimateMemory(r, legacyBuffer3, placeholder3) &&
+              RunStageCompute(r) && RunStageAllocateOutput(r) && RunStageCopy(r) &&
+              RunStageDownload(r, got) && CheckIssue236ComputeSize(r);
+    (void)aclsparseSpGEMMDestroyDescr(r.descr);
+    if (!ok) {
+        return false;
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 0.0, 0.0, nullptr, false);
+    const std::string tag = std::string("issue236/") +
+        (legacyBuffer3 ? "nonnull-buffer3/" : "null-buffer3/") +
+        (empty ? "empty" : "small");
+    return CompareResult(got, ref, ACL_FLOAT, tag.c_str());
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -3075,6 +3177,16 @@ TEST_F(SpGemmArch22Test, KZeroWithNonzeroBetaPreservesCIn) {
 TEST_F(SpGemmArch22Test, BetaWithChunkedAlg) {
     EXPECT_TRUE(TestBetaWithChunkedAlg(s_handle_, ACL_SPARSE_SPGEMM_ALG2, "alg2"));
     EXPECT_TRUE(TestBetaWithChunkedAlg(s_handle_, ACL_SPARSE_SPGEMM_ALG3, "alg3"));
+}
+
+// ---- Issue236: EstimateMemory must complete ALG2/ALG3 setup with buffer3 == nullptr ----
+TEST_F(SpGemmArch22Test, Issue236EstimateMemoryNullBuffer3) {
+    const aclsparseSpGEMMAlg_t algs[] = {ACL_SPARSE_SPGEMM_ALG2, ACL_SPARSE_SPGEMM_ALG3};
+    for (aclsparseSpGEMMAlg_t alg : algs) {
+        EXPECT_TRUE(TestEstimateMemoryNullBuffer3(s_handle_, alg, true, false));
+        EXPECT_TRUE(TestEstimateMemoryNullBuffer3(s_handle_, alg, false, false));
+    }
+    EXPECT_TRUE(TestEstimateMemoryNullBuffer3(s_handle_, ACL_SPARSE_SPGEMM_ALG2, false, true));
 }
 
 // ---- Repeated Compute with beta ----

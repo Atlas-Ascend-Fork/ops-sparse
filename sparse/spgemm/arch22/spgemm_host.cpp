@@ -867,6 +867,7 @@ aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
     float chunkFraction, size_t *bufferSize3, void *externalBuffer3,
     size_t *bufferSize2)
 {
+    (void)externalBuffer3;
     StageContext ctx;
     aclsparseStatus_t st = PrepareStage(handle, matA, matB, matC, opA, opB,
                                        computeType, alg, spgemmDescr, ctx);
@@ -889,24 +890,12 @@ aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
-    if (bufferSize3 == nullptr) {
+    if (bufferSize3 == nullptr || bufferSize2 == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (!(chunkFraction > 0.0f) || chunkFraction > 1.0f) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-
-    // arch22 的 T1/T3 模板 UB 占用与 N 无关，分块由 Kernel 内的 chunkWidth 完成，
-    // 不需要额外的 device 侧临时缓冲，故 bufferSize3 为 0。
-    if (externalBuffer3 == nullptr) {
-        *bufferSize3 = 0;
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    if (bufferSize2 == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    spgemmDescr->chunkFraction = chunkFraction;
 
     // buffer2 定容须计入 beta != 0 时并入的 C_in 结构。
     int64_t nnzUB = ComputeNnzUpperBound(arch22ctx->rowProducts,
@@ -916,8 +905,11 @@ aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
     }
     const SpgemmArch22Ws2Layout ws2 =
         SpgemmArch22ComputeWs2(static_cast<uint32_t>(spgemmDescr->m), nnzUB, arch22ctx->cachedDtypeId);
+    // Kernel 内部完成分块，不需要 buffer3；空指针调用也完成本阶段规划。
+    *bufferSize3 = 0;
     *bufferSize2 = static_cast<size_t>(ws2.totalBytes);
 
+    spgemmDescr->chunkFraction = chunkFraction;
     spgemmDescr->state = AclsparseSpGemmState::MEMORY_ESTIMATED;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
