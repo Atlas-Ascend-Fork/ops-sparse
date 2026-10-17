@@ -73,6 +73,10 @@ inline void stratWellCond(std::mt19937& g, int, int, float& dv, float& dlv, floa
     dv = fillNonZero(g, 1.0, 5.0);
     dlv = fillUniform(g, -0.8, 0.8);
     duv = fillUniform(g, -0.8, 0.8);
+    if (std::abs(dv) <= std::abs(dlv) + std::abs(duv)) {
+        float sgn = (dv >= 0.0f) ? 1.0f : -1.0f;
+        dv = sgn * (std::abs(dlv) + std::abs(duv) + 1.0f);
+    }
 }
 
 inline void stratDiagDom(std::mt19937& g, int, int, float& dv, float& dlv, float& duv)

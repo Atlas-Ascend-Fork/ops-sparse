@@ -58,6 +58,30 @@
 
 using namespace sparse_test;
 
+TEST(Gtsv2StridedBatchGoldenTest, WellCondIsStrictlyDiagonallyDominant)
+{
+    constexpr int m = 16;
+    constexpr int batchCount = 3;
+    constexpr int batchStride = 24;
+    const auto tri = makeSparseTridiagStrided(m, batchCount, batchStride, "well_cond", 300);
+
+    for (int b = 0; b < batchCount; ++b) {
+        const auto base = static_cast<size_t>(b) * batchStride;
+        for (int i = 0; i < m; ++i) {
+            const auto k = base + i;
+            const float offDiagonalSum = std::abs(tri.dl[k]) + std::abs(tri.du[k]);
+            EXPECT_GT(std::abs(tri.d[k]), offDiagonalSum) << "batch=" << b << " row=" << i;
+        }
+        for (int i = m; i < batchStride; ++i) {
+            const auto k = base + i;
+            EXPECT_FLOAT_EQ(0.0f, tri.dl[k]) << "dl padding, batch=" << b << " offset=" << i;
+            EXPECT_FLOAT_EQ(0.0f, tri.d[k]) << "d padding, batch=" << b << " offset=" << i;
+            EXPECT_FLOAT_EQ(0.0f, tri.du[k]) << "du padding, batch=" << b << " offset=" << i;
+            EXPECT_FLOAT_EQ(0.0f, tri.x[k]) << "x padding, batch=" << b << " offset=" << i;
+        }
+    }
+}
+
 // ============================================================================
 // Shared ACL environment (one instance per test-suite)
 // ============================================================================
