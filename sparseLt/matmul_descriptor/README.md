@@ -53,8 +53,8 @@ D = Activation(α · op(A) · op(B) + β · C + bias)
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
@@ -99,8 +99,8 @@ aclsparseStatus_t aclsparseLtDenseDescriptorInit(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
@@ -142,8 +142,8 @@ aclsparseStatus_t aclsparseLtStructuredDescriptorInit(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
@@ -174,8 +174,8 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
@@ -226,8 +226,8 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
@@ -271,8 +271,8 @@ aclsparseStatus_t aclsparseLtMatDescGetAttribute(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
@@ -326,8 +326,8 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
 
 #### 功能描述
 
