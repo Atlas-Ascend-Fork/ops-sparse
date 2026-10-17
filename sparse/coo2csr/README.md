@@ -59,7 +59,7 @@ aclsparseStatus_t aclsparseXcoo2csr(aclsparseHandle_t handle, const int *cooRowI
 - idxBase 必须为 `ACL_SPARSE_INDEX_BASE_ZERO` 或 `ACL_SPARSE_INDEX_BASE_ONE`，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - 调用方须保证 cooRowInd 按行非递减排序。算子内部不做排序校验。未排序输入仍能得到正确结果，但 RLE 压缩失效，atomic 竞争增加，性能下降。建议排序以获得最佳性能
 - 调用方须保证 cooRowInd 中每个元素取值在 `[idxBase, m + idxBase - 1]` 范围内。越界值被跳过（不计入 rowCount），导致对应行计数偏少，csrRowPtr 值偏小
-- nnz > 0 时算子需从 handle workspace 分配临时空间：`m × 4` 字节（行计数数组）+ `aivCoreNum × 4` 字节（多核前缀和块间归约数组，aivCoreNum 为 AI Core 数）。nnz == 0 时不要求 workspace，走快速路径。handle 默认 workspace 为 4 MiB，可支持 `m ≤ 1048576`。当 workspace 不足以同时容纳行计数数组与块间归约数组时，返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`。当 `m > 1048576` 时，调用方须先调用 `aclsparseSetWorkspace` 提供不少于 `(m + aivCoreNum) × 4` 字节的 Device 内存，否则返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`
+- nnz > 0 时算子需从 handle workspace 分配临时空间：`m × 4` 字节（行计数数组）+ `aivCoreNum × 4` 字节（多核前缀和块间归约数组，aivCoreNum 为 AI Core 数）。nnz == 0 时不要求 workspace，走快速路径。handle 默认 workspace 为 4 MiB；仅当 `m + aivCoreNum ≤ 1048576` 时，默认 workspace 才足以容纳上述临时空间。当 workspace 不足以同时容纳行计数数组与块间归约数组时，返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`。当 `m + aivCoreNum > 1048576` 时，调用方须先调用 `aclsparseSetWorkspace` 提供不少于 `(m + aivCoreNum) × 4` 字节的 Device 内存，否则返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`
 - nnz > 0 时，handle 无 workspace（workspace 为 nullptr）时返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`。nnz == 0 时不检查 workspace
 - 边界行为：
   - m = 0：`csrRowPtr[0] = idxBase`，返回 `ACL_SPARSE_STATUS_SUCCESS`
@@ -75,7 +75,7 @@ aclsparseStatus_t aclsparseXcoo2csr(aclsparseHandle_t handle, const int *cooRowI
   | 多核并行前缀和 | nnz > 0 且 m > 1024 | K1（CountRows）+ 3 阶段并行前缀和（Phase A/B/C） |
   | 单核前缀和 | nnz > 0 且 m ≤ 1024 且 nnz > 1024 | K1（CountRows）+ 单核串行前缀和 |
 
-- 当矩阵行数 `m > 1048576` 时，handle 默认 workspace（4 MiB）不足以容纳行计数数组（`m × 4` 字节）。此时须在调用 `aclsparseXcoo2csr` 之前，先通过 `aclsparseSetWorkspace` 向 handle 注入一块不小于 `(m + aivCoreNum) × 4` 字节的 Device 内存，例如：
+- 当 `nnz > 0` 且 `m + aivCoreNum > 1048576` 时，handle 默认 workspace（4 MiB）不足以容纳行计数数组与块间归约数组（总计 `(m + aivCoreNum) × 4` 字节）。此时须在调用 `aclsparseXcoo2csr` 之前，先通过 `aclsparseSetWorkspace` 向 handle 注入一块不小于 `(m + aivCoreNum) × 4` 字节的 Device 内存，例如：
   ```cpp
   uint32_t aivCoreNum = 48;  // 请根据实际设备 AI Core 数调整
   void *userWorkspace = nullptr;
