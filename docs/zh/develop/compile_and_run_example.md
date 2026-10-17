@@ -37,12 +37,13 @@
     ```bash
     # 赋予可执行权限
     chmod +x build_out/cann-950-ops-sparse-*.run
-    # 安装（root 用户默认安装到 /usr/local/Ascend）
-    ./build_out/cann-950-ops-sparse-*.run --install --quiet --install-path=${install_path}
+    # 安装到 ${install_path}/cann
+    ./build_out/cann-950-ops-sparse-*.run --install --quiet --install-path="${install_path}"
     ```
-    - `${install_path}`：表示指定安装路径，默认安装在 `/usr/local/Ascend` 目录。
+    - 执行前请设置 `${install_path}` 为非空且不含空格的安装根目录，例如 `install_path=/opt/Ascend`。
+    - 安装器在该根目录下追加 `cann/`：root 默认安装到 `/usr/local/Ascend/cann/`，普通用户默认安装到 `${HOME}/Ascend/cann/`。省略 `--install-path` 时，安装器也采用相同的默认根目录。
 
-    安装后，ops-sparse 的头文件和库文件会安装到 CANN 安装目录下：
+    安装后，ops-sparse 的头文件和库文件位于：
 
     ```
     ${install_path}/cann/
