@@ -13,7 +13,7 @@ Just-In-Time（JIT）编译，将 PyTorch 接口接入 `ops-sparse` 的 ACLSpars
 ### 前置条件
 
 - 操作系统：Linux
-- Python：3.8+
+- Python：3.9+
 - 编译器：GCC 9.4.0+
 - 框架：
   - PyTorch >= 2.6.0
