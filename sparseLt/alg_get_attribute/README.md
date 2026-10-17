@@ -62,7 +62,7 @@ aclsparseStatus_t aclsparseLtMatmulAlgGetAttribute(
 - **attrValue 非空**：`attrValue` 须非空，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **attrValueSize 匹配**：`attrValueSize` 须等于 `sizeof(int32_t)`（4 字节），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **attr 枚举范围**：`attr` 须为上表所列枚举值之一，否则返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **查询时机**：可在 `aclsparseLtMatmulAlgSelectionInit` 之后任意时刻查询（PlanInit 前后均可）。PlanInit 之后查询返回 PlanInit 时冻结的值（若 PlanInit 修改了 effectiveSplitK，查询返回的是 algSelection 中存储的原始值，非 effectiveSplitK）。
+- **查询时机**：可在 `aclsparseLtMatmulAlgSelectionInit` 之后任意时刻查询（PlanInit 前后均可）。可设置属性始终读取 algSelection 中当前存储的值；PlanInit 后再次成功调用 SetAttribute，GetAttribute 也会返回更新后的属性值，而非已有 plan 的初始化快照。查询 SPLIT_K 返回存储的 splitK，不返回 PlanInit 计算的 effectiveSplitK。因此不能用本查询接口读取或验证已有 plan 的冻结 tiling/workspace 配置。
 - **与 SetAttribute 的关系**：GetAttribute 读取的值为最近一次 SetAttribute 设置的值（或 AlgSelectionInit 的默认值：algConfigId=0、splitK=1、searchIterations=5、splitKMode=0、splitKBuffers=0）。
 
 ## 返回值 / 错误码
