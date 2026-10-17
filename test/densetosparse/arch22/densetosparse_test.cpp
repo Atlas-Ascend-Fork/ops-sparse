@@ -486,7 +486,54 @@ static void CheckBellGeometryRejections(aclsparseHandle_t h,
     }
 }
 
-// Shape / layout / dtype-consistency rejections.
+// Value-type consistency rejections.
+static void CheckValueTypeRejections(aclsparseHandle_t h, size_t *bs,
+    void *dOff, void *dV, std::vector<ErrItem> &err)
+{
+    {
+        aclsparseDnMatDescr_t A16 = nullptr;
+        aclsparseDnMatDescr_t ABf16 = nullptr;
+        aclsparseSpMatDescr_t B16 = nullptr;
+        aclsparseSpMatDescr_t BBf16 = nullptr;
+        EXPECT_EQ(aclsparseCreateDnMat(&A16, 4, 5, 5, dV, ACL_FLOAT16,
+                                       ACL_SPARSE_ORDER_ROW),
+                  ACL_SPARSE_STATUS_SUCCESS);
+        EXPECT_EQ(aclsparseCreateDnMat(&ABf16, 4, 5, 5, dV, ACL_BF16,
+                                       ACL_SPARSE_ORDER_ROW),
+                  ACL_SPARSE_STATUS_SUCCESS);
+        EXPECT_EQ(aclsparseCreateCsr(&B16, 4, 5, 0, dOff, nullptr, nullptr,
+                                     ACL_SPARSE_INDEX_32I,
+                                     ACL_SPARSE_INDEX_32I,
+                                     ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT16),
+                  ACL_SPARSE_STATUS_SUCCESS);
+        EXPECT_EQ(aclsparseCreateCsr(&BBf16, 4, 5, 0, dOff, nullptr, nullptr,
+                                     ACL_SPARSE_INDEX_32I,
+                                     ACL_SPARSE_INDEX_32I,
+                                     ACL_SPARSE_INDEX_BASE_ZERO, ACL_BF16),
+                  ACL_SPARSE_STATUS_SUCCESS);
+        ExpectErr(err, "matching FP16 control",
+            aclsparseDenseToSparseGetBufferSize(
+                   h, A16, B16, ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT,
+                   bs),
+            ACL_SPARSE_STATUS_SUCCESS);
+        ExpectErr(err, "same-width FP16/BF16 mismatch",
+            aclsparseDenseToSparseGetBufferSize(
+                   h, A16, BBf16, ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT,
+                   bs),
+            ACL_SPARSE_STATUS_INVALID_VALUE);
+        ExpectErr(err, "matching BF16 control",
+            aclsparseDenseToSparseGetBufferSize(
+                   h, ABf16, BBf16, ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT,
+                   bs),
+            ACL_SPARSE_STATUS_SUCCESS);
+        aclsparseDestroyDnMat(A16);
+        aclsparseDestroyDnMat(ABf16);
+        aclsparseDestroySpMat(B16);
+        aclsparseDestroySpMat(BBf16);
+    }
+}
+
+// Shape, layout, and dtype rejections.
 static void CheckShapeDtypeRejections(aclsparseHandle_t h,
     aclsparseConstDnMatDescr_t A, aclsparseSpMatDescr_t B, size_t *bs,
     void *dOff, void *dV, std::vector<ErrItem> &err)
@@ -534,6 +581,7 @@ static void CheckDescriptorRejections(aclsparseHandle_t h,
     CheckIndexBaseRejections(h, A, bs, dOff, err);
     CheckBellGeometryRejections(h, A, bs, dOff, dV, err);
     CheckShapeDtypeRejections(h, A, B, bs, dOff, dV, err);
+    CheckValueTypeRejections(h, bs, dOff, dV, err);
 }
 
 // 尺寸上界：rows > INT32_MAX 在查询入口拒绝（描述符创建本身

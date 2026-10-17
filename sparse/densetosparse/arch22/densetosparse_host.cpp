@@ -265,7 +265,8 @@ aclsparseStatus_t ValidateDescriptorConfiguration(
                 static_cast<int>(dense->valueType));
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (GetElementBytes(sparse->valueType) != *elementBytes) {
+    if (GetElementBytes(sparse->valueType) != *elementBytes ||
+        dense->valueType != sparse->valueType) {
         OP_LOGE(kApi, "value type mismatch: dense=%d, sparse=%d",
                 static_cast<int>(dense->valueType),
                 static_cast<int>(sparse->valueType));
