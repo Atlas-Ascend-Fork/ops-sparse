@@ -64,8 +64,10 @@ TEST_P({{Op}}Test, GenericSuccess) {
 
     // 1. 生成 CSR 数据（使用框架 fill.h）
     auto csr = makeSparseCsr(p.m, p.n, p.sparsity, p.seed);
-    auto xVec = makeDenseFloat(p.n, -5.0, 10.0, p.seed + 1);
-    auto yInit = makeDenseFloat(p.m, -5.0, 10.0, p.seed + 2);
+    const auto xLen = p.transpose ? p.m : p.n;
+    const auto yLen = p.transpose ? p.n : p.m;
+    auto xVec = makeDenseFloat(xLen, -5.0, 10.0, p.seed + 1);
+    auto yInit = makeDenseFloat(yLen, -5.0, 10.0, p.seed + 2);
 
     // 2. Eigen golden 作为唯一比对基准
     auto yGolden = {{Op}}Golden(csr, xVec, yInit, p.alpha, p.beta, p.transpose);

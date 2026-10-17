@@ -52,8 +52,10 @@ inline std::vector<T> {{Op}}NpuWrapper(
     // 2. 描述符（RAII，自动 Destroy）
     auto matA = SpMatManager::createConstCsr(csr.rows, csr.cols, csr.nnz,
         dRowPtr.get(), dColIdx.get(), dVals.get());
-    auto vecX = DnVecManager::createConst(csr.cols, dX.get(), aclDataTypeOf<T>());
-    auto vecY = DnVecManager::create(csr.rows, dY.get(), aclDataTypeOf<T>());
+    const auto xLen = transpose ? csr.rows : csr.cols;
+    const auto yLen = transpose ? csr.cols : csr.rows;
+    auto vecX = DnVecManager::createConst(xLen, dX.get(), aclDataTypeOf<T>());
+    auto vecY = DnVecManager::create(yLen, dY.get(), aclDataTypeOf<T>());
 
     // 3. 算子调用
     auto op = transpose ? ACL_SPARSE_OP_TRANSPOSE : ACL_SPARSE_OP_NON_TRANSPOSE;
@@ -64,7 +66,7 @@ inline std::vector<T> {{Op}}NpuWrapper(
     SPARSE_CHECK_RET(aclrtSynchronizeStream(stream) == ACL_SUCCESS, return {});
 
     // 4. D2H
-    std::vector<T> yNpu(csr.rows);
+    std::vector<T> yNpu(yLen);
     dY.copyToHost(yNpu.data(), yNpu.size() * sizeof(T));
     return yNpu;
 }  // exit scope → RAII 自动 Destroy + Free

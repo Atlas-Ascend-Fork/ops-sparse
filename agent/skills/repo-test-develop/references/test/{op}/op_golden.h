@@ -53,9 +53,11 @@ std::vector<T> SpMVGolden(
     A.setFromTriplets(triplets.begin(), triplets.end());
 
     // 2. 构建 Eigen Vector（转换为 FP64）
-    Eigen::VectorXd xVec(cols), yVec(rows);
-    for (int i = 0; i < cols; i++) xVec(i) = static_cast<Scalar>(x[i]);
-    for (int i = 0; i < rows; i++) yVec(i) = static_cast<Scalar>(yInit[i]);
+    int xLen = transpose ? rows : cols;
+    int yLen = transpose ? cols : rows;
+    Eigen::VectorXd xVec(xLen), yVec(yLen);
+    for (int i = 0; i < xLen; i++) xVec(i) = static_cast<Scalar>(x[i]);
+    for (int i = 0; i < yLen; i++) yVec(i) = static_cast<Scalar>(yInit[i]);
 
     // 3. 稀疏矩阵-向量乘法
     Eigen::VectorXd result;
@@ -66,8 +68,8 @@ std::vector<T> SpMVGolden(
     }
 
     // 4. 转换回 T 类型
-    std::vector<T> output(rows);
-    for (int i = 0; i < rows; i++) {
+    std::vector<T> output(yLen);
+    for (int i = 0; i < yLen; i++) {
         output[i] = static_cast<T>(result(i));
     }
     return output;
