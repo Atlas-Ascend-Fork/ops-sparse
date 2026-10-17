@@ -31,7 +31,7 @@
 | [aclsparseSpVecSetValues](#aclsparsespvecsetvalues) | 设置稀疏向量描述符的 values 指针 |
 | [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
-| [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
+| [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵 |
 | [aclsparseCreateCoo](#aclsparsecreatecoo) | 创建COO格式稀疏矩阵 |
 | [aclsparseCreateConstCoo](#aclsparsecreateconstcoo) | 创建只读(const)COO格式稀疏矩阵 |
 | [aclsparseCooGet](#aclsparsecooget) | 获取COO稀疏矩阵描述符的全部字段 |
@@ -559,7 +559,7 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 ### aclsparseCreateCsc
 
-> **支持状态**：当前版本暂未实现，敬请期待。当前版本 SpMV / SpMM 仅实现 CSR 稀疏矩阵；CSC / COO 等格式未提供算子路径。调用本接口返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+> **支持状态**：该接口可创建 CSC 稀疏矩阵描述符。当前版本 SpMV / SpMM 仅支持 CSR 稀疏矩阵，CSC 描述符不能用于这两个计算接口。
 
 ```c
 aclsparseStatus_t aclsparseCreateCsc(
@@ -577,7 +577,7 @@ aclsparseStatus_t aclsparseCreateCsc(
 );
 ```
 
-**功能**：创建一个CSC（Compressed Sparse Column）格式的稀疏矩阵（**当前版本暂未支持**，见上方说明）。
+**功能**：创建一个CSC（Compressed Sparse Column）格式的稀疏矩阵描述符。
 
 **参数说明**：
 
@@ -881,7 +881,7 @@ aclsparseStatus_t aclsparseSpMatGetSize(
 
 ### 只读(const)描述符构造接口
 
-只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat` / `aclsparseDestroySpVec`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。`aclsparseCreateConstCsc` 当前版本暂未支持，调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口。`aclsparseCreateConstCsc` 可创建只读 CSC 描述符，作为 SparseToDense 的 CSC 输入。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat` / `aclsparseDestroySpVec`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。
 
 ```c
 aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
@@ -911,7 +911,7 @@ aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, in
     aclsparseIndexType_t *cooIdxType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 ```
 
-> **支持状态**：`aclsparseCreateConstCsc` 暂未支持。调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+> **支持状态**：`aclsparseCreateConstCsc` 可创建只读 CSC 描述符。当前版本 SpMV / SpMM 仅支持 CSR 稀疏矩阵，CSC 描述符不能用于这两个计算接口。
 
 ---
 

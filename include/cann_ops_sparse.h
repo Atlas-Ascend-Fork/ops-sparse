@@ -489,7 +489,9 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
 /**
  * @brief 创建只读(const)CSC 稀疏矩阵描述符。
  *
- * @note 当前版本暂未支持，调用返回 ACL_SPARSE_STATUS_NOT_SUPPORTED。
+ * @note 可创建只读 CSC 描述符，作为 SparseToDense 的 CSC 输入。
+ *       SpMV 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_NOT_SUPPORTED；
+ *       SpMM 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
  */
 aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,
