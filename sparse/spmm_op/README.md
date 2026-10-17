@@ -479,15 +479,15 @@ int main() {
         ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT));
 
     // 3. 创建稠密矩阵描述符（matB: k×n, matC: m×n）
-    aclsparseConstDnMatDescr_t matB;
-    aclsparseDnMatDescr_t matC;
-    CHECK_STATUS(aclsparseCreateConstDnMat(&matB, cols, n, n, matB, ACL_FLOAT, ACL_SPARSE_ORDER_ROW));
-    CHECK_STATUS(aclsparseCreateDnMat(&matC, rows, n, n, matC, ACL_FLOAT, ACL_SPARSE_ORDER_ROW));
+    aclsparseConstDnMatDescr_t matBDescr;
+    aclsparseDnMatDescr_t matCDescr;
+    CHECK_STATUS(aclsparseCreateConstDnMat(&matBDescr, cols, n, n, matB, ACL_FLOAT, ACL_SPARSE_ORDER_ROW));
+    CHECK_STATUS(aclsparseCreateDnMat(&matCDescr, rows, n, n, matC, ACL_FLOAT, ACL_SPARSE_ORDER_ROW));
 
     // 4. 获取 workspace 大小
     size_t bufferSize = 0;
     CHECK_STATUS(aclsparseSpMMOp_bufferSize(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
-        ACL_SPARSE_OP_NON_TRANSPOSE, matA, matB, matC, ACL_FLOAT,
+        ACL_SPARSE_OP_NON_TRANSPOSE, matA, matBDescr, matCDescr, ACL_FLOAT,
         ACL_SPARSE_SPMMOP_ALG_DEFAULT, &bufferSize));
 
     // 5. 分配 workspace（ALG1 时 bufferSize=0，可传 nullptr）
@@ -500,7 +500,7 @@ int main() {
     aclsparseSpMMOpDescr_t descr = nullptr;
     CHECK_STATUS(aclsparseSpMMOp_createDescr(handle, &descr,
         ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
-        matA, matB, matC, ACL_FLOAT, ACL_SPARSE_SPMMOP_ALG_DEFAULT, buffer));
+        matA, matBDescr, matCDescr, ACL_FLOAT, ACL_SPARSE_SPMMOP_ALG_DEFAULT, buffer));
 
     // 7. 创建执行计划（identity epilogue: NULL, 0）
     aclsparseSpMMOpPlan_t plan = nullptr;
@@ -508,7 +508,7 @@ int main() {
 
     // 8. 执行（C = alpha * A * B + beta * C）
     float alpha = 1.0f, beta = 0.0f;
-    CHECK_STATUS(aclsparseSpMMOp(handle, plan, &alpha, &beta, matB, matC));
+    CHECK_STATUS(aclsparseSpMMOp(handle, plan, &alpha, &beta, matBDescr, matCDescr));
 
     // 9. 同步
     CHECK_ACL_RT(aclrtSynchronizeStream(stream));
@@ -519,8 +519,8 @@ int main() {
     if (buffer) {
         aclrtFree(buffer);
     }
-    aclsparseDestroyDnMat(matC);
-    aclsparseDestroyDnMat(matB);
+    aclsparseDestroyDnMat(matCDescr);
+    aclsparseDestroyDnMat(matBDescr);
     aclsparseDestroySpMat(matA);
     aclsparseDestroy(handle);
 
