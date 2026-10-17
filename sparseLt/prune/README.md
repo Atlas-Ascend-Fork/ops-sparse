@@ -178,6 +178,13 @@ int aclsparseLtPruneTest()
     void *dAPruned = nullptr;
     int ret = 0;
 
+    // 声明放在可能跳转到 cleanup 的检查之前，避免跨越 C++ 对象初始化。
+    int64_t m = 16, k = 32;
+    std::vector<float> hA(static_cast<size_t>(m) * k);
+    int64_t n = 128;
+    std::vector<float> hAPruned(static_cast<size_t>(m) * k, 0.0f);
+    int zeroCnt = 0;
+
     CHECK_RET(aclInit(nullptr) == ACL_SUCCESS, LOG_PRINT("aclInit failed\n"); return -1);
     CHECK_RET(aclrtSetDevice(deviceId) == ACL_SUCCESS, LOG_PRINT("aclrtSetDevice failed\n"); aclFinalize(); return -1);
     CHECK_RET(aclrtCreateStream(&stream) == ACL_SUCCESS, LOG_PRINT("aclrtCreateStream failed\n"); aclrtResetDevice(deviceId); aclFinalize(); return -1);
@@ -190,8 +197,6 @@ int aclsparseLtPruneTest()
 
     // 2. 准备 Host 端矩阵 A (m x k, FP32, 行主序)
     //    k 须为 8 的倍数（FP32 结构化描述符对齐要求，剪枝分组为 2）
-    int64_t m = 16, k = 32;
-    std::vector<float> hA(static_cast<size_t>(m) * k);
     for (size_t i = 0; i < hA.size(); i++) { hA[i] = static_cast<float>(i % 7) - 3.0f; }
 
     // 3. 拷贝数据到 Device
@@ -209,7 +214,6 @@ int aclsparseLtPruneTest()
 
     //    B/C/D：占位稠密描述符（剪枝不消费其数据，但 Matmul 描述符初始化需要绑定）
     //    维度须与 A 一致：B(k x n)、C/D(m x n)
-    int64_t n = 128;
     aclsparseLtDenseDescriptorInit(&handle, &matB, k, n, n, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     aclsparseLtDenseDescriptorInit(&handle, &matC, m, n, n, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     aclsparseLtDenseDescriptorInit(&handle, &matD, m, n, n, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
@@ -237,13 +241,11 @@ int aclsparseLtPruneTest()
     aclrtSynchronizeStream(stream);
 
     // 8. 将结果拷贝回 Host
-    std::vector<float> hAPruned(static_cast<size_t>(m) * k, 0.0f);
     aclrtMemcpy(hAPruned.data(), static_cast<size_t>(m) * k * sizeof(float),
                 dAPruned, static_cast<size_t>(m) * k * sizeof(float),
                 ACL_MEMCPY_DEVICE_TO_HOST);
 
     // 验证：FP32 下每 2 个元素保留 1 个（绝对值较大者），另一个置零
-    int zeroCnt = 0;
     for (size_t i = 0; i < hAPruned.size(); i++) {
         if (hAPruned[i] == 0.0f) { zeroCnt++; }
     }
