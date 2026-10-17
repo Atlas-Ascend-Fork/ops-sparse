@@ -201,7 +201,7 @@ template <typename T, typename VEC> __aicore__ inline void SpgemmVecLoadBWindow(
  * 融合归并的段数分派。da=1/5 也固定实例化，消除 Band 回退行的
  * 动态段数索引；数值加载仍由后续路径按需完成。
  */
-template <typename T, typename VEC> __aicore__ inline int32_t SpgemmMergeFusedRow(
+template <bool COALESCE_B = false, typename T, typename VEC> __aicore__ inline int32_t SpgemmMergeFusedRow(
     const AscendC::GlobalTensor<int32_t> &bColIdxGm, const AscendC::GlobalTensor<T> &bValGm,
     const SpgemmValueOps<T> &ops, SpgemmSegments &seg, const AscendC::LocalTensor<int32_t> &outCol,
     const AscendC::LocalTensor<T> &outVal, const AscendC::LocalTensor<float> &wideVal, uint32_t cap,
@@ -213,24 +213,24 @@ template <typename T, typename VEC> __aicore__ inline int32_t SpgemmMergeFusedRo
     }
     // aBase 必须传给每个实例（带路径建段不再读 A 值，冷路径按 aBase 惰性载入）。
     switch (da) {
-        case 1:  return SpgemmMergeFusedRowImpl<1, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        case 1:  return SpgemmMergeFusedRowImpl<1, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
-        case 2:  return SpgemmMergeFusedRowImpl<2, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        case 2:  return SpgemmMergeFusedRowImpl<2, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
-        case 3:  return SpgemmMergeFusedRowImpl<3, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        case 3:  return SpgemmMergeFusedRowImpl<3, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
-        case 4:  return SpgemmMergeFusedRowImpl<4, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        case 4:  return SpgemmMergeFusedRowImpl<4, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
-        case 5:  return SpgemmMergeFusedRowImpl<5, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        case 5:  return SpgemmMergeFusedRowImpl<5, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
-        case 6:  return SpgemmMergeFusedRowImpl<6, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        case 6:  return SpgemmMergeFusedRowImpl<6, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
         // da=7 也拿真上下文（向量发射），DA_FIXED >= 8 的门限保证不会对 da=7 生成多余代码。
-        case 7:  return SpgemmMergeFusedRowImpl<7, T, VEC>(bColIdxGm, bValGm, ops, seg, da, outCol, outVal, wideVal, cap, vec, vecSlotOff,
+        case 7:  return SpgemmMergeFusedRowImpl<7, COALESCE_B, T, VEC>(bColIdxGm, bValGm, ops, seg, da, outCol, outVal, wideVal, cap, vec, vecSlotOff,
                                                       aValGm, aBase);
-        case 8:  return SpgemmMergeFusedRowImpl<8, T, VEC>(bColIdxGm, bValGm, ops, seg, da, outCol, outVal, wideVal, cap, vec, vecSlotOff,
+        case 8:  return SpgemmMergeFusedRowImpl<8, COALESCE_B, T, VEC>(bColIdxGm, bValGm, ops, seg, da, outCol, outVal, wideVal, cap, vec, vecSlotOff,
                                                       aValGm, aBase);
-        default: return SpgemmMergeFusedRowImpl<0, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
+        default: return SpgemmMergeFusedRowImpl<0, COALESCE_B, T, SpgemmVecEmitNone>(bColIdxGm, bValGm, ops, seg, da,
                      outCol, outVal, wideVal, cap, SpgemmVecEmitNone{}, 0u, aValGm, aBase);
     }
 }

@@ -283,7 +283,7 @@ void spgemm_arch22_symbolic_launch(
     GM_ADDR bRowPtr, GM_ADDR bColIdx, GM_ADDR bValues,
     GM_ADDR cRowPtrIn, GM_ADDR cColIdxIn,
     GM_ADDR buffer1, GM_ADDR buffer2, GM_ADDR tiling,
-    uint32_t dtypeId, uint32_t blockDim, void *stream);
+    uint32_t dtypeId, bool coalesceB, uint32_t blockDim, void *stream);
 
 /**
  * 数值阶段 Kernel（Compute 阶段第 2 趟）：按 dtype 分派模板特化。

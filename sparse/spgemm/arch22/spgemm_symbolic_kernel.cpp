@@ -42,7 +42,7 @@ constexpr uint32_t kVecEmitCap = kSpgemmVecEmitCap;
 // 必须与 spgemm_count_kernel.cpp 的 kStatStride 一致。
 constexpr uint32_t kBStatStride = 16;
 
-template <typename T>
+template <typename T, bool COALESCE_B = false>
 class SpgemmArch22SymbolicKernel {
 public:
     static constexpr bool kIsComplex = SpgemmValueTraits<T>::kIsComplex;
@@ -476,7 +476,7 @@ private:
 
         // aBase：段 s 与 A 表项 aBase+s 一一对应时为非负，否则 −1。
         const int32_t aBase = (seg.count == da) ? static_cast<int32_t>(rs) : -1;
-        const int32_t nnz = SpgemmMergeFusedRow(bColIdxGm_, bValGm_, ops_, seg,
+        const int32_t nnz = SpgemmMergeFusedRow<COALESCE_B>(bColIdxGm_, bValGm_, ops_, seg,
                                                 fusedCol[batchCount_], fusedVal[batchCount_],
                                                 wideVal_[batchCount_],
                                                 mergeCapacity_ - batchCount_, vecCtx_,
@@ -489,7 +489,7 @@ private:
                                       bHeadGm_, seg2)) {
                 return CountRowByChunk(row, rs, re, colLocal);
             }
-            const int32_t n2 = SpgemmMergeCountRow(bColIdxGm_, seg2);
+            const int32_t n2 = SpgemmMergeCountRow<COALESCE_B>(bColIdxGm_, seg2);
             scratchCur_ += n2;
             return n2;
         }
@@ -783,38 +783,53 @@ private:
 
 }  // namespace
 
-#define SPGEMM_DEFINE_SYMBOLIC_KERNEL(SUFFIX, TYPE)                                   \
-    __global__ __aicore__ void spgemm_arch22_symbolic_##SUFFIX(                       \
+#define SPGEMM_DEFINE_SYMBOLIC_KERNEL(NAME, TYPE, COALESCE_B)                         \
+    __global__ __aicore__ void NAME(                                                   \
         GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR aValues,                            \
         GM_ADDR bRowPtr, GM_ADDR bColIdx, GM_ADDR bValues,                            \
         GM_ADDR cRowPtrIn, GM_ADDR cColIdxIn,                                         \
         GM_ADDR buffer1, GM_ADDR buffer2, GM_ADDR tilingGm)                           \
     {                                                                                 \
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);                               \
-        SpgemmArch22SymbolicKernel<TYPE> op;                                          \
+        SpgemmArch22SymbolicKernel<TYPE, COALESCE_B> op;                              \
         op.Init(aRowPtr, aColIdx, aValues, bRowPtr, bColIdx, bValues,                 \
                 cRowPtrIn, cColIdxIn, buffer1, buffer2, tilingGm);                    \
         op.Process();                                                                 \
     }
 
-SPGEMM_DEFINE_SYMBOLIC_KERNEL(fp32, float)
-SPGEMM_DEFINE_SYMBOLIC_KERNEL(fp16, half)
-SPGEMM_DEFINE_SYMBOLIC_KERNEL(bf16, bfloat16_t)
-SPGEMM_DEFINE_SYMBOLIC_KERNEL(c64, SpgemmComplex64)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_fp32, float, false)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_fp16, half, false)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_bf16, bfloat16_t, false)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_c64, SpgemmComplex64, false)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_fp32_duplicates, float, true)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_fp16_duplicates, half, true)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_bf16_duplicates, bfloat16_t, true)
+SPGEMM_DEFINE_SYMBOLIC_KERNEL(spgemm_arch22_symbolic_c64_duplicates, SpgemmComplex64, true)
 
 void spgemm_arch22_symbolic_launch(
     GM_ADDR aRowPtr, GM_ADDR aColIdx, GM_ADDR aValues,
     GM_ADDR bRowPtr, GM_ADDR bColIdx, GM_ADDR bValues,
     GM_ADDR cRowPtrIn, GM_ADDR cColIdxIn,
     GM_ADDR buffer1, GM_ADDR buffer2, GM_ADDR tiling,
-    uint32_t dtypeId, uint32_t blockDim, void *stream)
+    uint32_t dtypeId, bool coalesceB, uint32_t blockDim, void *stream)
 {
 #define SPGEMM_SYMBOLIC_LAUNCH(SUFFIX)                                                \
     spgemm_arch22_symbolic_##SUFFIX<<<blockDim, nullptr, stream>>>(                   \
         aRowPtr, aColIdx, aValues, bRowPtr, bColIdx, bValues,                         \
         cRowPtrIn, cColIdxIn, buffer1, buffer2, tiling)
+#define SPGEMM_SYMBOLIC_DUPLICATES_LAUNCH(SUFFIX)                                     \
+    spgemm_arch22_symbolic_##SUFFIX##_duplicates<<<blockDim, nullptr, stream>>>(      \
+        aRowPtr, aColIdx, aValues, bRowPtr, bColIdx, bValues,                         \
+        cRowPtrIn, cColIdxIn, buffer1, buffer2, tiling)
 
-    switch (dtypeId) {
+    if (coalesceB) {
+        switch (dtypeId) {
+            case SPGEMM_KERNEL_DTYPE_FP16: SPGEMM_SYMBOLIC_DUPLICATES_LAUNCH(fp16); break;
+            case SPGEMM_KERNEL_DTYPE_BF16: SPGEMM_SYMBOLIC_DUPLICATES_LAUNCH(bf16); break;
+            case SPGEMM_KERNEL_DTYPE_C64: SPGEMM_SYMBOLIC_DUPLICATES_LAUNCH(c64); break;
+            default: SPGEMM_SYMBOLIC_DUPLICATES_LAUNCH(fp32); break;
+        }
+    } else switch (dtypeId) {
         case SPGEMM_KERNEL_DTYPE_FP16:
             SPGEMM_SYMBOLIC_LAUNCH(fp16);
             break;
@@ -829,4 +844,5 @@ void spgemm_arch22_symbolic_launch(
             break;
     }
 #undef SPGEMM_SYMBOLIC_LAUNCH
+#undef SPGEMM_SYMBOLIC_DUPLICATES_LAUNCH
 }

@@ -240,6 +240,7 @@ struct CsrValidationSnapshot {
     size_t colBytes = 0;
     int32_t *rowOffsets = nullptr;
     int32_t *colIndices = nullptr;
+    bool *hasDuplicateColumns = nullptr;
 };
 
 static aclsparseStatus_t ValidateCsrRowOffsets(const CsrValidationSnapshot &snapshot)
@@ -275,10 +276,18 @@ static aclsparseStatus_t ValidateCsrColumnIndices(const CsrValidationSnapshot &s
         const int32_t rowBegin = row[r];
         const int32_t rowEnd = row[r + 1];
         for (int32_t p = rowBegin; p < rowEnd; ++p) {
-            // Duplicate columns are permitted; decreasing columns are not.
-            if (col[p] < 0 || col[p] >= mat->cols ||
-                (p > row[r] && col[p] < col[p - 1])) {
+            if (col[p] < 0 || col[p] >= mat->cols) {
                 return ACL_SPARSE_STATUS_INVALID_VALUE;
+            }
+            // Detect duplicates during the required validation pass. Unique
+            // rows do not need a second scan or any device-side duplicate checks.
+            if (p > rowBegin && col[p] <= col[p - 1]) {
+                if (col[p] < col[p - 1]) {
+                    return ACL_SPARSE_STATUS_INVALID_VALUE;
+                }
+                if (snapshot.hasDuplicateColumns != nullptr) {
+                    *snapshot.hasDuplicateColumns = true;
+                }
             }
         }
     }
@@ -363,11 +372,16 @@ static aclsparseStatus_t ValidateCsrSnapshotResults(
 }
 
 static aclsparseStatus_t ValidateCsrMatrices(const aclsparseSpMatDescr *a,
-                                             const aclsparseSpMatDescr *b, aclrtStream stream)
+                                             const aclsparseSpMatDescr *b, aclrtStream stream,
+                                             bool *bHasDuplicateColumns = nullptr)
 {
     std::array<CsrValidationSnapshot, 2> snapshots{};
     snapshots[0].mat = a;
     snapshots[1].mat = b;
+    snapshots[1].hasDuplicateColumns = bHasDuplicateColumns;
+    if (bHasDuplicateColumns != nullptr) {
+        *bHasDuplicateColumns = false;
+    }
     size_t totalBytes = 0;
     for (auto &snapshot : snapshots) {
         const aclsparseStatus_t status = PrepareCsrSnapshot(snapshot, totalBytes);
@@ -408,12 +422,13 @@ struct SpgemmScalars {
     float betaRe = 0.0f;
     float betaIm = 0.0f;
     bool betaNonZero = false;
+    bool bHasDuplicateColumns = false;
 };
 
 // Validate A/B together: each index array is copied once on the handle stream.
-static aclsparseStatus_t ValidateCsrContents(const StageContext &ctx)
+static aclsparseStatus_t ValidateCsrContents(const StageContext &ctx, bool &bHasDuplicateColumns)
 {
-    return ValidateCsrMatrices(ctx.a, ctx.b, ctx.stream);
+    return ValidateCsrMatrices(ctx.a, ctx.b, ctx.stream, &bHasDuplicateColumns);
 }
 
 // beta != 0 makes matC an input; beta == 0 must not read its contents.
@@ -433,7 +448,7 @@ static aclsparseStatus_t ValidateAndReadScalars(const StageContext &ctx,
                                                 const void *alpha, const void *beta,
                                                 SpgemmScalars &sc)
 {
-    aclsparseStatus_t st = ValidateCsrContents(ctx);
+    aclsparseStatus_t st = ValidateCsrContents(ctx, sc.bHasDuplicateColumns);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -468,6 +483,7 @@ static void RecordEstimatedStage(aclsparseSpGEMMDescr_t spgemmDescr,
     spgemmDescr->nnzA = static_cast<uint64_t>(ctx.a->nnz);
     spgemmDescr->nnzB = static_cast<uint64_t>(ctx.b->nnz);
     arch22ctx.cachedDtypeId = ctx.dtypeId;
+    arch22ctx.bHasDuplicateColumns = sc.bHasDuplicateColumns;
     spgemmDescr->computeType = computeType;
     spgemmDescr->alg = alg;
     arch22ctx.blockDim = blockDim;
@@ -640,8 +656,8 @@ static aclsparseStatus_t RunSymbolicStage(const StageContext &ctx,
                                           const SpgemmArch22Ws1Layout &ws1,
                                           const SpgemmArch22Ws2Layout &ws2, uint8_t *buf1,
                                           uint8_t *buf2, void *cRowPtrIn, void *cColIdxIn,
-                                          uint32_t M, uint32_t dtypeId, uint32_t blockDim,
-                                          int32_t &nnzC)
+                                          uint32_t M, uint32_t dtypeId, bool coalesceB,
+                                          uint32_t blockDim, int32_t &nnzC)
 {
     // 符号 Kernel 的 SyncAll 要求屏障区入核前为零。Compute 可被重复调用，
     // 故这里必须重新清零。
@@ -656,7 +672,7 @@ static aclsparseStatus_t RunSymbolicStage(const StageContext &ctx,
         AsGm(ctx.a->ptrs), AsGm(ctx.a->idxs), AsGm(ctx.a->values),
         AsGm(ctx.b->ptrs), AsGm(ctx.b->idxs), AsGm(ctx.b->values),
         AsGm(cRowPtrIn), AsGm(cColIdxIn), AsGm(spgemmDescr->externalBuffer1), buf2,
-        buf1 + ws1.tilingOff, dtypeId, blockDim, ctx.stream);
+        buf1 + ws1.tilingOff, dtypeId, coalesceB, blockDim, ctx.stream);
 
     if (aclrtSynchronizeStream(ctx.stream) != ACL_ERROR_NONE) {
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
@@ -928,6 +944,7 @@ static aclsparseStatus_t ValidateComputeStage(aclsparseSpGEMMDescr_t spgemmDescr
 
 // Compute 阶段的规划产物：查询模式只用到 nnzUB / ws2 即早退，其余字段供执行模式使用。
 struct ComputePlan {
+    bool coalesceB = false;
     uint32_t M = 0;
     uint32_t N = 0;
     uint32_t dtypeId = SPGEMM_DTYPE_FP32;
@@ -949,6 +966,7 @@ static aclsparseStatus_t PlanComputeBuffers(aclsparseSpGEMMDescr_t spgemmDescr,
     plan.M = static_cast<uint32_t>(spgemmDescr->m);
     plan.N = static_cast<uint32_t>(spgemmDescr->n);
     plan.dtypeId = arch22ctx->cachedDtypeId;
+    plan.coalesceB = arch22ctx->bHasDuplicateColumns;
     plan.blockDim = arch22ctx->blockDim;
 
     // beta 必须在查询模式早退之前读：nnz 上界依赖它决定是否计入 C_in。
@@ -1051,7 +1069,7 @@ static aclsparseStatus_t RunSpgemmKernels(const StageContext &ctx,
     int32_t nnzC = 0;
     aclsparseStatus_t st =
         RunSymbolicStage(ctx, spgemmDescr, plan.ws1, plan.ws2, buf1, buf2, cRowPtrIn,
-                         cColIdxIn, plan.M, plan.dtypeId, plan.blockDim, nnzC);
+                         cColIdxIn, plan.M, plan.dtypeId, plan.coalesceB, plan.blockDim, nnzC);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }

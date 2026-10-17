@@ -725,6 +725,441 @@ bool TestExplicitZero(aclsparseHandle_t handle, aclDataType dt)
     return true;
 }
 
+/** Give complex duplicate regressions a non-trivial imaginary accumulation path. */
+void SetNonzeroImaginaryValues(SpgemmRefCsr &m, double scale)
+{
+    for (size_t i = 0; i < m.valIm.size(); ++i) {
+        m.valIm[i] = scale * (1.0 + static_cast<double>((i * 3) % 5));
+    }
+}
+
+/** Repeated B columns are legal non-decreasing CSR input and must accumulate. */
+bool TestDuplicateColumnsWithinBRow(aclsparseHandle_t handle, aclDataType dt)
+{
+    SpgemmRefCsr a{1, 1, {0, 1}, {0}, {2.0}, {0.0}};
+    SpgemmRefCsr b{1, 1, {0, 2}, {0, 0}, {4.0, 5.0}, {0.0, 0.0}};
+    if (dt == ACL_COMPLEX64) {
+        SetNonzeroImaginaryValues(a, 0.25);
+        SetNonzeroImaginaryValues(b, -0.125);
+    }
+    SpgemmTestScalars sc;
+    InitAlphaBetaScalars(sc, dt);
+    HostResult got;
+    int64_t numProds = -1;
+    const std::string tag = std::string("duplicate-B-column/") + SpgemmDtypeName(dt);
+    if (!RunSpgemmStages(handle, a, b, nullptr, dt, ACL_SPARSE_SPGEMM_DEFAULT,
+                         sc.alpha, sc.beta, got, &numProds)) {
+        return false;
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 0.0, 0.0,
+                                              nullptr, dt == ACL_COMPLEX64);
+    SPGEMM_EXPECT(numProds == 2, "%s: numProducts got=%ld want=2", tag,
+                  static_cast<long>(numProds));
+    SPGEMM_EXPECT(got.nnz == 1, "%s: nnz got=%ld want=1", tag,
+                  static_cast<long>(got.nnz));
+    return CompareResult(got, ref, dt, tag.c_str());
+}
+
+/** Disjoint segments still need their own in-row duplicate reduction. */
+bool TestDuplicateColumnsDisjointSegments(aclsparseHandle_t handle, aclDataType dt)
+{
+    SpgemmRefCsr a{1, 2, {0, 2}, {0, 1}, {2.0, 3.0}, {0.0, 0.0}};
+    SpgemmRefCsr b{2, 3, {0, 2, 3}, {0, 0, 2}, {4.0, 5.0, 7.0}, {0.0, 0.0, 0.0}};
+    if (dt == ACL_COMPLEX64) {
+        SetNonzeroImaginaryValues(a, 0.25);
+        SetNonzeroImaginaryValues(b, -0.125);
+    }
+    SpgemmTestScalars sc;
+    InitAlphaBetaScalars(sc, dt);
+    HostResult got;
+    int64_t numProds = -1;
+    const std::string tag = std::string("duplicate-B-column-disjoint/") +
+                            SpgemmDtypeName(dt);
+    if (!RunSpgemmStages(handle, a, b, nullptr, dt, ACL_SPARSE_SPGEMM_DEFAULT,
+                         sc.alpha, sc.beta, got, &numProds)) {
+        return false;
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 0.0, 0.0,
+                                              nullptr, dt == ACL_COMPLEX64);
+    SPGEMM_EXPECT(numProds == 3, "%s: numProducts got=%ld want=3", tag,
+                  static_cast<long>(numProds));
+    SPGEMM_EXPECT(got.nnz == 2, "%s: nnz got=%ld want=2", tag,
+                  static_cast<long>(got.nnz));
+    return CompareResult(got, ref, dt, tag.c_str());
+}
+
+/** PR285 controls: large unique segments must retain the original fast paths. */
+bool TestLongUniqueSegments(aclsparseHandle_t handle, aclDataType dt,
+                            int32_t da, int32_t segLen, bool interleaved)
+{
+    SpgemmRefCsr a;
+    a.rows = 1;
+    a.cols = da;
+    a.rowPtr = {0, da};
+    for (int32_t s = 0; s < da; ++s) {
+        a.colIdx.push_back(s);
+        a.valRe.push_back(1.0);
+        a.valIm.push_back(0.0);
+    }
+    SpgemmRefCsr b;
+    b.rows = da;
+    b.cols = da * segLen;
+    b.rowPtr.push_back(0);
+    for (int32_t s = 0; s < da; ++s) {
+        for (int32_t j = 0; j < segLen; ++j) {
+            b.colIdx.push_back(interleaved ? j * da + s : s * segLen + j);
+            b.valRe.push_back(1.0);
+            b.valIm.push_back(0.0);
+        }
+        b.rowPtr.push_back(static_cast<int32_t>(b.colIdx.size()));
+    }
+    SpgemmTestScalars sc;
+    InitAlphaBetaScalars(sc, dt);
+    HostResult got;
+    int64_t numProds = -1;
+    const std::string tag = std::string("long-unique-") +
+                            (interleaved ? "interleaved/" : "disjoint/") +
+                            SpgemmDtypeName(dt);
+    if (!RunSpgemmStages(handle, a, b, nullptr, dt, ACL_SPARSE_SPGEMM_DEFAULT,
+                         sc.alpha, sc.beta, got, &numProds)) {
+        return false;
+    }
+    const int64_t expected = static_cast<int64_t>(da) * segLen;
+    SPGEMM_EXPECT(numProds == expected, "%s: numProducts got=%ld want=%ld", tag,
+                  static_cast<long>(numProds), static_cast<long>(expected));
+    SPGEMM_EXPECT(got.nnz == expected, "%s: nnz got=%ld want=%ld", tag,
+                  static_cast<long>(got.nnz), static_cast<long>(expected));
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 0.0, 0.0,
+                                              nullptr, dt == ACL_COMPLEX64);
+    return CompareResult(got, ref, dt, tag.c_str());
+}
+
+bool TestLongUniqueMergeWorkloads(aclsparseHandle_t handle, aclDataType dt)
+{
+    return TestLongUniqueSegments(handle, dt, 4, 512, false) &&
+           TestLongUniqueSegments(handle, dt, 8, 128, true);
+}
+
+int64_t SpgemmExpectedProducts(const SpgemmRefCsr &a, const SpgemmRefCsr &b)
+{
+    int64_t count = 0;
+    for (int32_t row = 0; row < a.rows; ++row) {
+        for (int32_t p = a.rowPtr[row]; p < a.rowPtr[row + 1]; ++p) {
+            const int32_t k = a.colIdx[p];
+            count += b.rowPtr[k + 1] - b.rowPtr[k];
+        }
+    }
+    return count;
+}
+
+bool TestDuplicateCsrCase(aclsparseHandle_t handle, aclDataType dt, const char *name,
+                          SpgemmRefCsr a, SpgemmRefCsr b, SpgemmRefCsr cIn = {},
+                          bool betaOne = false, bool repeatPlan = false,
+                          aclsparseSpGEMMAlg_t alg = ACL_SPARSE_SPGEMM_DEFAULT)
+{
+    if (dt == ACL_COMPLEX64) {
+        SetNonzeroImaginaryValues(a, 0.125);
+        SetNonzeroImaginaryValues(b, -0.0625);
+        if (betaOne) {
+            SetNonzeroImaginaryValues(cIn, 0.25);
+        }
+    }
+    SpgemmQuantizeCsr(a, dt);
+    SpgemmQuantizeCsr(b, dt);
+    if (betaOne) {
+        SpgemmQuantizeCsr(cIn, dt);
+    }
+    SpgemmTestScalars sc;
+    InitAlphaBetaScalars(sc, dt);
+    if (betaOne) {
+        sc.betaF[0] = 1.0f;
+        sc.betaH = (dt == ACL_BF16) ? SpgemmF32ToBf16Bits(1.0f) : SpgemmF32ToF16Bits(1.0f);
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, betaOne ? 1.0 : 0.0,
+                                              0.0, betaOne ? &cIn : nullptr,
+                                              dt == ACL_COMPLEX64);
+    const int64_t expectedProducts = SpgemmExpectedProducts(a, b);
+    const int runs = repeatPlan ? 2 : 1;
+    for (int run = 0; run < runs; ++run) {
+        HostResult got;
+        int64_t numProds = -1;
+        const std::string tag = std::string("duplicate-csr/") + name + "/" +
+                                SpgemmDtypeName(dt) + (run == 1 ? "/repeat" : "");
+        if (!RunSpgemmStages(handle, a, b, betaOne ? &cIn : nullptr, dt,
+                             alg, sc.alpha, sc.beta, got, &numProds)) {
+            return false;
+        }
+        SPGEMM_EXPECT(numProds == expectedProducts, "%s: numProducts got=%ld want=%ld",
+                      tag, static_cast<long>(numProds), static_cast<long>(expectedProducts));
+        if (!CompareResult(got, ref, dt, tag.c_str())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestDuplicateDispatcherRunPass(SpgemmStageRun &r, DeviceCsr &dB, const SpgemmRefCsr &a,
+                                    const SpgemmRefCsr &b, const char *name)
+{
+    const std::vector<uint8_t> values = SpgemmPackValues(b.valRe, b.valIm, ACL_FLOAT);
+    SPGEMM_EXPECT(dB.colIdx.Upload(b.colIdx.data(), b.colIdx.size() * sizeof(int32_t)),
+                  "%s: upload B columns failed", name);
+    SPGEMM_EXPECT(dB.values.Upload(values.data(), values.size()), "%s: upload B values failed", name);
+    SpgemmMatCHolder c;
+    SPGEMM_EXPECT(SetupMatC(a, b, nullptr, ACL_FLOAT, c), "%s: setup C failed", name);
+    r.matC = c.descr;
+    HostResult got;
+    if (!(RunStageWorkEstimation(r) && RunStageEstimateMemory(r) && RunStageCompute(r) &&
+          RunStageAllocateOutput(r) && RunStageCopy(r) && RunStageDownload(r, got))) {
+        return false;
+    }
+    SPGEMM_EXPECT(r.numProds == SpgemmExpectedProducts(a, b), "%s: unexpected product count", name);
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 0.0, 0.0, nullptr, false);
+    return CompareResult(got, ref, ACL_FLOAT, name);
+}
+
+/**
+ * Reuse one SpGEMM descriptor while the same B descriptor changes structure.
+ * All three B variants have identical dimensions and nnz, so the second and
+ * third passes catch a duplicate-column classification cached by mistake.
+ */
+bool TestDuplicateDispatcherResetSameDescr(aclsparseHandle_t handle)
+{
+    SpgemmRefCsr a{1, 1, {0, 1}, {0}, {2.0}, {0.0}};
+    SpgemmRefCsr duplicateB{1, 4, {0, 4}, {0, 1, 1, 2}, {1.0, 2.0, 3.0, 4.0}, {0.0, 0.0, 0.0, 0.0}};
+    SpgemmRefCsr uniqueB{1, 4, {0, 4}, {0, 1, 2, 3}, {5.0, 6.0, 7.0, 8.0}, {0.0, 0.0, 0.0, 0.0}};
+    SpgemmQuantizeCsr(a, ACL_FLOAT);
+    SpgemmQuantizeCsr(duplicateB, ACL_FLOAT);
+    SpgemmQuantizeCsr(uniqueB, ACL_FLOAT);
+    DeviceCsr dA;
+    DeviceCsr dB;
+    SPGEMM_EXPECT(UploadCsr(a, ACL_FLOAT, dA), "upload A failed");
+    SPGEMM_EXPECT(UploadCsr(duplicateB, ACL_FLOAT, dB), "upload B failed");
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    SpgemmStageRun r;
+    r.handle = handle;
+    r.matA = dA.descr;
+    r.matB = dB.descr;
+    r.dt = ACL_FLOAT;
+    r.alg = ACL_SPARSE_SPGEMM_DEFAULT;
+    r.alpha = &alpha;
+    r.beta = &beta;
+    if (aclsparseSpGEMMCreateDescr(&r.descr) != ACL_SPARSE_STATUS_SUCCESS) {
+        return false;
+    }
+
+    const bool ok = TestDuplicateDispatcherRunPass(r, dB, a, duplicateB, "same-descr/duplicate") &&
+                    TestDuplicateDispatcherRunPass(r, dB, a, uniqueB, "same-descr/unique-after-duplicate") &&
+                    TestDuplicateDispatcherRunPass(r, dB, a, duplicateB, "same-descr/duplicate-after-unique");
+    (void)aclsparseSpGEMMDestroyDescr(r.descr);
+    return ok;
+}
+
+bool TestDuplicateCsrSimpleCases(aclsparseHandle_t handle, aclDataType dt)
+{
+    const SpgemmRefCsr startsSecondA{1, 1, {0, 1}, {0}, {2.0}, {0.0}};
+    const SpgemmRefCsr startsSecondB{1, 3, {0, 5}, {0, 1, 1, 1, 2},
+                                     {1.0, 2.0, 3.0, 4.0, 5.0}, {0.0, 0.0, 0.0, 0.0, 0.0}};
+    if (!TestDuplicateCsrCase(handle, dt, "b-run-starts-second-len3", startsSecondA, startsSecondB)) {
+        return false;
+    }
+    const SpgemmRefCsr repeatedRowsA{1, 3, {0, 3}, {0, 1, 2}, {1.0, 2.0, 3.0},
+                                     {0.0, 0.0, 0.0}};
+    const SpgemmRefCsr repeatedRowsB{3, 3, {0, 3, 6, 9},
+                                     {0, 0, 2, 0, 0, 2, 0, 0, 2},
+                                     {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0},
+                                     std::vector<double>(9, 0.0)};
+    return TestDuplicateCsrCase(handle, dt, "repeated-b-row-pattern", repeatedRowsA, repeatedRowsB);
+}
+
+bool TestDuplicateCsrOverlapCases(aclsparseHandle_t handle, aclDataType dt)
+{
+    const SpgemmRefCsr overlapA{1, 3, {0, 3}, {0, 1, 2}, {1.0, -2.0, 3.0},
+                                {0.0, 0.0, 0.0}};
+    const SpgemmRefCsr overlapB{3, 5, {0, 4, 8, 12},
+                                {0, 1, 1, 3, 1, 2, 2, 4, 0, 2, 3, 3},
+                                {1.0, 2.0, 3.0, 4.0, -1.0, 2.0, 3.0, 4.0,
+                                 2.0, -3.0, 1.0, 5.0}, std::vector<double>(12, 0.0)};
+    if (!TestDuplicateCsrCase(handle, dt, "overlap-general", overlapA, overlapB)) {
+        return false;
+    }
+    for (const auto alg : {ACL_SPARSE_SPGEMM_ALG1, ACL_SPARSE_SPGEMM_ALG2,
+                           ACL_SPARSE_SPGEMM_ALG3}) {
+        const std::string name = "overlap-general-alg" + std::to_string(static_cast<int>(alg));
+        if (!TestDuplicateCsrCase(handle, dt, name.c_str(), overlapA, overlapB, {}, false, false, alg)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestDuplicateCsrAAndBetaCases(aclsparseHandle_t handle, aclDataType dt)
+{
+    const SpgemmRefCsr duplicateA{1, 2, {0, 3}, {0, 0, 1}, {1.0, 2.0, -1.0},
+                                  {0.0, 0.0, 0.0}};
+    const SpgemmRefCsr duplicateB{2, 3, {0, 3, 6}, {1, 1, 2, 1, 2, 2},
+                                  {1.0, 2.0, 3.0, 4.0, -2.0, 5.0},
+                                  std::vector<double>(6, 0.0)};
+    if (!TestDuplicateCsrCase(handle, dt, "a-and-b-duplicates", duplicateA, duplicateB, {}, false, true)) {
+        return false;
+    }
+    const SpgemmRefCsr overlapA{1, 3, {0, 3}, {0, 1, 2}, {1.0, -2.0, 3.0}, {0.0, 0.0, 0.0}};
+    const SpgemmRefCsr overlapB{3, 5, {0, 4, 8, 12}, {0, 1, 1, 3, 1, 2, 2, 4, 0, 2, 3, 3},
+                                {1.0, 2.0, 3.0, 4.0, -1.0, 2.0, 3.0, 4.0, 2.0, -3.0, 1.0, 5.0}, std::vector<double>(12, 0.0)};
+    SpgemmRefCsr cIn{1, 5, {0, 2}, {1, 4}, {6.0, -2.0}, {0.0, 0.0}};
+    return TestDuplicateCsrCase(handle, dt, "overlap-beta1", overlapA, overlapB, cIn, true);
+}
+
+bool TestDuplicateCsrUnusedRowAp16(aclsparseHandle_t handle, aclDataType dt)
+{
+    // The duplicate row is unreferenced: B is globally duplicate-bearing, while the
+    // eight rows selected by A are a certified AP-16 rotational workload.
+    SpgemmRefCsr apA;
+    apA.rows = 1;
+    apA.cols = 9;
+    apA.rowPtr = {0, 8};
+    SpgemmRefCsr apB;
+    apB.rows = 9;
+    apB.cols = 64;
+    apB.rowPtr.push_back(0);
+    for (int32_t k = 0; k < 8; ++k) {
+        apA.colIdx.push_back(k);
+        apA.valRe.push_back(0.5 + 0.25 * k);
+        apA.valIm.push_back(0.0);
+        for (int32_t j = 0; j < 4; ++j) {
+            apB.colIdx.push_back(k + 16 * j);
+            apB.valRe.push_back(1.0 + 0.125 * (k + j));
+            apB.valIm.push_back(0.0);
+        }
+        apB.rowPtr.push_back(static_cast<int32_t>(apB.colIdx.size()));
+    }
+    apB.colIdx.insert(apB.colIdx.end(), {0, 0, 1, 1});
+    apB.valRe.insert(apB.valRe.end(), {1.0, 2.0, 3.0, 4.0});
+    apB.valIm.insert(apB.valIm.end(), {0.0, 0.0, 0.0, 0.0});
+    apB.rowPtr.push_back(static_cast<int32_t>(apB.colIdx.size()));
+    return TestDuplicateCsrCase(handle, dt, "unused-duplicate-row-ap16", apA, apB);
+}
+
+bool TestDuplicateCsrDynamicDa(aclsparseHandle_t handle, aclDataType dt)
+{
+    for (const int32_t da : {9, 65}) {
+        SpgemmRefCsr a;
+        a.rows = 1;
+        a.cols = da;
+        a.rowPtr = {0, da};
+        SpgemmRefCsr b;
+        b.rows = da;
+        b.cols = da + 1;
+        b.rowPtr.push_back(0);
+        for (int32_t k = 0; k < da; ++k) {
+            a.colIdx.push_back(k);
+            a.valRe.push_back(1.0 + 0.125 * k);
+            a.valIm.push_back(0.0);
+            b.colIdx.insert(b.colIdx.end(), {0, k + 1, k + 1});
+            b.valRe.insert(b.valRe.end(), {1.0, 2.0, -0.5});
+            b.valIm.insert(b.valIm.end(), {0.0, 0.0, 0.0});
+            b.rowPtr.push_back(static_cast<int32_t>(b.colIdx.size()));
+        }
+        const std::string name = "dynamic-da" + std::to_string(da) + "-duplicate-b";
+        if (!TestDuplicateCsrCase(handle, dt, name.c_str(), a, b)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestDuplicateCsrComplexAlpha(aclsparseHandle_t handle, SpgemmRefCsr a, SpgemmRefCsr b,
+                                  const char *name)
+{
+    SetNonzeroImaginaryValues(a, 0.125);
+    SetNonzeroImaginaryValues(b, -0.0625);
+    SpgemmQuantizeCsr(a, ACL_COMPLEX64);
+    SpgemmQuantizeCsr(b, ACL_COMPLEX64);
+    float alpha[2] = {1.25f, -0.5f};
+    float beta[2] = {0.0f, 0.0f};
+    HostResult got;
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, alpha[0], alpha[1], 0.0, 0.0, nullptr, true);
+    return RunSpgemmStages(handle, a, b, nullptr, ACL_COMPLEX64, ACL_SPARSE_SPGEMM_DEFAULT,
+                           alpha, beta, got, nullptr) &&
+           CompareResult(got, ref, ACL_COMPLEX64, name);
+}
+
+/** Fixed eight-way duplicate merge: ties, early exhaustion, and duplicate tails. */
+bool TestDuplicateCsrFixedEightGeneral(aclsparseHandle_t handle, aclDataType dt)
+{
+    SpgemmRefCsr a;
+    a.rows = 1;
+    a.cols = 8;
+    a.rowPtr = {0, 8};
+    SpgemmRefCsr b;
+    b.rows = 8;
+    b.cols = 12;
+    b.rowPtr = {0};
+    for (int32_t k = 0; k < 8; ++k) {
+        a.colIdx.push_back(k);
+        a.valRe.push_back((k & 1) ? -(1.0 + 0.125 * k) : 1.0 + 0.125 * k);
+        a.valIm.push_back(0.0);
+        b.colIdx.insert(b.colIdx.end(), {0, 0, k + 1, k + 1});
+        for (int32_t j = 0; j < 4; ++j) {
+            b.valRe.push_back(1.0 + 0.125 * (k + j));
+            b.valIm.push_back(0.0);
+        }
+        if (k & 1) {
+            b.colIdx.insert(b.colIdx.end(), {10, 10, 10});
+            for (int32_t j = 4; j < 7; ++j) {
+                b.valRe.push_back(1.0 + 0.125 * (k + j));
+                b.valIm.push_back(0.0);
+            }
+        }
+        b.rowPtr.push_back(static_cast<int32_t>(b.colIdx.size()));
+    }
+    return TestDuplicateCsrCase(handle, dt, "fixed-eight-general", a, b) &&
+           (dt != ACL_COMPLEX64 ||
+            TestDuplicateCsrComplexAlpha(handle, a, b, "fixed-eight-general-complex-alpha"));
+}
+
+bool TestDuplicateCsrFixedDisjoint(aclsparseHandle_t handle, aclDataType dt, int32_t ways)
+{
+    SpgemmRefCsr a;
+    a.rows = 1;
+    a.cols = ways;
+    a.rowPtr = {0, ways};
+    SpgemmRefCsr b;
+    b.rows = ways;
+    b.cols = ways * 4;
+    b.rowPtr = {0};
+    for (int32_t k = 0; k < ways; ++k) {
+        a.colIdx.push_back(k);
+        a.valRe.push_back((k & 1) ? -1.25 : 1.0 + 0.125 * k);
+        a.valIm.push_back(0.0);
+        const int32_t offsets[6] = {0, 0, 1, 2, (k & 1) ? 2 : 3, 3};
+        for (int32_t j = 0; j < 6; ++j) {
+            b.colIdx.push_back(k * 4 + offsets[j]);
+            b.valRe.push_back(1.0 + 0.125 * (k + j));
+            b.valIm.push_back(0.0);
+        }
+        b.rowPtr.push_back(static_cast<int32_t>(b.colIdx.size()));
+    }
+    const char *name = (ways == 4) ? "fixed-four-disjoint" : "fixed-eight-disjoint";
+    return TestDuplicateCsrCase(handle, dt, name, a, b) &&
+           (dt != ACL_COMPLEX64 ||
+            TestDuplicateCsrComplexAlpha(handle, a, b, name));
+}
+
+/** Duplicate B regressions for the structural dispatcher and general merge path. */
+bool TestDuplicateCsrRegressions(aclsparseHandle_t handle, aclDataType dt)
+{
+    return TestDuplicateCsrSimpleCases(handle, dt) &&
+           TestDuplicateCsrOverlapCases(handle, dt) &&
+           TestDuplicateCsrAAndBetaCases(handle, dt) &&
+           TestDuplicateCsrUnusedRowAp16(handle, dt) &&
+           TestDuplicateCsrDynamicDa(handle, dt) &&
+           TestDuplicateCsrFixedEightGeneral(handle, dt) &&
+           TestDuplicateCsrFixedDisjoint(handle, dt, 4) &&
+           TestDuplicateCsrFixedDisjoint(handle, dt, 8);
+}
+
 /** 无交集乘积：A 选中 B 的空行 → nnz(C) 必须为 0。 */
 bool TestNoIntersection(aclsparseHandle_t handle, aclDataType dt)
 {
@@ -2540,6 +2975,27 @@ TEST_F(SpGemmArch22Test, AlgorithmEnums) {
 // ---- Explicit zero × 4 dtypes ----
 TEST_P(SpGemmArch22DtypeTest, ExplicitZero) {
     EXPECT_TRUE(TestExplicitZero(s_handle_, GetParam().type));
+}
+
+// ---- PR285 duplicate-column regressions and unique-segment controls × 4 dtypes ----
+TEST_P(SpGemmArch22DtypeTest, DuplicateColumnsWithinBRow) {
+    EXPECT_TRUE(TestDuplicateColumnsWithinBRow(s_handle_, GetParam().type));
+}
+
+TEST_P(SpGemmArch22DtypeTest, DuplicateColumnsDisjointSegments) {
+    EXPECT_TRUE(TestDuplicateColumnsDisjointSegments(s_handle_, GetParam().type));
+}
+
+TEST_P(SpGemmArch22DtypeTest, DuplicateCsrRegressions) {
+    EXPECT_TRUE(TestDuplicateCsrRegressions(s_handle_, GetParam().type));
+}
+
+TEST_F(SpGemmArch22Test, DuplicateDispatcherResetSameDescr) {
+    EXPECT_TRUE(TestDuplicateDispatcherResetSameDescr(s_handle_));
+}
+
+TEST_P(SpGemmArch22DtypeTest, LongUniqueMergeWorkloads) {
+    EXPECT_TRUE(TestLongUniqueMergeWorkloads(s_handle_, GetParam().type));
 }
 
 // ---- No intersection (fp32 + c64) ----

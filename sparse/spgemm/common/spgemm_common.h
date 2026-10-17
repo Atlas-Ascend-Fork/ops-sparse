@@ -43,6 +43,7 @@ enum SpgemmRowTemplate : uint8_t {
  */
 struct SpgemmArch22Context {
     uint32_t cachedDtypeId = SPGEMM_DTYPE_FP32;
+    bool bHasDuplicateColumns = false;
     int64_t maxRowProduct = 0;
     int64_t nnzCIn = 0;
     float cachedBetaRe = 0.0f;
