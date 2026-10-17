@@ -173,11 +173,15 @@ restore_permissions() {
     i=$((i - 1))
     local dir="${DIRS_GRANTED_WRITE[$i]}"
     if [ -d "${dir}" ]; then
-      chmod u-w "${dir}" 2>/dev/null
+      if ! chmod u-w "${dir}" 2>/dev/null; then
+        logandprint "[WARNING]: Failed to restore write permission on ${dir}."
+      fi
     fi
   done
   DIRS_GRANTED_WRITE=()
 }
+
+trap 'restore_permissions' EXIT
 
 do_install() {
   local target_dir
