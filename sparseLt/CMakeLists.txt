@@ -54,7 +54,7 @@ if(EXISTS "${_sparselt_version_header}")
         set(ASC_DEVKIT_MINOR "${CMAKE_MATCH_1}")
     endif()
     # arch35 的 kernel 依赖 kernel_operator.h，需 asc-devkit >= 9.1
-    if("arch35" IN_LIST SOC_ARCH_DIRS AND NOT (ASC_DEVKIT_MAJOR GREATER_EQUAL 9 AND ASC_DEVKIT_MINOR GREATER_EQUAL 1))
+    if("arch35" IN_LIST SOC_ARCH_DIRS AND (ASC_DEVKIT_MAJOR LESS 9 OR (ASC_DEVKIT_MAJOR EQUAL 9 AND ASC_DEVKIT_MINOR LESS 1)))
         set(ENABLE_SPARSELT FALSE)
         message(STATUS "[sparseLt] asc-devkit ${ASC_DEVKIT_MAJOR}.${ASC_DEVKIT_MINOR} < 9.1, "
                        "kernel API unavailable, skipping sparseLt library (prune)")
