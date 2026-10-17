@@ -116,7 +116,7 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 - d_in 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - d_out 不可为 nullptr（无 workspace 回退路径），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - 支持 in-place 操作：d_in 与 d_out 可指向同一 Device 内存。**例外**：转置路径（opA=TRANSPOSE 且 order=ROW，即沿列剪枝的转置场景）不支持 in-place，因为输出布局 (m,k) 与输入布局 (k,m) 不同，多核并行写入会覆盖后续 block 的读取区域；此时若 d_in == d_out 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **K 维度对齐约束**：K 须满足结构化描述符初始化（`aclsparseLtStructuredDescriptorInit`）的对齐要求——FP32 为 8 的倍数、FP16/BF16 为 16 的倍数、INT8 为 32 的倍数。描述符初始化会强制校验并向上对齐 rows/cols，因此经 API 调用时 K 必然为对应分组大小的倍数。
+- **K 维度对齐约束**：K 须满足结构化描述符初始化（`aclsparseLtStructuredDescriptorInit`）的对齐要求——FP32 为 8 的倍数、FP16/BF16 为 16 的倍数、INT8 为 32 的倍数。描述符初始化只校验 rows、cols、ld 是否满足对应倍数，不会自动向上对齐；调用方须在初始化前自行完成 padding。经 API 成功初始化后，K 必然为对应分组大小的倍数。
 - **UB 容量约束**：沿行剪枝时，STRIP 需单行数据（k × elemSize）不超过单核 UB 容量，TILE 需 TS 行数据（TS × k × elemSize，TS=4 for FP16 / 2 for FP32，每行按 32 字节对齐）不超过单核 UB 容量；沿列剪枝时行块数据（k × elemSize × 16，每行按 32 字节对齐）须不超过单核 UB 容量。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 - **异步执行**：算子异步启动，内部不执行 `aclrtSynchronizeStream`；调用方如需读取 d_out 结果，须自行同步 stream。
 - **内存布局**：矩阵 A 须以行主序存储（详见"剪枝方向"中的 order 语义说明）。
