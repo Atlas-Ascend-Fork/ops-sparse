@@ -120,7 +120,7 @@ struct SpsmParam : public SparseTestParamBase {
         if (matrix_struct.empty()) matrix_struct = "RANDOM";
         if (index_base.empty()) index_base = "ZERO";
         if (opB.empty()) opB = "N";
-        if (ldb == 0) ldb = m;
+        if (ldb == 0) ldb = isRowOrder() ? n : m;
         if (density == 0.0) density = 0.2;
     }
 
