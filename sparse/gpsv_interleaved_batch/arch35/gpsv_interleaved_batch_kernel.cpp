@@ -68,7 +68,7 @@ GpsvBackwardSub(
         x_ip1 = xGm[idx] / wsD[idx];
         xGm[idx] = x_ip1;
     }
-    if (m < 2) return;
+    if (m < 2) { return; }
 
     {
         int64_t idx = (int64_t)(m - 2) * bc + myBatch;
@@ -76,7 +76,7 @@ GpsvBackwardSub(
         x_ip4 = x_ip3; x_ip3 = x_ip2; x_ip2 = x_ip1; x_ip1 = val;
         xGm[idx] = val;
     }
-    if (m < 3) return;
+    if (m < 3) { return; }
 
     {
         int64_t idx = (int64_t)(m - 3) * bc + myBatch;
@@ -84,7 +84,7 @@ GpsvBackwardSub(
         x_ip4 = x_ip3; x_ip3 = x_ip2; x_ip2 = x_ip1; x_ip1 = val;
         xGm[idx] = val;
     }
-    if (m < 4) return;
+    if (m < 4) { return; }
 
     {
         int64_t idx = (int64_t)(m - 4) * bc + myBatch;

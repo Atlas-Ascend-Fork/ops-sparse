@@ -140,7 +140,7 @@ public:
         TPipe *pipe)
     {
         // Host guarantees non-null; zero-init safe path
-        if (tiling == nullptr || pipe == nullptr) return;
+        if (tiling == nullptr || pipe == nullptr) { return; }
         pipe_ = pipe;
         gmDl_ = gmDl;
         gmD_ = gmD;

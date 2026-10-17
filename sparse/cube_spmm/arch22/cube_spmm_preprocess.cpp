@@ -82,10 +82,10 @@ bool AllocDeviceAndCopy(void **out, const void *hostData, size_t bytes)
 
 void FreeAll(void *rw, void *col, void *vals, void *core)
 {
-    if (rw != nullptr) aclrtFree(rw);
-    if (col != nullptr) aclrtFree(col);
-    if (vals != nullptr) aclrtFree(vals);
-    if (core != nullptr) aclrtFree(core);
+    if (rw != nullptr) { aclrtFree(rw); }
+    if (col != nullptr) { aclrtFree(col); }
+    if (vals != nullptr) { aclrtFree(vals); }
+    if (core != nullptr) { aclrtFree(core); }
 }
 
 // RAII holder for device buffers allocated during preprocess. If preprocess
@@ -160,8 +160,8 @@ static void BuildCsrFromCoo(
     }
 
     std::sort(elems.begin(), elems.end(), [](const CooElem &a, const CooElem &b) {
-        if (a.row != b.row) return a.row < b.row;
-        if (a.col != b.col) return a.col < b.col;
+        if (a.row != b.row) { return a.row < b.row; }
+        if (a.col != b.col) { return a.col < b.col; }
         return false;
     });
 

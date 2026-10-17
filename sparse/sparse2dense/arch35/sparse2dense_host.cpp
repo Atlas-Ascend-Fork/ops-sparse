@@ -264,14 +264,14 @@ static aclsparseStatus_t ValidateAndZeroOutput(const aclsparseSpMatDescr *matInn
     if (m == 0 || n == 0) {
         if (dnMatBytes > 0) {
             aclsparseStatus_t zst = ZeroDenseOutput(dnInner, dnMatBytes, stream);
-            if (zst != ACL_SPARSE_STATUS_SUCCESS) return zst;
+            if (zst != ACL_SPARSE_STATUS_SUCCESS) { return zst; }
         }
         OP_LOGD(kTag, "empty matrix, output zeroed, skip kernel launch");
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     if (matInner->nnz == 0) {
         aclsparseStatus_t zst = ZeroDenseOutput(dnInner, dnMatBytes, stream);
-        if (zst != ACL_SPARSE_STATUS_SUCCESS) return zst;
+        if (zst != ACL_SPARSE_STATUS_SUCCESS) { return zst; }
         OP_LOGD(kTag, "nnz=0, output zeroed, skip kernel launch");
         return ACL_SPARSE_STATUS_SUCCESS;
     }

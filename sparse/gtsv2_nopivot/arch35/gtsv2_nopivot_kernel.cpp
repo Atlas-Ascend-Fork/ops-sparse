@@ -64,7 +64,7 @@ __simt_callee__ inline void Gtsv2ProcessOneRhs(
     __gm__ float *wsGm,
     int32_t m, int32_t ldb, int32_t rhsIdx)
 {
-    if (m < 1) return;
+    if (m < 1) { return; }
 
     // B is column-major (ldb x n): column j starts at B[j * ldb]
     int64_t colOff = static_cast<int64_t>(rhsIdx) * ldb;

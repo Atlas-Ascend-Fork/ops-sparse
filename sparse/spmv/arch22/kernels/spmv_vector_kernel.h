@@ -47,8 +47,9 @@ public:
         uint32_t tile = 8;
         for (uint32_t i = 0; i < rows_; ++i) {
             int32_t n = rowPtr_(i + 1) - rowPtr_(i);
-            if (n > static_cast<int32_t>(tile))
+            if (n > static_cast<int32_t>(tile)) {
                 tile = n;
+            }
         }
         pipe_.InitBuffer(indexQueue_, 1, tile * sizeof(int32_t));
         pipe_.InitBuffer(valueQueue_, 1, tile * sizeof(float));
@@ -62,8 +63,9 @@ public:
 
     __aicore__ inline void Process()
     {
-        if (!active_)
+        if (!active_) {
             return;
+        }
         if constexpr (std::is_same_v<ValT, float> && std::is_same_v<OutT, float>) {
             if (shortRows_) {
                 ProcessShortRows();
@@ -191,8 +193,9 @@ private:
         output = outputQueue_.DeQue<OutT>();
         AscendC::DataCopyExtParams oc{1, static_cast<uint32_t>(sizeof(OutT)), 0, 0, 0};
         AscendC::DataCopyPad(y_[row], output, oc);
-        if (beta_ != 0.0f)
+        if (beta_ != 0.0f) {
             SpmvSyncEvent<AscendC::HardEvent::MTE3_MTE2>(pipe_);
+        }
         outputQueue_.FreeTensor(output);
         valueQueue_.FreeTensor(values);
         indexQueue_.FreeTensor(indices);

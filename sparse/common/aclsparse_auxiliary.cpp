@@ -37,7 +37,7 @@ inline aclsparseContext *ToInternal(aclsparseHandle_t handle)
  */
 void freeDefaultWorkspace(aclsparseContext *h)
 {
-    if (h == nullptr || h->default_workspace == nullptr) return;
+    if (h == nullptr || h->default_workspace == nullptr) { return; }
     aclrtFree(h->default_workspace);
     h->default_workspace = nullptr;
     h->default_workspace_size = 0;
@@ -48,10 +48,10 @@ void freeDefaultWorkspace(aclsparseContext *h)
  */
 aclsparseStatus_t allocateDefaultWorkspace(aclsparseContext *h, size_t size)
 {
-    if (h == nullptr || size == 0) return ACL_SPARSE_STATUS_INVALID_VALUE;
+    if (h == nullptr || size == 0) { return ACL_SPARSE_STATUS_INVALID_VALUE; }
     void *ptr = nullptr;
     const aclError aclRet = aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
-    if (aclRet != ACL_SUCCESS) return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    if (aclRet != ACL_SUCCESS) { return ACL_SPARSE_STATUS_ALLOC_FAILED; }
     h->default_workspace = ptr;
     h->default_workspace_size = size;
     return ACL_SPARSE_STATUS_SUCCESS;

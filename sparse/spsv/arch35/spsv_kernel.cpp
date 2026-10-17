@@ -402,7 +402,7 @@ __simt_callee__ inline int32_t SpsvBuildLevelHistogram(
 {
     int32_t numLevels = 0;
     for (int64_t i = 0; i < m; i++) {
-        if (static_cast<int32_t>(diagPtr[i]) > numLevels) numLevels = static_cast<int32_t>(diagPtr[i]);
+        if (static_cast<int32_t>(diagPtr[i]) > numLevels) { numLevels = static_cast<int32_t>(diagPtr[i]); }
     }
     numLevels += 1;
     for (int32_t k = 0; k <= numLevels; k++) {
@@ -448,8 +448,8 @@ __simt_callee__ inline void SpsvResolveEffectivePtrs(
         effOpA = 0;
     }
     *effForward = false;
-    if (effFillMode == 0 && effOpA == 0) *effForward = true;
-    if (effFillMode == 1 && effOpA != 0) *effForward = true;
+    if (effFillMode == 0 && effOpA == 0) { *effForward = true; }
+    if (effFillMode == 1 && effOpA != 0) { *effForward = true; }
 }
 
 template <typename RowPtrT, typename ColIndT, typename PermT>
@@ -794,7 +794,7 @@ __simt_callee__ inline void SpsvBuildLevelHistogramParallel(
         int32_t numLevels = 0;
         for (int64_t i = 0; i < m; i++) {
             int32_t lvl = static_cast<int32_t>(diagPtr[i]);
-            if (lvl > numLevels) numLevels = lvl;
+            if (lvl > numLevels) { numLevels = lvl; }
         }
         numLevels += 1;
         tilingOut->numLevels = numLevels;

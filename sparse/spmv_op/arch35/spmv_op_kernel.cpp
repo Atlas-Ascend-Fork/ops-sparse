@@ -229,7 +229,7 @@ public:
             int32_t coreRangeLen = rowEnd - rowStart;
             simtThreadNum = (coreRangeLen < static_cast<int32_t>(kSpmvOpMaxThreadsPerBlock))
                 ? static_cast<uint32_t>(coreRangeLen) : kSpmvOpMaxThreadsPerBlock;
-            if (simtThreadNum == 0) simtThreadNum = 1;
+            if (simtThreadNum == 0) { simtThreadNum = 1; }
             simtThreadNum = AlignToWarp(simtThreadNum);
         }
         const int32_t threadsPerCore = static_cast<int32_t>(simtThreadNum);

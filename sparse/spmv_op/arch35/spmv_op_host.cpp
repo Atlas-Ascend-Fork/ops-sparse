@@ -429,7 +429,7 @@ static aclsparseStatus_t LaunchSpMVOpNnzKernel(
         }
         useBlocks = descr->alg2NumBlocks;
         rowsPerBlock = (m + useBlocks - 1) / useBlocks;
-        if (rowsPerBlock == 0u) rowsPerBlock = 1u;
+        if (rowsPerBlock == 0u) { rowsPerBlock = 1u; }
     } else {
         aclsparseStatus_t splitSt = ComputeSpmvOpBlockSplits(m, useBlocks, rowsPerBlock);
         CHECK_RET(splitSt == ACL_SPARSE_STATUS_SUCCESS, return splitSt);

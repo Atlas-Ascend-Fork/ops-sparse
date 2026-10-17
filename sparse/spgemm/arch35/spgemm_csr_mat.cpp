@@ -47,7 +47,7 @@ void SpgemmGreedyRowBinPack(
     for (int32_t idx : order) {
         int32_t pick = 0;
         for (int32_t b = 1; b < binNum; ++b) {
-            if (binLoad[b] < binLoad[pick]) pick = b;
+            if (binLoad[b] < binLoad[pick]) { pick = b; }
         }
         bins[pick].push_back(idx);
         binLoad[pick] += rowWeight[idx];
@@ -81,7 +81,7 @@ aclsparseStatus_t SpgemmComputeRowWeights(
             int32_t k = aColInd[p];
             weight += static_cast<int64_t>(bRowPtr[k + 1]) - static_cast<int64_t>(bRowPtr[k]);
         }
-        if (weight > INT32_MAX) weight = INT32_MAX;
+        if (weight > INT32_MAX) { weight = INT32_MAX; }
         rowWeights[i] = static_cast<int32_t>(weight);
     }
     return ACL_SPARSE_STATUS_SUCCESS;

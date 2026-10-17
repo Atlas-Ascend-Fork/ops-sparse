@@ -97,8 +97,8 @@ static inline int32_t Sparse2DenseValTypeFromAcl(aclDataType valueType)
 /// 将 ACL 稀疏格式映射为 kernel 内部格式编码（调用方需先通过 Validate 校验，此函数不含非法值）
 static inline int32_t Sparse2DenseFormatFromAcl(aclsparseFormat_t format)
 {
-    if (format == ACL_SPARSE_FORMAT_CSC) return SPARSE2DENSE_FMT_CSC;
-    if (format == ACL_SPARSE_FORMAT_COO) return SPARSE2DENSE_FMT_COO;
+    if (format == ACL_SPARSE_FORMAT_CSC) { return SPARSE2DENSE_FMT_CSC; }
+    if (format == ACL_SPARSE_FORMAT_COO) { return SPARSE2DENSE_FMT_COO; }
     return SPARSE2DENSE_FMT_CSR;
 }
 

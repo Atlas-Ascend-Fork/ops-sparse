@@ -78,7 +78,7 @@ struct aclsparseContext {
  */
 inline void* aclsparseGetEffectiveWorkspace(const aclsparseContext* h)
 {
-    if (h == nullptr) return nullptr;
+    if (h == nullptr) { return nullptr; }
     return h->use_user_workspace ? h->user_workspace : h->default_workspace;
 }
 
@@ -87,7 +87,7 @@ inline void* aclsparseGetEffectiveWorkspace(const aclsparseContext* h)
  */
 inline size_t aclsparseGetEffectiveWorkspaceSize(const aclsparseContext* h)
 {
-    if (h == nullptr) return 0;
+    if (h == nullptr) { return 0; }
     return h->use_user_workspace ? h->user_workspace_size : h->default_workspace_size;
 }
 

@@ -186,8 +186,9 @@ static inline SpgemmWsOffsets ComputeSpgemmWsOffsets(int64_t m, int64_t n, int64
     o.headerOff      = kSpgemmWsHeaderBytes;
     o.tilingOff      = spgemm_align_up(o.headerOff, kSpgemmWsAlign);
     int64_t tilingSz = (int64_t)sizeof(SpgemmNumericTilingData);
-    if ((int64_t)sizeof(SpgemmSymbolicTilingData) > tilingSz)
+    if ((int64_t)sizeof(SpgemmSymbolicTilingData) > tilingSz) {
         tilingSz = (int64_t)sizeof(SpgemmSymbolicTilingData);
+    }
 
     o.bRowPtrOff     = spgemm_align_up(o.tilingOff + tilingSz, kSpgemmWsAlign);
     int64_t bRowPtrLen = k + 1;
@@ -201,8 +202,8 @@ static inline SpgemmWsOffsets ComputeSpgemmWsOffsets(int64_t m, int64_t n, int64
      * capped at 5e8 for memory safety. The previous nnzA*16 heuristic was
      * insufficient for high-density matrices where nnzC >> nnzA*16. */
     int64_t maxNnzC  = static_cast<int64_t>(m) * static_cast<int64_t>(n);
-    if (maxNnzC > 500000000) maxNnzC = 500000000;
-    if (maxNnzC < 1024) maxNnzC = 1024;
+    if (maxNnzC > 500000000) { maxNnzC = 500000000; }
+    if (maxNnzC < 1024) { maxNnzC = 1024; }
     o.valuesCOff     = spgemm_align_up(o.colIndCOff + maxNnzC * (int64_t)sizeof(int32_t), kSpgemmWsAlign);
 
     /* GM-backed per-block workspace for n>64 path.

@@ -46,9 +46,9 @@
 #define SPMM_DTYPE_INT8 2
 
 static inline int32_t SpmmDataTypeFromAcl(aclDataType valueType) {
-    if (valueType == ACL_FLOAT)       return SPMM_DTYPE_FP32;
-    if (valueType == ACL_FLOAT16)     return SPMM_DTYPE_FP16;
-    if (valueType == ACL_INT8)        return SPMM_DTYPE_INT8;
+    if (valueType == ACL_FLOAT) { return SPMM_DTYPE_FP32; }
+    if (valueType == ACL_FLOAT16) { return SPMM_DTYPE_FP16; }
+    if (valueType == ACL_INT8) { return SPMM_DTYPE_INT8; }
     return SPMM_DTYPE_INVALID;
 }
 

@@ -130,8 +130,8 @@ public:
             }
 
             bool needAtomic = false;
-            if (row == 0 && blkStart > 0) needAtomic = true;
-            if (row == rowWindowNum - 1 && blkEnd < totalBlocks) needAtomic = true;
+            if (row == 0 && blkStart > 0) { needAtomic = true; }
+            if (row == rowWindowNum - 1 && blkEnd < totalBlocks) { needAtomic = true; }
 
             for (int64_t nOffset = 0; nOffset < N; nOffset += nProcTile) {
                 int64_t chunkN = (nOffset + nProcTile <= N) ? nProcTile : (N - nOffset);

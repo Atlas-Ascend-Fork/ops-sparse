@@ -53,8 +53,9 @@ __aicore__ inline void SpmvTransFinalize(GM_ADDR workspace, GM_ADDR output,
         AscendC::DataCopyPadExtParams<float> fp32Pad{false, 0, 0, 0};
         AscendC::DataCopyPadExtParams<OutT> narrowPad{false, 0, 0, 0};
         AscendC::DataCopyPad(sum, sums[offset], fp32Copy, fp32Pad);
-        if (beta != 0.0f)
+        if (beta != 0.0f) {
             AscendC::DataCopyPad(narrow, y[offset], narrowCopy, narrowPad);
+        }
         SpmvSyncEvent<AscendC::HardEvent::MTE2_V>(pipe);
         if (beta != 0.0f) {
             AscendC::Cast(previous, narrow, AscendC::RoundMode::CAST_NONE, n);

@@ -499,7 +499,7 @@ __aicore__ inline void CopyGmToVec(AscendC::TQue<AscendC::QuePosition::VECIN, QN
                                    DataType pad_value = 0) {
   exec_mode::AssertIsAIV();
   const AscendC::LocalTensor<DataType> lt = q.template AllocTensor<DataType>();
-  if (!num_elems) num_elems = lt.GetSize();
+  if (!num_elems) { num_elems = lt.GetSize(); }
   if (num_elems % (UB_ALIGNMENT / sizeof(DataType)) == 0) {
     AscendC::DataCopy(lt, global, num_elems);
   } else {

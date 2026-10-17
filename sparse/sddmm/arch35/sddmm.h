@@ -32,8 +32,8 @@
 #define SDDMM_DTYPE_FP16 1
 
 static inline int32_t SddmmDataTypeFromAcl(aclDataType valueType) {
-    if (valueType == ACL_FLOAT)       return SDDMM_DTYPE_FP32;
-    if (valueType == ACL_FLOAT16)     return SDDMM_DTYPE_FP16;
+    if (valueType == ACL_FLOAT) {       return SDDMM_DTYPE_FP32; }
+    if (valueType == ACL_FLOAT16) {     return SDDMM_DTYPE_FP16; }
     return SDDMM_DTYPE_INVALID;
 }
 

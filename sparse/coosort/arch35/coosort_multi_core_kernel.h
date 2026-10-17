@@ -63,10 +63,12 @@ __aicore__ inline void PadT(LocalTensor<int32_t> &t, uint32_t n, uint32_t a, int
 __aicore__ inline bool LEQ(int32_t rA, int32_t cA, int32_t rB, int32_t cB, bool bR)
 {
     int32_t pA = bR ? rA : cA, pB = bR ? rB : cB;
-    if (pA < pB)
+    if (pA < pB) {
         return true;
-    if (pA > pB)
+    }
+    if (pA > pB) {
         return false;
+    }
     int32_t sA = bR ? cA : rA, sB = bR ? cB : rB;
     return sA <= sB;
 }
@@ -145,8 +147,9 @@ __aicore__ inline void CoosortMultiCoreSort::Init(
 
 __aicore__ inline void CoosortMultiCoreSort::Process()
 {
-    if (nz_ == 0)
+    if (nz_ == 0) {
         return;
+    }
     for (uint32_t runId = id_; runId < rc_; runId += fc_) {
         int64_t o = static_cast<int64_t>(td_) * runId;
         uint32_t remain = nz_ - static_cast<uint32_t>(o);
@@ -289,14 +292,16 @@ __aicore__ inline void CoosortMultiCoreSort::P2Rnd()
     uint64_t tile = static_cast<uint32_t>(oM_);
     uint64_t mteSafeTile = (kMteMaxBlockBytes / (kTrpl * sizeof(int32_t)) - (kMergeAlignRecords - 1U));
     mteSafeTile = (mteSafeTile / kMergeAlignRecords) * kMergeAlignRecords;
-    if (tile > mteSafeTile)
+    if (tile > mteSafeTile) {
         tile = mteSafeTile;
+    }
     tile = (tile / kMergeAlignRecords) * kMergeAlignRecords;
     uint64_t stride = tile * fc_;
     for (uint64_t tileBegin = tile * id_; tileBegin < nz_; tileBegin += stride) {
         uint64_t tileEnd = tileBegin + tile;
-        if (tileEnd > nz_)
+        if (tileEnd > nz_) {
             tileEnd = nz_;
+        }
         uint64_t pos = tileBegin;
         uint64_t pairSpan = cE_ * 2U;
         while (pos < tileEnd) {
@@ -372,8 +377,9 @@ __aicore__ inline void CoosortMultiCoreSort::P2MergeSegment(
     uint32_t aCount = static_cast<uint32_t>(aEnd - aBegin);
     uint32_t bCount = static_cast<uint32_t>(bEnd - bBegin);
     uint32_t outCount = aCount + bCount;
-    if (outCount == 0U)
+    if (outCount == 0U) {
         return;
+    }
 
     uint32_t aPrefix = static_cast<uint32_t>(aBegin & (kMergeAlignRecords - 1U));
     uint32_t bPrefix = static_cast<uint32_t>(bBegin & (kMergeAlignRecords - 1U));
@@ -401,14 +407,15 @@ __aicore__ inline void CoosortMultiCoreSort::P2MergeSegment(
     for (uint32_t out = 0U; out < outCount; out++) {
         bool takeA = false;
         if (ai < aCount) {
-            if (bi >= bCount)
+            if (bi >= bCount) {
                 takeA = true;
-            else
+            } else {
                 takeA = mc::LEQ(ub.GetValue((aPrefix + ai) * kTrpl),
                     ub.GetValue((aPrefix + ai) * kTrpl + 1U),
                     ub.GetValue((bLocalBase + bPrefix + bi) * kTrpl),
                     ub.GetValue((bLocalBase + bPrefix + bi) * kTrpl + 1U),
                     bR_);
+            }
         }
         uint32_t src = takeA ? (aPrefix + ai++) : (bLocalBase + bPrefix + bi++);
         uo.SetValue(out * kTrpl, ub.GetValue(src * kTrpl));
@@ -430,8 +437,9 @@ __aicore__ inline void CoosortMultiCoreSort::P3Out()
 {
     uint32_t chunk = aI_;
     uint32_t outCapacity = static_cast<uint32_t>(oM_);
-    if (chunk > outCapacity)
+    if (chunk > outCapacity) {
         chunk = outCapacity;
+    }
     if (chunk == 0U) {
         SyncAll();
         return;

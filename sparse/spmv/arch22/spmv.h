@@ -89,23 +89,25 @@ static inline void SpmvTypesFromAcl(aclDataType computeType,
 									int32_t *oType) {
 	*cType = (computeType == ACL_INT32) ? SPMV_COMPUTE_I32 : SPMV_COMPUTE_F32;
 
-	if (valType == ACL_FLOAT16)
+	if (valType == ACL_FLOAT16) {
 		*vType = SPMV_VAL_HALF;
-	else if (valType == ACL_BF16)
+	} else if (valType == ACL_BF16) {
 		*vType = SPMV_VAL_BF16;
-	else if (valType == ACL_INT32)
+	} else if (valType == ACL_INT32) {
 		*vType = SPMV_VAL_I32;
-	else
+	} else {
 		*vType = SPMV_VAL_F32;
+	}
 
-	if (outType == ACL_FLOAT16)
+	if (outType == ACL_FLOAT16) {
 		*oType = SPMV_OUT_HALF;
-	else if (outType == ACL_BF16)
+	} else if (outType == ACL_BF16) {
 		*oType = SPMV_OUT_BF16;
-	else if (outType == ACL_INT32)
+	} else if (outType == ACL_INT32) {
 		*oType = SPMV_OUT_I32;
-	else
+	} else {
 		*oType = SPMV_OUT_F32;
+	}
 }
 
 #endif // SPMV_H

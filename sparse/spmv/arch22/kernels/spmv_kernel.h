@@ -44,8 +44,9 @@ __aicore__ inline void SpmvScalarRows(
     AscendC::DataCopyExtParams cp{1, static_cast<uint32_t>(sizeof(T)), 0, 0, 0};
     for (uint32_t first = 0; first < rows; first += SPMV_ATOMIC_BATCH) {
         uint32_t count = rows - first;
-        if (count > SPMV_ATOMIC_BATCH)
+        if (count > SPMV_ATOMIC_BATCH) {
             count = SPMV_ATOMIC_BATCH;
+        }
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t row = first + i;
             T sum = 0;
@@ -63,13 +64,15 @@ __aicore__ inline void SpmvScalarRows(
             T result;
             if constexpr (std::is_same_v<T, int32_t>) {
                 uint32_t v = static_cast<uint32_t>(sum) * static_cast<uint32_t>(alpha);
-                if (beta != 0)
+                if (beta != 0) {
                     v += static_cast<uint32_t>(beta) * static_cast<uint32_t>(y(row));
+                }
                 result = static_cast<int32_t>(v);
             } else {
                 result = alpha * sum;
-                if (beta != 0)
+                if (beta != 0) {
                     result += beta * y(row);
+                }
             }
             batch.SetValue(i * stride, result);
         }
@@ -185,8 +188,9 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Init(
             continue;
         }
         uint32_t rowLength = static_cast<uint32_t>(rowEnd - rowStart);
-        if (rowLength > this->tileLength)
+        if (rowLength > this->tileLength) {
             this->tileLength = rowLength;
+        }
     }
     if (this->tileLength == 0) {
         this->tileLength = 8; // 全空行也给最小对齐量，避免 InitBuffer(0)
@@ -296,8 +300,9 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Compute(int32_t currentRow
     AscendC::LocalTensor<CompT> xLocal = workQueueX.AllocTensor<CompT>();
     // Delay the scalar dependency until consumption; CopyIn can first issue
     // the independent values/y loads instead of stalling after the index DMA.
-    if (validNum > 0)
+    if (validNum > 0) {
         SpmvSyncEvent<AscendC::HardEvent::MTE2_S>(pipe);
+    }
     AscendC::LocalTensor<float> sharedTmpBuffer;
     AscendC::LocalTensor<float> floatTmpBuffer;
 
@@ -402,8 +407,9 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Compute(int32_t currentRow
 
 template <typename CompT, typename ValT, typename OutT>
 __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Process() {
-    if (this->blockRowNum == 0)
+    if (this->blockRowNum == 0) {
         return;
+    }
 
     if constexpr (std::is_same_v<CompT, ValT> && std::is_same_v<CompT, OutT>) {
         if (tileLength <= 8) {
@@ -544,8 +550,9 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Init(
                 continue;
             }
             uint32_t rowLength = static_cast<uint32_t>(rowEnd - rowStart);
-            if (rowLength > this->tileLength)
+            if (rowLength > this->tileLength) {
                 this->tileLength = rowLength;
+            }
         }
         if (this->tileLength == 0) {
             this->tileLength = 8;
@@ -573,12 +580,14 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Init(
  */
 template <typename CompT, typename ValT, typename OutT>
 __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ScaleBeta() {
-    if (this->yBlockCount == 0)
+    if (this->yBlockCount == 0) {
         return;
+    }
 
     // beta == 1：无需缩放
-    if (this->beta == static_cast<CompT>(1))
+    if (this->beta == static_cast<CompT>(1)) {
         return;
+    }
 
     // 以 tileLength 为块大小逐块处理 y[ yBlockStart .. yBlockStart+yBlockCount )
     for (uint32_t offset = 0; offset < this->yBlockCount; offset += this->tileLength) {
@@ -803,26 +812,30 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ProcessScalarSmallRow
     for (uint32_t row = 0; row < blockRowNum; ++row) {
         int32_t begin = csrRowPtrGm(row) - startValIdx;
         int32_t end = csrRowPtrGm(row + 1) - startValIdx;
-        if (end <= begin)
+        if (end <= begin) {
             continue;
+        }
         ValT rawX = xVecGm(startRow + row);
         CompT xv;
-        if constexpr (std::is_same_v<ValT, bfloat16_t>)
+        if constexpr (std::is_same_v<ValT, bfloat16_t>) {
             xv = AscendC::Cast(rawX);
-        else
+        } else {
             xv = static_cast<CompT>(rawX);
+        }
         for (int32_t j = begin; j < end; ++j) {
             ValT rawValue = csrValGm(j);
             CompT value;
-            if constexpr (std::is_same_v<ValT, bfloat16_t>)
+            if constexpr (std::is_same_v<ValT, bfloat16_t>) {
                 value = AscendC::Cast(rawValue);
-            else
+            } else {
                 value = static_cast<CompT>(rawValue);
-            if constexpr (std::is_same_v<CompT, int32_t>)
+            }
+            if constexpr (std::is_same_v<CompT, int32_t>) {
                 batch.SetValue(pending * stride, static_cast<int32_t>(
                     static_cast<uint32_t>(value) * static_cast<uint32_t>(xv) * static_cast<uint32_t>(alpha)));
-            else
+            } else {
                 batch.SetValue(pending * stride, (value * xv) * alpha);
+            }
             targets.SetValue(pending * stride + 1, csrColIndGm(j));
             if (++pending == SPMV_ATOMIC_BATCH) {
                 FlushScalarBatch(batch, pending);
@@ -830,8 +843,9 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::ProcessScalarSmallRow
             }
         }
     }
-    if (pending > 0)
+    if (pending > 0) {
         FlushScalarBatch(batch, pending);
+    }
     outQueueY.FreeTensor(batch);
 }
 
@@ -854,8 +868,9 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Process() {
     // 阶段 2：逐行处理，每行贡献原子累加到 y
     for (int32_t m = 0; m < this->blockRowNum; m++) {
         int32_t validNum = csrRowPtrGm(m + 1) - csrRowPtrGm(m);
-        if (validNum <= 0)
+        if (validNum <= 0) {
             continue;
+        }
         CopyIn(m, validNum);
         Compute(m, validNum);
         CopyOut(m, validNum);

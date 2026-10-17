@@ -112,8 +112,9 @@ namespace {
 
         const uint64_t kFixed = kYLocalBytes + kSystemReserved + kAlignSlack;
 
-        if (ubSize <= kFixed)
+        if (ubSize <= kFixed) {
             return 0;
+        }
 
         uint64_t maxLen = (ubSize - kFixed) / perElem;
 
@@ -128,8 +129,9 @@ namespace {
      * @brief 从 device 侧 rowPtr 计算最大行长
      */
     uint32_t ComputeMaxRowLengthFromDevice(void *csrRowPtrDevice, uint64_t rows, aclrtStream stream) {
-        if (rows == 0)
+        if (rows == 0) {
             return 0;
+        }
 
         std::vector<int32_t> rowPtrHost(rows + 1);
         aclError ret = aclrtMemcpy(rowPtrHost.data(),
@@ -149,8 +151,9 @@ namespace {
         uint32_t maxLen = 0;
         for (uint64_t i = 0; i < rows; i++) {
             uint32_t rowLen = rowPtrHost[i + 1] - rowPtrHost[i];
-            if (rowLen > maxLen)
+            if (rowLen > maxLen) {
                 maxLen = rowLen;
+            }
         }
         return maxLen;
     }

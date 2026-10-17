@@ -89,7 +89,7 @@ public:
 
         const uint32_t blockDim = GetBlockNum();
         const uint32_t blockId = GetBlockIdx();
-        if (blockDim == 0) return;
+        if (blockDim == 0) { return; }
         // WorkEstimation 阶段 binEdge 尚未生成，按行数均分即可（此阶段每行成本
         // 正比于 A 行 nnz，均分已足够；真正的负载均衡在 binEdge 生成后生效）。
         const uint32_t rowsPerCore = (M_ + blockDim - 1) / blockDim;
@@ -493,7 +493,7 @@ private:
         if (tblL_ != rowLen) {
             // 建表需要 pat = lcm(L, 8) 次标量写，pat 超限则走标量路径。
             const uint32_t g = Gcd8(lu);
-            if (g == 0) return 0;
+            if (g == 0) { return 0; }
             const uint32_t pat = lu * (8u / g);
             if ((pat > kVecTile) || (pat > (kEnd_ - kStart_))) { return 0; }
             BuildVecTables(rowLen, pat);

@@ -53,7 +53,7 @@ NnzSimtVfCompute(
             int32_t count = 0;
             int64_t base = static_cast<int64_t>(unitIdx);
             for (int32_t j = 0; j < unitSize; j++) {
-                if (A[j * lda64 + base] != 0.0f) count++;
+                if (A[j * lda64 + base] != 0.0f) { count++; }
             }
             nnzPerRowColumn[unitIdx] = count;
             localCount += count;
@@ -66,10 +66,10 @@ NnzSimtVfCompute(
             int32_t count = 0;
             int64_t base = static_cast<int64_t>(colIdx) * lda64;
             for (int32_t i = laneId; i < unitSize; i += kWarpSize) {
-                if (A[base + i] != 0.0f) count++;
+                if (A[base + i] != 0.0f) { count++; }
             }
             int32_t colNnz = asc_reduce_add(count);
-            if (laneId == 0) nnzPerRowColumn[colIdx] = colNnz;
+            if (laneId == 0) { nnzPerRowColumn[colIdx] = colNnz; }
             localCount += count;
         }
     }

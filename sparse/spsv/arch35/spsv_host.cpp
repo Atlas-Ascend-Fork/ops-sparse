@@ -457,7 +457,7 @@ static aclsparseStatus_t LaunchSpSVAnalysisKernel(
 {
     SpSVLaunchContext ctx{};
     aclsparseStatus_t st = PrepareSpSVContext(handle, opA, alpha, matA, spsvDescr, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     uint32_t numBlocks = ComputeNumBlocks(ctx.tiling.m, ctx.tiling.nnz, ctx.tiling.nthreads);
     ctx.tiling.numBlocks = numBlocks;
@@ -527,7 +527,7 @@ static aclsparseStatus_t LaunchSpSVSolveKernel(
 {
     SpSVLaunchContext ctx{};
     aclsparseStatus_t st = PrepareSpSVContext(handle, opA, alpha, matA, spsvDescr, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     uint8_t *rowPtr = ctx.rowPtr;
     uint8_t *colInd = ctx.colInd;
@@ -768,11 +768,11 @@ aclsparseStatus_t aclsparseSpSV_bufferSize(
     }
 
     aclsparseStatus_t st = ValidateOpA("aclsparseSpSV_bufferSize", opA);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     st = ValidateSpSVCommonParams(
         "aclsparseSpSV_bufferSize", matA, spsvDescr, computeType, alg);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     auto *mat = spsv::ToMatInner(matA);
     int64_t m = static_cast<int64_t>(mat->rows);
@@ -813,11 +813,11 @@ aclsparseStatus_t aclsparseSpSV_analysis(
     }
 
     aclsparseStatus_t st = ValidateOpA("aclsparseSpSV_analysis", opA);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     st = ValidateSpSVCommonParams(
         "aclsparseSpSV_analysis", matA, spsvDescr, computeType, alg);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     auto *mat = spsv::ToMatInner(matA);
     CacheMatrixAttributes(matA, opA, spsvDescr);
@@ -851,11 +851,11 @@ aclsparseStatus_t aclsparseSpSV_solve(
     }
 
     aclsparseStatus_t st = ValidateOpA("aclsparseSpSV_solve", opA);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     st = ValidateSpSVCommonParams(
         "aclsparseSpSV_solve", matA, spsvDescr, computeType, alg);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     if (vecX == nullptr) {
         OP_LOGE("aclsparseSpSV_solve", "vecX is nullptr");

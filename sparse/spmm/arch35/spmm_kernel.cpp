@@ -231,8 +231,8 @@ __simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void Sp
                 } else {
                     constexpr float kFp16Max = 65504.0f;
                     float clamped = cNew;
-                    if (clamped > kFp16Max) clamped = kFp16Max;
-                    if (clamped < -kFp16Max) clamped = -kFp16Max;
+                    if (clamped > kFp16Max) { clamped = kFp16Max; }
+                    if (clamped < -kFp16Max) { clamped = -kFp16Max; }
                     matC[cIdx] = static_cast<ValT>(clamped);
                 }
             }
@@ -261,8 +261,8 @@ __simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void Sp
                 }
                 constexpr int64_t kInt32Max = 2147483647LL;
                 constexpr int64_t kInt32Min = -2147483648LL;
-                if (cWide > kInt32Max) cWide = kInt32Max;
-                if (cWide < kInt32Min) cWide = kInt32Min;
+                if (cWide > kInt32Max) { cWide = kInt32Max; }
+                if (cWide < kInt32Min) { cWide = kInt32Min; }
                 matC[cIdx] = static_cast<int32_t>(cWide);
             }
         }

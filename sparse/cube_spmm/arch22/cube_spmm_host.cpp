@@ -342,10 +342,10 @@ aclsparseStatus_t aclsparseDestroyCubeSpmmMat(
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     auto *inner = cube_spmm::ToCubeSpmmMatInner(descr);
-    if (inner->rwPtr != nullptr) aclrtFree(inner->rwPtr);
-    if (inner->colRef != nullptr) aclrtFree(inner->colRef);
-    if (inner->vals != nullptr) aclrtFree(inner->vals);
-    if (inner->coreInfo != nullptr) aclrtFree(inner->coreInfo);
+    if (inner->rwPtr != nullptr) { aclrtFree(inner->rwPtr); }
+    if (inner->colRef != nullptr) { aclrtFree(inner->colRef); }
+    if (inner->vals != nullptr) { aclrtFree(inner->vals); }
+    if (inner->coreInfo != nullptr) { aclrtFree(inner->coreInfo); }
     delete inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
