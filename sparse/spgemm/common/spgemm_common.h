@@ -46,6 +46,8 @@ struct SpgemmArch22Context {
     bool bHasDuplicateColumns = false;
     int64_t maxRowProduct = 0;
     int64_t nnzCIn = 0;
+    // EstimateMemory 的行统计上界；每次重新执行 WorkEstimation 时失效。
+    int64_t estimatedNnzUpperBound = -1;
     float cachedBetaRe = 0.0f;
     float cachedBetaIm = 0.0f;
     uint32_t blockDim = 0;

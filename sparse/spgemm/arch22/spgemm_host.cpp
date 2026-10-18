@@ -806,6 +806,7 @@ static aclsparseStatus_t RunWorkEstimation(const WorkEstimationPlan &plan,
         return status;
     }
     spgemmDescr->state = AclsparseSpGemmState::CREATED;
+    arch22ctx.estimatedNnzUpperBound = -1;
     RecordEstimatedStage(spgemmDescr, arch22ctx, plan.ctx, computeType, alg, buffer1,
                          bufferSize1, plan.blockDim, plan.M, scalars);
     SpgemmArch22TilingData tiling{};
@@ -898,13 +899,18 @@ aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
     }
 
     // buffer2 定容须计入 beta != 0 时并入的 C_in 结构。
-    int64_t nnzUB = ComputeNnzUpperBound(arch22ctx->rowProducts,
-                                         static_cast<uint32_t>(spgemmDescr->n), arch22ctx->nnzCIn);
+    int64_t nnzUB = arch22ctx->estimatedNnzUpperBound;
+    if (nnzUB < 0) {
+        nnzUB = ComputeNnzUpperBound(arch22ctx->rowProducts,
+            static_cast<uint32_t>(spgemmDescr->n), arch22ctx->nnzCIn);
+    }
     if (nnzUB > kInt32Max) {
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
     const SpgemmArch22Ws2Layout ws2 =
         SpgemmArch22ComputeWs2(static_cast<uint32_t>(spgemmDescr->m), nnzUB, arch22ctx->cachedDtypeId);
+    // 同一次 WorkEstimation 的上界与 chunkFraction、buffer3 无关，重复查询无需扫描行统计。
+    arch22ctx->estimatedNnzUpperBound = nnzUB;
     // Kernel 内部完成分块，不需要 buffer3；空指针调用也完成本阶段规划。
     *bufferSize3 = 0;
     *bufferSize2 = static_cast<size_t>(ws2.totalBytes);

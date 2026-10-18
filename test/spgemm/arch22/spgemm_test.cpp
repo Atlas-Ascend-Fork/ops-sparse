@@ -2961,6 +2961,41 @@ bool CheckIssue236ComputeSize(const SpgemmStageRun &r)
     return true;
 }
 
+/** 同一描述符重新执行 WorkEstimation 后，EstimateMemory 必须使用新的行统计。 */
+bool TestEstimateMemoryCacheReset(aclsparseHandle_t handle, aclsparseSpGEMMAlg_t alg)
+{
+    const SpgemmRefCsr a = SpgemmRefBuildCsr(64, 64, 1, 1, 0, false, 236);
+    DeviceCsr dA;
+    DeviceCsr dB[2];
+    SpgemmMatCHolder c;
+    SPGEMM_EXPECT(UploadCsr(a, ACL_FLOAT, dA), "cache reset: upload A failed");
+    for (int i = 0; i < 2; ++i) {
+        const SpgemmRefCsr b = SpgemmRefBuildCsr(64, 64, i * 4, 1, 0, false, 237);
+        SPGEMM_EXPECT(UploadCsr(b, ACL_FLOAT, dB[i]), "cache reset: upload B failed");
+        if (i == 0) {
+            SPGEMM_EXPECT(SetupMatC(a, b, nullptr, ACL_FLOAT, c), "cache reset: setup C failed");
+        }
+    }
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    SpgemmStageRun r{handle, dA.descr, dB[0].descr, c.descr, nullptr, ACL_FLOAT, alg,
+                     &alpha, &beta};
+    SPGEMM_ST(aclsparseSpGEMMCreateDescr(&r.descr));
+    DevBuf placeholder3;
+    size_t sizes[2] = {};
+    bool ok = true;
+    for (int i = 0; i < 2 && ok; ++i) {
+        r.matB = dB[i].descr;
+        ok = RunStageWorkEstimation(r) && RunIssue236EstimateMemory(r, false, placeholder3) &&
+             CheckIssue236ComputeSize(r);
+        sizes[i] = r.bufSize2;
+        ok = ok && RunIssue236EstimateMemory(r, true, placeholder3) &&
+             r.bufSize2 == sizes[i] && CheckIssue236EstimateMemoryOutputPointers(r);
+    }
+    (void)aclsparseSpGEMMDestroyDescr(r.descr);
+    return ok && sizes[1] > sizes[0];
+}
+
 /** Issue236：ALG2/ALG3 的空 buffer3 查询必须写回 buffer2 并可直接进入 Compute。 */
 bool TestEstimateMemoryNullBuffer3(aclsparseHandle_t handle, aclsparseSpGEMMAlg_t alg,
                                    bool empty, bool legacyBuffer3)
@@ -3177,6 +3212,11 @@ TEST_F(SpGemmArch22Test, KZeroWithNonzeroBetaPreservesCIn) {
 TEST_F(SpGemmArch22Test, BetaWithChunkedAlg) {
     EXPECT_TRUE(TestBetaWithChunkedAlg(s_handle_, ACL_SPARSE_SPGEMM_ALG2, "alg2"));
     EXPECT_TRUE(TestBetaWithChunkedAlg(s_handle_, ACL_SPARSE_SPGEMM_ALG3, "alg3"));
+}
+
+TEST_F(SpGemmArch22Test, Issue236EstimateMemoryCacheReset) {
+    EXPECT_TRUE(TestEstimateMemoryCacheReset(s_handle_, ACL_SPARSE_SPGEMM_ALG2));
+    EXPECT_TRUE(TestEstimateMemoryCacheReset(s_handle_, ACL_SPARSE_SPGEMM_ALG3));
 }
 
 // ---- Issue236: EstimateMemory must complete ALG2/ALG3 setup with buffer3 == nullptr ----
