@@ -41,6 +41,11 @@ static aclsparseStatus_t ValidateSpvvParams(aclsparseHandle_t handle, aclsparseO
         fprintf(stderr, "aclsparseSpvv: x/y/result must be non-null\n");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if ((yInner->nums > 0 && yInner->values == nullptr) ||
+        (xInner->nnz > 0 && (xInner->indices == nullptr || xInner->values == nullptr))) {
+        fprintf(stderr, "aclsparseSpvv: nonempty vectors require bound values and sparse indices\n");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     if (op != ACL_SPARSE_OP_NON_TRANSPOSE) {
         fprintf(stderr, "aclsparseSpvv: op %d not supported (only NON_TRANSPOSE)\n",
             static_cast<int>(op));

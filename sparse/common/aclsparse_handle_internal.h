@@ -19,6 +19,13 @@
 
 #include <acl/acl.h>
 #include <cstddef>
+#include <cstdint>
+
+// Opaque-handle guard.  The public type is a void pointer, so every backend
+// must reject stale/arbitrary pointers before dereferencing the internal
+// fields.  Keep this value private to the implementation; it is not an ABI
+// field exposed to callers.
+constexpr uint32_t kAclSparseHandleSignature = 0xAC1F9501U;
 
 #include "cann_ops_sparse.h"
 
@@ -56,8 +63,13 @@ constexpr size_t ACLSPARSE_DEFAULT_WORKSPACE_SIZE = 4U * 1024U * 1024U;
  * 对外接口使用 void* / void** 作为 handle 类型。
  */
 struct aclsparseContext {
+    uint32_t signature = kAclSparseHandleSignature;
     /* ========== Stream ========== */
     aclrtStream stream = nullptr;     ///< 当前 stream，用于 kernel 执行
+    // Monotonically increasing generation.  A descriptor's preprocess result
+    // is tied to both the stream and this generation, so switching A->B->A
+    // cannot accidentally revive metadata produced on the old stream epoch.
+    uint64_t stream_epoch = 0;
 
     /* ========== Pointer Mode ========== */
     aclsparsePointerMode_t pointerMode = ACL_SPARSE_POINTER_MODE_HOST;

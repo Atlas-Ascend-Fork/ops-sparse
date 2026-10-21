@@ -73,7 +73,17 @@ message(STATUS "SOC_ARCH_DIRS=${SOC_ARCH_DIRS}")
 # 这些目录包含架构特定的优化实现，会从通用源文件中排除，再根据 SOC 选择性添加
 set(ARCH_SPECIFIC_DIRS arch35 arch22 arch20 CACHE INTERNAL "Architecture specific directories")
 
-set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH})
+# CANN installations expose either ASCEND_HOME_PATH or the newer
+# ASCEND_TOOLKIT_HOME. Prefer the former for compatibility with the existing
+# build scripts, but accept the latter so A5 builds do not depend on a shell
+# alias being exported.
+if(DEFINED ENV{ASCEND_HOME_PATH} AND NOT "$ENV{ASCEND_HOME_PATH}" STREQUAL "")
+  set(ASCEND_CANN_PACKAGE_PATH "$ENV{ASCEND_HOME_PATH}")
+elseif(DEFINED ENV{ASCEND_TOOLKIT_HOME} AND NOT "$ENV{ASCEND_TOOLKIT_HOME}" STREQUAL "")
+  set(ASCEND_CANN_PACKAGE_PATH "$ENV{ASCEND_TOOLKIT_HOME}")
+else()
+  set(ASCEND_CANN_PACKAGE_PATH "")
+endif()
 set(RUN_MODE "npu" CACHE STRING "run mode: npu")
 # Default Release when unspecified; FORCE only here so an empty cache entry is corrected,
 # while -DCMAKE_BUILD_TYPE=Debug from the command line is still honored.
@@ -151,6 +161,11 @@ set_source_files_properties(
     PROPERTIES LANGUAGE ASC
 )
 
+# The A5 SpMV kernel uses the SIMD+SIMT hybrid model: an ordinary AIV entry
+# coordinates __simt_vf__ work through asc_vf_call.  Do not pass
+# --enable-simt here; that option selects the pure-SIMT compilation mode and
+# rejects kernel_operator.h / other SIMD headers required by the hybrid TU.
+
 target_include_directories(${OPS_SPARSE} BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common
@@ -196,6 +211,13 @@ include(cmake/test.cmake)
 option(BUILD_TEST "Build test programs" OFF)
 if(BUILD_TEST)
     add_subdirectory(test)
+endif()
+
+# Optional PyTorch/torch_npu bridge.  Keep this opt-in because the core
+# aclSPARSE library must remain buildable in environments without PyTorch.
+option(BUILD_TORCH_ADAPTER "Build the PyTorch/torch_npu SpMV bridge" OFF)
+if(BUILD_TORCH_ADAPTER)
+    add_subdirectory(torch_npu)
 endif()
 
 if(ENABLE_PACKAGE)

@@ -336,6 +336,19 @@ protected:
     inline static std::unique_ptr<AclEnvScope> env_;
 };
 
+TEST_F(GatherHandleOrderTest, RejectsUnboundDenseStorage)
+{
+    HandleManager handle;
+    handle.setStream(env_->stream());
+    auto dense = DnVecManager::createConst(4, nullptr, ACL_FLOAT);
+    auto indices = DeviceBuffer::alloc(sizeof(int32_t));
+    auto values = DeviceBuffer::alloc(sizeof(float));
+    auto sparse = SpVecManager::create(4, 1, indices.raw(), values.raw(),
+        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    EXPECT_EQ(aclsparseGather(handle.get(), dense.cget(), sparse.get()),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
 // 空 handle + 零 nnz 描述符：handle 校验优先，返回 HANDLE_IS_NULLPTR
 TEST_F(GatherHandleOrderTest, NullHandleWithZeroNnzReturnsHandleNullptr)
 {

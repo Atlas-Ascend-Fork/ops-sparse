@@ -494,9 +494,33 @@ static bool test_spvv_case(aclDataType dtype, uint32_t nnz, uint32_t yLen, const
 }
 
 // ---------------------------------------------------------------------------
-// Randomized fuzz test: 100 iterations, random nnz/yLen, FP32 + FP16.
+// Reject delayed-binding descriptors before any device access.
 // ---------------------------------------------------------------------------
 
+static bool test_spvv_unbound_dense_storage()
+{
+    CHECK_ACL(aclInit(nullptr));
+    CHECK_ACL(aclrtSetDevice(0));
+    const bool pass = []() {
+        SpvvDeviceResources resources;
+        CHECK_ACL_SPARSE(aclsparseCreate(&resources.handle));
+        CHECK_ACL(aclrtMalloc(&resources.dIndices, sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST));
+        CHECK_ACL(aclrtMalloc(&resources.dXValues, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+        CHECK_ACL(aclrtMalloc(&resources.dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+        CHECK_ACL_SPARSE(aclsparseCreateSpVec(&resources.spVecX, 4, 1,
+            resources.dIndices, resources.dXValues, ACL_SPARSE_INDEX_32I,
+            ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT));
+        CHECK_ACL_SPARSE(aclsparseCreateDnVec(&resources.dnVecY, 4, nullptr, ACL_FLOAT));
+        return aclsparseSpvv(resources.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+            resources.spVecX, resources.dnVecY, resources.dResult, ACL_FLOAT) ==
+            ACL_SPARSE_STATUS_INVALID_VALUE;
+    }();
+    CHECK_ACL(aclrtResetDevice(0));
+    CHECK_ACL(aclFinalize());
+    return pass;
+}
+
+// Randomized fuzz test: 100 iterations, random nnz/yLen, FP32 + FP16.
 static bool test_spvv_random(bool full_suite)
 {
     const int N_ITERS = 100;
@@ -762,6 +786,7 @@ static int run_spvv_tests(int argc, char *argv[])
     }
     int passed = 0, failed = 0;
     run_spvv_correctness_cases(full_suite, passed, failed);
+    test_spvv_unbound_dense_storage() ? passed++ : failed++;
     test_spvv_benchmark(full_suite) ? passed++ : failed++;
     test_spvv_random(full_suite) ? passed++ : failed++;
     printf("\n========================================\n");

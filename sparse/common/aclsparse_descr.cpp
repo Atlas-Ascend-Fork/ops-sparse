@@ -111,6 +111,30 @@ static aclsparseStatus_t ValidateAttributeAccess(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+static void ResetSpmvActivePlan(aclsparseSpMatDescr_t descr)
+{
+    descr->activeBuffer = nullptr;
+    descr->activeSpmvBuffer = nullptr;
+    descr->activeRowOffsets = nullptr;
+    descr->activeColIndices = nullptr;
+    descr->activeValues = nullptr;
+    descr->activeRowOffsetsStride = 1;
+    descr->activeColIndStride = 1;
+    descr->activeValuesStride = 1;
+    descr->activeXStride = 1;
+    descr->activeYStride = 1;
+    descr->activeRows = descr->activeCols = descr->activeNnz = 0;
+    descr->activeBase = ACL_SPARSE_INDEX_BASE_ZERO;
+    descr->activeValueType = ACL_FLOAT;
+    descr->activeXType = ACL_FLOAT;
+    descr->activeYType = ACL_FLOAT;
+    descr->activeComputeType = ACL_FLOAT;
+    descr->activeOp = ACL_SPARSE_OP_NON_TRANSPOSE;
+    descr->activeAlg = -1;
+    descr->activeStream = nullptr;
+    descr->activeStreamEpoch = 0;
+}
+
 } // namespace
 
 extern "C" {
@@ -124,9 +148,9 @@ aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_
     if (size < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (size > 0 && values == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
+    // Null storage is allowed at descriptor creation so callers can query
+    // operator workspace before allocating and binding the vector data.
+    // Compute APIs remain responsible for rejecting unbound non-empty data.
     if (!IsValidSparseValueType(valueType)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -445,6 +469,13 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
         return idxSt;
     }
+    if (idxBase != ACL_SPARSE_INDEX_BASE_ZERO &&
+        idxBase != ACL_SPARSE_INDEX_BASE_ONE) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (!IsValidSparseValueType(valueType)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     auto *inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
@@ -461,6 +492,7 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     inner->ptrType = csrRowOffsetsType;
     inner->IdxType = csrColIndType;
     inner->valueType = valueType;
+    inner->signature = kSpMatSignature;
     *spMatDescr = inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -560,6 +592,7 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
     inner->valueType = valueType;
     inner->ellBlockSize = static_cast<uint64_t>(ellBlockSize);
     inner->ellCols = static_cast<uint64_t>(ellCols);
+    inner->signature = kSpMatSignature;
     *descr = inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -567,10 +600,13 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
 static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
     aclsparseFormat_t format, void *offsets, void *indices, void *values)
 {
-    if (descr == nullptr || descr->format != format ||
+    if (descr == nullptr || descr->signature != kSpMatSignature || descr->format != format ||
         (offsets == nullptr && descr->rows > 0 && descr->cols > 0) ||
         (descr->nnz > 0 && (indices == nullptr || values == nullptr))) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (descr->ptrs != offsets || descr->idxs != indices || descr->values != values) {
+        ResetSpmvActivePlan(descr);
     }
     // Analysis already wrote these offsets. A new offsets allocation requires
     // re-analysis; freshly allocated output indices/values do not.
@@ -635,10 +671,15 @@ aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,
 aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr,
     void *rowIndices, void *colIndices, void *values)
 {
-    if (descr == nullptr || descr->format != ACL_SPARSE_FORMAT_COO ||
+    if (descr == nullptr || descr->signature != kSpMatSignature ||
+        descr->format != ACL_SPARSE_FORMAT_COO ||
         (descr->nnz > 0 &&
          (rowIndices == nullptr || colIndices == nullptr || values == nullptr))) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (descr->rowInds != rowIndices || descr->colInds != colIndices ||
+        descr->values != values) {
+        ResetSpmvActivePlan(descr);
     }
     descr->rowInds = rowIndices;
     descr->colInds = colIndices;
@@ -653,7 +694,12 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr)
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    delete const_cast<aclsparseSpMatDescr *>(spMatDescr);
+    auto *inner = const_cast<aclsparseSpMatDescr *>(spMatDescr);
+    if (inner->signature != kSpMatSignature) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    inner->signature = 0;
+    delete inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -694,8 +740,11 @@ aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatD
 
 aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void *values)
 {
-    if (spMatDescr == nullptr) {
+    if (spMatDescr == nullptr || spMatDescr->signature != kSpMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (spMatDescr->values != values) {
+        ResetSpmvActivePlan(spMatDescr);
     }
     spMatDescr->values = values;
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -967,6 +1016,7 @@ aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
     inner->ptrType = cooIdxType;
     inner->IdxType = cooIdxType;
     inner->valueType = valueType;
+    inner->signature = kSpMatSignature;
     *spMatDescr = inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -1024,6 +1074,7 @@ aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
     inner->ptrType = sellIdxType;
     inner->IdxType = sellIdxType;
     inner->valueType = valueType;
+    inner->signature = kSpMatSignature;
     *spMatDescr = inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }

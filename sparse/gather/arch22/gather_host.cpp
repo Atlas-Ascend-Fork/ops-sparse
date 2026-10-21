@@ -291,6 +291,11 @@ static aclsparseStatus_t ValidateGatherParams(
         OP_LOGE("aclsparseGather", "vecX is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (vecY->nums > 0 && vecY->values == nullptr) {
+        OP_LOGE("aclsparseGather", "nonempty vecY requires bound values, size=%llu",
+                static_cast<unsigned long long>(vecY->nums));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     // value type 必须 X / Y 一致
     if (vecX->valueType != vecY->valueType) {
         OP_LOGE("aclsparseGather", "value type mismatch: X=%d, Y=%d", vecX->valueType, vecY->valueType);

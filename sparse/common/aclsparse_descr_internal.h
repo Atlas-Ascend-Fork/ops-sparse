@@ -40,6 +40,7 @@
 // 描述符签名常量，用于在 Destroy/Get/Set/Execute 前识别不透明句柄的描述符类型，
 // 并拒绝错误类型的句柄。
 enum DescrSignature : uint32_t {
+    kSpMatSignature = 0x53504D54,
     kDnVecSignature = 0xD0D2D4D6,
     kSpVecSignature = 0x51705663,
     kDnMatSignature = 0xD0D2D4D8,
@@ -87,13 +88,36 @@ struct aclsparseSpGEMMDescr {
 
 // 稀疏矩阵描述符内部结构（CSR / CSC / COO / BELL / SLICED_ELL 共用）。
 struct aclsparseSpMatDescr {
-    // 由非 SpMV 的 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
-    // 对应算子据此决定走快路径(复用)还是就地重算（active buffer 机制）。
+    uint32_t signature = kSpMatSignature;
+    // Non-SpMV preprocess cache (SpMM/SDDMM workspace layout).
     const void *activeBuffer = nullptr;
-    // SpMV transpose preprocessing has a different workspace layout from SpMM/Sddmm.
-    // Keep a dedicated marker so a buffer reused by another operator is never mistaken
-    // for valid CSR-to-CSC metadata.
+    // SpMV uses a separate layout and must never populate activeBuffer.
     const void *activeSpmvBuffer = nullptr;
+    // Parameters captured by the most recent SpMV preprocess. Keeping
+    // these fields beside activeSpmvBuffer prevents a workspace from being reused
+    // after the CSR pattern or static execution attributes have changed.
+    const void *activeRowOffsets = nullptr;
+    const void *activeColIndices = nullptr;
+    const void *activeValues = nullptr;
+    int64_t activeRowOffsetsStride = 1;
+    int64_t activeColIndStride = 1;
+    int64_t activeValuesStride = 1;
+    int64_t activeXStride = 1;
+    int64_t activeYStride = 1;
+    uint64_t activeRows = 0;
+    uint64_t activeCols = 0;
+    uint64_t activeNnz = 0;
+    aclsparseIndexBase_t activeBase = ACL_SPARSE_INDEX_BASE_ZERO;
+    aclDataType activeValueType = ACL_FLOAT;
+    aclDataType activeXType = ACL_FLOAT;
+    aclDataType activeYType = ACL_FLOAT;
+    aclDataType activeComputeType = ACL_FLOAT;
+    aclsparseOperation_t activeOp = ACL_SPARSE_OP_NON_TRANSPOSE;
+    int32_t activeAlg = -1;
+    // Preprocess metadata is produced asynchronously on the handle stream.
+    // It must not be reused after a stream switch without re-preprocessing.
+    const void *activeStream = nullptr;
+    uint64_t activeStreamEpoch = 0;
     // DenseToSparse discovers nnz/offsets before callers allocate its output
     // payload. Rebinding indices/values must not discard that analysis, while
     // generic SpMM/SDDMM and SpMV preprocess caches still require invalidation.

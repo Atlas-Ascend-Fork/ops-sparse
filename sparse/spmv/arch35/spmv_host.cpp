@@ -1,4 +1,4 @@
-/**
+/*
  * ----------------------------------------------------------------------------------------------------------
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -10,364 +10,649 @@
  * ----------------------------------------------------------------------------------------------------------
  */
 
-#include <climits>
 #include <cstdint>
-#include <algorithm>
+#include <limits>
 
-#include "acl/acl.h"
-#include "aclsparse_host_utils.h"
+#include "log/log.h"
+#include "cann_ops_sparse.h"
 #include "aclsparse_descr_internal.h"
 #include "aclsparse_handle_internal.h"
-#include "cann_ops_sparse.h"
+#include "aclsparse_host_utils.h"
 #include "spmv.h"
-
-extern "C" void spmv_arch35_kernel_launch(
-    const void* rowOffsets, const void* colInd, const void* values, const void* xVec, void* yVec, void* workspace,
-    const SpmvWorkspaceLayout& layout, const SpmvTilingData& tiling, uint32_t blockDim, void* stream);
-
-extern "C" void spmv_arch35_preprocess_launch(
-    const void* rowOffsets, const void* colInd, void* workspace, const SpmvWorkspaceLayout& layout, int32_t rows,
-    int32_t cols, int32_t nnz, int64_t rowOffsetsStride, int64_t colIndStride, void* stream);
+#include "spmv_kernel.h"
 
 namespace {
 
-inline aclsparseSpMatDescr* ToMatInner(aclsparseConstSpMatDescr_t descr)
+uint32_t SpmvBlockDim()
 {
-    return const_cast<aclsparseSpMatDescr*>(reinterpret_cast<const aclsparseSpMatDescr*>(descr));
+    const uint32_t cores = GetAivCoreCount();
+    return cores;
 }
 
-inline aclsparseDnVecDescr* ToVecInner(aclsparseConstDnVecDescr_t descr)
+bool IsScalarType(aclDataType computeType)
 {
-    return const_cast<aclsparseDnVecDescr*>(reinterpret_cast<const aclsparseDnVecDescr*>(descr));
+    return computeType == ACL_INT32 || computeType == ACL_FLOAT ||
+           computeType == ACL_COMPLEX64;
+}
+
+bool IsTransposeOperation(aclsparseOperation_t opA)
+{
+    return opA == ACL_SPARSE_OP_TRANSPOSE ||
+           opA == ACL_SPARSE_OP_CONJUGATE_TRANSPOSE;
+}
+
+bool IsSupportedCombo(aclDataType valueType, aclDataType xType,
+                      aclDataType yType, aclDataType computeType)
+{
+    if (valueType != xType) {
+        return false;
+    }
+    if (computeType == ACL_INT32) {
+        return valueType == ACL_INT8 && yType == ACL_INT32;
+    }
+    if (computeType == ACL_COMPLEX64) {
+        return (valueType == ACL_COMPLEX64 && yType == ACL_COMPLEX64) ||
+               (valueType == ACL_FLOAT && yType == ACL_COMPLEX64);
+    }
+    if (computeType != ACL_FLOAT) {
+        return false;
+    }
+    return (valueType == ACL_INT8 && yType == ACL_FLOAT) ||
+           (valueType == ACL_FLOAT16 &&
+               (yType == ACL_FLOAT16 || yType == ACL_FLOAT)) ||
+           (valueType == ACL_BF16 &&
+               (yType == ACL_BF16 || yType == ACL_FLOAT)) ||
+           (valueType == ACL_FLOAT && yType == ACL_FLOAT);
 }
 
 bool IsSupportedAlg(aclsparseSpMVAlg_t alg)
 {
-    return alg == ACL_SPARSE_SPMV_ALG_DEFAULT || alg == ACL_SPARSE_SPMV_CSR_ALG1 || alg == ACL_SPARSE_SPMV_CSR_ALG2;
+    return alg == ACL_SPARSE_SPMV_ALG_DEFAULT ||
+           alg == ACL_SPARSE_SPMV_CSR_ALG1 ||
+           alg == ACL_SPARSE_SPMV_CSR_ALG2;
 }
 
-int32_t GetSpmvDataType(aclDataType inputType, aclDataType outputType, aclDataType computeType)
+int32_t ValueTypeId(aclDataType type)
 {
-    struct TypeMapping {
-        aclDataType input;
-        aclDataType output;
-        aclDataType compute;
-        int32_t kernelType;
-    };
-    constexpr TypeMapping mappings[] = {
-        {ACL_FLOAT, ACL_FLOAT, ACL_FLOAT, SPMV_DTYPE_FP32_FP32},
-        {ACL_INT8, ACL_INT32, ACL_INT32, SPMV_DTYPE_INT8_INT32},
-        {ACL_INT8, ACL_FLOAT, ACL_FLOAT, SPMV_DTYPE_INT8_FP32},
-        {ACL_FLOAT16, ACL_FLOAT, ACL_FLOAT, SPMV_DTYPE_FP16_FP32},
-        {ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT, SPMV_DTYPE_FP16_FP16},
-        {ACL_BF16, ACL_FLOAT, ACL_FLOAT, SPMV_DTYPE_BF16_FP32},
-        {ACL_BF16, ACL_BF16, ACL_FLOAT, SPMV_DTYPE_BF16_BF16},
-    };
-    for (const auto& mapping : mappings) {
-        if (mapping.input == inputType && mapping.output == outputType && mapping.compute == computeType) {
-            return mapping.kernelType;
-        }
+    switch (type) {
+        case ACL_INT8: return SPMV35_VALUE_I8;
+        case ACL_FLOAT16: return SPMV35_VALUE_F16;
+        case ACL_BF16: return SPMV35_VALUE_BF16;
+        case ACL_FLOAT: return SPMV35_VALUE_F32;
+        case ACL_COMPLEX64: return SPMV35_VALUE_C64;
+        default: return -1;
     }
-    return -1;
 }
 
-struct SpmvValidatedInputs {
-    aclsparseContext* handle{nullptr};
-    aclsparseSpMatDescr* mat{nullptr};
-    aclsparseDnVecDescr* x{nullptr};
-    aclsparseDnVecDescr* y{nullptr};
-    int32_t dataType{-1};
-    int32_t rows{0};
-    int32_t cols{0};
-    int32_t nnz{0};
-};
-
-aclsparseStatus_t ValidateSpmvLayout(SpmvValidatedInputs& out)
+int32_t OutputTypeId(aclDataType type)
 {
-    if (out.mat->format != ACL_SPARSE_FORMAT_CSR) {
-        OP_LOGE("aclsparseSpMV", "unsupported matrix format=%d; expected CSR", static_cast<int>(out.mat->format));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    switch (type) {
+        case ACL_INT32: return SPMV35_OUTPUT_I32;
+        case ACL_FLOAT16: return SPMV35_OUTPUT_F16;
+        case ACL_BF16: return SPMV35_OUTPUT_BF16;
+        case ACL_FLOAT: return SPMV35_OUTPUT_F32;
+        case ACL_COMPLEX64: return SPMV35_OUTPUT_C64;
+        default: return -1;
     }
-    if (out.mat->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
-        OP_LOGE("aclsparseSpMV", "unsupported index base=%d; expected zero", static_cast<int>(out.mat->baseType));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+}
+
+int32_t ComputeTypeId(aclDataType type)
+{
+    switch (type) {
+        case ACL_INT32: return SPMV35_COMPUTE_I32;
+        case ACL_FLOAT: return SPMV35_COMPUTE_F32;
+        case ACL_COMPLEX64: return SPMV35_COMPUTE_C64;
+        default: return -1;
     }
-    if (out.mat->ptrType != ACL_SPARSE_INDEX_32I || out.mat->IdxType != ACL_SPARSE_INDEX_32I) {
-        OP_LOGE("aclsparseSpMV", "unsupported index types: rowOffsets=%d, colInd=%d; expected INT32",
-                static_cast<int>(out.mat->ptrType), static_cast<int>(out.mat->IdxType));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+}
+
+aclsparseStatus_t ValidateHandle(aclsparseHandle_t handle)
+{
+    if (handle == nullptr) {
+        OP_LOGE("aclsparseSpMV", "handle must be non-null");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
     }
-    if (out.mat->ptrStride <= 0 || out.mat->idxStride <= 0 || out.mat->valueStride <= 0 || out.x->stride <= 0 ||
-        out.y->stride <= 0) {
-        OP_LOGE("aclsparseSpMV", "strides must be positive: rowOffsets=%lld, colInd=%lld, values=%lld, x=%lld, y=%lld",
-                static_cast<long long>(out.mat->ptrStride), static_cast<long long>(out.mat->idxStride),
-                static_cast<long long>(out.mat->valueStride), static_cast<long long>(out.x->stride),
-                static_cast<long long>(out.y->stride));
+    // The public handle is opaque.  Check its private signature before any
+    // field access so stale or foreign handles fail deterministically.
+    if (SpmvArch35ToHandle(handle)->signature != kAclSparseHandleSignature) {
+        OP_LOGE("aclsparseSpMV", "invalid handle signature; expected an aclSPARSE handle");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (out.mat->rows > static_cast<uint64_t>(INT32_MAX) || out.mat->cols > static_cast<uint64_t>(INT32_MAX) ||
-        out.mat->nnz > static_cast<uint64_t>(INT32_MAX)) {
-        OP_LOGE("aclsparseSpMV", "rows/cols/nnz exceed INT32_MAX: rows=%llu, cols=%llu, nnz=%llu",
-                static_cast<unsigned long long>(out.mat->rows), static_cast<unsigned long long>(out.mat->cols),
-                static_cast<unsigned long long>(out.mat->nnz));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (out.mat->nnz > 0 && (out.mat->rows == 0 || out.mat->cols == 0)) {
-        OP_LOGE("aclsparseSpMV", "nnz must be zero when rows or cols is zero");
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    out.rows = static_cast<int32_t>(out.mat->rows);
-    out.cols = static_cast<int32_t>(out.mat->cols);
-    out.nnz = static_cast<int32_t>(out.mat->nnz);
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-aclsparseStatus_t ValidateSpmvTypesAndShape(SpmvValidatedInputs& out, aclsparseOperation_t opA, aclDataType computeType)
-{
-    if (out.x->valueType != out.mat->valueType) {
-        OP_LOGE("aclsparseSpMV", "x dtype=%d does not match matrix dtype=%d",
-                static_cast<int>(out.x->valueType), static_cast<int>(out.mat->valueType));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    out.dataType = GetSpmvDataType(out.mat->valueType, out.y->valueType, computeType);
-    if (out.dataType < 0) {
-        OP_LOGE("aclsparseSpMV", "unsupported dtype combination: matrix=%d, y=%d, compute=%d",
-                static_cast<int>(out.mat->valueType), static_cast<int>(out.y->valueType), static_cast<int>(computeType));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-
-    const uint64_t requiredX = opA == ACL_SPARSE_OP_TRANSPOSE ? out.mat->rows : out.mat->cols;
-    const uint64_t requiredY = opA == ACL_SPARSE_OP_TRANSPOSE ? out.mat->cols : out.mat->rows;
-    if (out.x->nums < requiredX || out.y->nums < requiredY) {
-        OP_LOGE("aclsparseSpMV", "vector too short: x=%llu (need %llu), y=%llu (need %llu)",
-                static_cast<unsigned long long>(out.x->nums), static_cast<unsigned long long>(requiredX),
-                static_cast<unsigned long long>(out.y->nums), static_cast<unsigned long long>(requiredY));
+    if (SpmvArch35ToHandle(handle)->stream == nullptr) {
+        OP_LOGE("aclsparseSpMV", "handle stream must be set before use");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-// Only stages that read device storage require bound pointers. A workspace
-// query depends on descriptor metadata, not allocated matrix/vector storage.
-aclsparseStatus_t ValidateSpmvPointers(const SpmvValidatedInputs& inputs, bool execute)
+size_t ScalarAlignment(aclDataType computeType)
 {
-    // Execute calls this only after handling an empty output.
-    if (execute && inputs.y->values == nullptr) {
-        OP_LOGE("aclsparseSpMV", "y values are unbound for nonempty output");
+    switch (computeType) {
+        case ACL_INT32:
+            return alignof(int32_t);
+        case ACL_COMPLEX64:
+            return alignof(aclsparseComplex);
+        case ACL_FLOAT:
+            return alignof(float);
+        default:
+            return 0U;
+    }
+}
+
+aclsparseStatus_t ValidatePointerMode(aclsparseHandle_t handle,
+                                      const void *alpha, const void *beta,
+                                      aclDataType computeType)
+{
+    aclsparsePointerMode_t mode = ACL_SPARSE_POINTER_MODE_HOST;
+    aclsparseStatus_t st = aclsparseGetPointerMode(handle, &mode);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (mode != ACL_SPARSE_POINTER_MODE_HOST && mode != ACL_SPARSE_POINTER_MODE_DEVICE) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (inputs.nnz > 0 && (inputs.mat->ptrs == nullptr || inputs.mat->idxs == nullptr)) {
-        OP_LOGE("aclsparseSpMV", "CSR indices unbound for nnz>0: rowOffsets_null=%d, colInd_null=%d",
-                inputs.mat->ptrs == nullptr, inputs.mat->idxs == nullptr);
+    if (alpha == nullptr || beta == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (execute && inputs.nnz > 0 && (inputs.mat->values == nullptr || inputs.x->values == nullptr)) {
-        OP_LOGE("aclsparseSpMV", "compute inputs unbound for nnz>0: values_null=%d, x_null=%d",
-                inputs.mat->values == nullptr, inputs.x->values == nullptr);
+    const size_t alignment = ScalarAlignment(computeType);
+    if (alignment == 0U || reinterpret_cast<uintptr_t>(alpha) % alignment != 0U ||
+        reinterpret_cast<uintptr_t>(beta) % alignment != 0U) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t ValidateSpmvDescriptorSetup(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg)
+{
+    aclsparseStatus_t st = ValidateHandle(handle);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (matA == nullptr || vecX == nullptr || vecY == nullptr) {
+        OP_LOGE("aclsparseSpMV", "matrix and vector descriptors must be non-null");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (!SpmvArch35DescriptorsValid(matA, vecX, vecY)) {
+        OP_LOGE("aclsparseSpMV", "invalid descriptor signature; expected matrix and dense vector descriptors");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (SpmvBlockDim() == 0U) {
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE && !IsTransposeOperation(opA)) {
+        OP_LOGE("aclsparseSpMV", "op=%d; expected N/T/H", static_cast<int>(opA));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!IsScalarType(computeType) || !IsSupportedAlg(alg)) {
+        OP_LOGE("aclsparseSpMV", "computeType=%d alg=%d; expected INT32/FLOAT/COMPLEX64 and DEFAULT/CSR_ALG1/CSR_ALG2",
+                static_cast<int>(computeType), static_cast<int>(alg));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    st = ValidatePointerMode(handle, alpha, beta, computeType);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+bool SpmvStrideFits(uint64_t length, int64_t stride, size_t elementBytes)
+{
+    if (stride <= 0 || elementBytes == 0U) {
+        return false;
+    }
+    const uint64_t maxOffset = static_cast<uint64_t>(
+        std::numeric_limits<int64_t>::max()) / elementBytes;
+    return length <= 1U ||
+           static_cast<uint64_t>(stride) <= maxOffset / (length - 1U);
+}
+
+size_t SpmvElementBytes(aclDataType type)
+{
+    return type == ACL_INT8 ? 1U
+         : (type == ACL_FLOAT16 || type == ACL_BF16) ? 2U
+         : type == ACL_COMPLEX64 ? 8U : 4U;
+}
+
+aclsparseStatus_t ValidateSpmvFormat(const aclsparseSpMatDescr *mat)
+{
+    if (mat->format != ACL_SPARSE_FORMAT_CSR ||
+        mat->ptrType != ACL_SPARSE_INDEX_32I || mat->IdxType != ACL_SPARSE_INDEX_32I ||
+        (mat->baseType != ACL_SPARSE_INDEX_BASE_ZERO &&
+         mat->baseType != ACL_SPARSE_INDEX_BASE_ONE)) {
+        OP_LOGE("aclsparseSpMV", "format=%d rowIndexType=%d colIndexType=%d base=%d; expected CSR=%d, I32=%d, base 0/1",
+                static_cast<int>(mat->format), static_cast<int>(mat->ptrType),
+                static_cast<int>(mat->IdxType), static_cast<int>(mat->baseType),
+                static_cast<int>(ACL_SPARSE_FORMAT_CSR), static_cast<int>(ACL_SPARSE_INDEX_32I));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t ValidateSpmvShape(const aclsparseSpMatDescr *mat)
+{
+    if (mat->nnz > 0U && (mat->rows == 0U || mat->cols == 0U)) {
+        OP_LOGE("aclsparseSpMV", "rows=%llu cols=%llu nnz=%llu; zero dimensions require nnz=0",
+                static_cast<unsigned long long>(mat->rows), static_cast<unsigned long long>(mat->cols),
+                static_cast<unsigned long long>(mat->nnz));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const uint64_t maxI32 = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+    const uint64_t baseOffset = mat->baseType == ACL_SPARSE_INDEX_BASE_ONE ? 1U : 0U;
+    // Row offsets and column indices are consumed as signed int32_t on A5.
+    // A base-one CSR needs one extra representable value for both the
+    // terminal row offset and the largest stored column index.
+    if (mat->rows > maxI32 || mat->cols > maxI32 ||
+        mat->nnz > maxI32 - baseOffset) {
+        OP_LOGE("aclsparseSpMV", "rows=%llu cols=%llu nnz=%llu; dimensions must fit INT32_MAX, nnz <= %llu",
+                static_cast<unsigned long long>(mat->rows), static_cast<unsigned long long>(mat->cols),
+                static_cast<unsigned long long>(mat->nnz), static_cast<unsigned long long>(maxI32 - baseOffset));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (mat->rows != 0U && mat->cols > UINT64_MAX / mat->rows) {
+        OP_LOGE("aclsparseSpMV", "rows=%llu cols=%llu; product must fit uint64",
+                static_cast<unsigned long long>(mat->rows), static_cast<unsigned long long>(mat->cols));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t ValidateSpmvMatrixMetadata(
+    const aclsparseSpMatDescr *mat, const aclsparseDnVecDescr *x,
+    const aclsparseDnVecDescr *y, aclDataType computeType)
+{
+    aclsparseStatus_t status = ValidateSpmvFormat(mat);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateSpmvShape(mat);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    // Repeated coordinates are valid, so nnz is not bounded by rows*cols.
+    if (!IsSupportedCombo(mat->valueType, x->valueType, y->valueType, computeType)) {
+        OP_LOGE("aclsparseSpMV", "unsupported dtype combination A=%d x=%d y=%d compute=%d; see A5 dtype matrix",
+                static_cast<int>(mat->valueType), static_cast<int>(x->valueType),
+                static_cast<int>(y->valueType), static_cast<int>(computeType));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!SpmvStrideFits(mat->rows + 1U, mat->ptrStride, sizeof(int32_t)) ||
+        !SpmvStrideFits(mat->nnz, mat->idxStride, sizeof(int32_t)) ||
+        !SpmvStrideFits(mat->nnz, mat->valueStride, SpmvElementBytes(mat->valueType)) ||
+        !SpmvStrideFits(x->nums, x->stride, SpmvElementBytes(x->valueType)) ||
+        !SpmvStrideFits(y->nums, y->stride, SpmvElementBytes(y->valueType))) {
+        OP_LOGE("aclsparseSpMV", "strides row=%lld col=%lld values=%lld x=%lld y=%lld; expected positive, addressable strides",
+                static_cast<long long>(mat->ptrStride), static_cast<long long>(mat->idxStride),
+                static_cast<long long>(mat->valueStride), static_cast<long long>(x->stride),
+                static_cast<long long>(y->stride));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+bool HasInvalidSpmvAliases(const aclsparseSpMatDescr *mat,
+                           const aclsparseDnVecDescr *x,
+                           const aclsparseDnVecDescr *y)
+{
+    if (mat->ptrs != nullptr &&
+        (mat->ptrs == mat->idxs || mat->ptrs == mat->values ||
+         mat->ptrs == x->values || mat->ptrs == y->values)) {
+        return true;
+    }
+    if (mat->idxs != nullptr &&
+        (mat->idxs == mat->values || mat->idxs == x->values ||
+         mat->idxs == y->values)) {
+        return true;
+    }
+    return (mat->values != nullptr &&
+            (mat->values == x->values || mat->values == y->values)) ||
+           (x->values != nullptr && x->values == y->values);
+}
+
+aclsparseStatus_t ValidateSpmvVectorSizes(
+    aclsparseOperation_t opA, const aclsparseSpMatDescr *mat,
+    const aclsparseDnVecDescr *x, const aclsparseDnVecDescr *y)
+{
+    const uint64_t xRequired = IsTransposeOperation(opA) ? mat->rows : mat->cols;
+    const uint64_t yRequired = IsTransposeOperation(opA) ? mat->cols : mat->rows;
+    if (x->nums != xRequired || y->nums != yRequired) {
+        OP_LOGE("aclsparseSpMV", "vector dimensions x=%llu y=%llu; expected x=%llu y=%llu for op=%d",
+                static_cast<unsigned long long>(x->nums), static_cast<unsigned long long>(y->nums),
+                static_cast<unsigned long long>(xRequired), static_cast<unsigned long long>(yRequired),
+                static_cast<int>(opA));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t ValidateSpmvStoragePointers(
+    aclsparseOperation_t opA, const aclsparseSpMatDescr *mat,
+    const aclsparseDnVecDescr *x, const aclsparseDnVecDescr *y)
+{
+    const uint64_t xRequired = IsTransposeOperation(opA) ? mat->rows : mat->cols;
+    const uint64_t yRequired = IsTransposeOperation(opA) ? mat->cols : mat->rows;
+    if ((mat->rows > 0U && mat->ptrs == nullptr) ||
+        (mat->nnz > 0U && (mat->idxs == nullptr || mat->values == nullptr)) ||
+        (xRequired > 0U && x->values == nullptr) ||
+        (yRequired > 0U && y->values == nullptr)) {
+        OP_LOGE("aclsparseSpMV", "required storage is unbound: row=%p col=%p values=%p x=%p y=%p",
+                mat->ptrs, mat->idxs, mat->values, x->values, y->values);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    // Y is updated in place while A and X are read-only. Exact pointer
+    // aliases are rejected here. For device buffers, pointer equality is the
+    // strongest check available without a size-bearing ABI; the caller must
+    // also ensure non-overlapping ranges when pointers are offset into one
+    // allocation.
+    if (HasInvalidSpmvAliases(mat, x, y)) {
+        OP_LOGE("aclsparseSpMV", "CSR, x and y storage must not alias");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t ValidateSpmvWorkspace(bool requireBuffer, void *buffer)
+{
+    if (requireBuffer && buffer == nullptr) {
+        OP_LOGE("aclsparseSpMV", "workspace must be allocated using GetBufferSize");
+        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (buffer != nullptr && reinterpret_cast<uintptr_t>(buffer) % kSpmvArch35WorkspaceAlignment != 0U) {
+        OP_LOGE("aclsparseSpMV", "workspace=%p; expected 64-byte alignment", buffer);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 aclsparseStatus_t ValidateSpmvInputs(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnVecDescr_t vecX, const void* beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpMVAlg_t alg, SpmvValidatedInputs& out)
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg)
 {
-    if (handle == nullptr) {
-        OP_LOGE("aclsparseSpMV", "handle is nullptr");
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    aclsparseStatus_t st = ValidateSpmvDescriptorSetup(
+        handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
-    if (matA == nullptr || vecX == nullptr || vecY == nullptr || alpha == nullptr || beta == nullptr) {
-        OP_LOGE("aclsparseSpMV", "null argument: matA_null=%d, vecX_null=%d, vecY_null=%d, alpha_null=%d, beta_null=%d",
-                matA == nullptr, vecX == nullptr, vecY == nullptr, alpha == nullptr, beta == nullptr);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    auto *mat = SpmvArch35ToMat(matA);
+    auto *x = SpmvArch35ToVec(vecX);
+    auto *y = SpmvArch35ToVec(vecY);
+    st = ValidateSpmvMatrixMetadata(mat, x, y, computeType);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
-    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE && opA != ACL_SPARSE_OP_TRANSPOSE) {
-        OP_LOGE("aclsparseSpMV", "unsupported operation=%d", static_cast<int>(opA));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!IsSupportedAlg(alg)) {
-        OP_LOGE("aclsparseSpMV", "unsupported algorithm=%d", static_cast<int>(alg));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    out.handle = reinterpret_cast<aclsparseContext*>(handle);
-    out.mat = ToMatInner(matA);
-    out.x = ToVecInner(vecX);
-    out.y = ToVecInner(vecY);
-    const aclsparseStatus_t status = ValidateSpmvLayout(out);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-    return ValidateSpmvTypesAndShape(out, opA, computeType);
+    return ValidateSpmvVectorSizes(opA, mat, x, y);
 }
 
-SpmvWorkspaceLayout GetWorkspaceLayout(const SpmvValidatedInputs& inputs)
+aclsparseStatus_t ValidateSpmvExecutionInputs(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, void *buffer)
 {
-    SpmvWorkspaceLayout layout{};
-    layout.Compute(inputs.cols, inputs.nnz);
-    return layout;
+    aclsparseStatus_t st = ValidateSpmvInputs(
+        handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    st = ValidateSpmvStoragePointers(
+        opA, SpmvArch35ToMat(matA), SpmvArch35ToVec(vecX), SpmvArch35ToVec(vecY));
+    return st == ACL_SPARSE_STATUS_SUCCESS
+        ? ValidateSpmvWorkspace(true, buffer) : st;
 }
 
-SpmvTilingData BuildTiling(
-    const SpmvValidatedInputs& inputs, aclsparseOperation_t opA, const void* alpha, const void* beta,
-    aclDataType computeType, uint32_t blockDim)
+aclsparseStatus_t ReadHostScalars(aclsparseHandle_t handle, const void *alpha,
+                                  const void *beta, aclDataType computeType,
+                                  SpmvArch35TilingData *tiling)
 {
-    SpmvTilingData tiling{};
-    tiling.rows = inputs.rows;
-    tiling.cols = inputs.cols;
-    tiling.nnz = inputs.nnz;
-    tiling.dataType = inputs.dataType;
-    tiling.transpose = opA == ACL_SPARSE_OP_TRANSPOSE ? 1 : 0;
-    tiling.computeType = static_cast<int32_t>(computeType);
-    tiling.rowOffsetsStride = inputs.mat->ptrStride;
-    tiling.colIndStride = inputs.mat->idxStride;
-    tiling.valuesStride = inputs.mat->valueStride;
-    tiling.xStride = inputs.x->stride;
-    tiling.yStride = inputs.y->stride;
-    const uint32_t outputSize = static_cast<uint32_t>(tiling.transpose != 0 ? inputs.cols : inputs.rows);
-    tiling.workPerBlock = 1u;
-    if (outputSize > 0u && blockDim > 0u) {
-        tiling.workPerBlock = (outputSize - 1u) / blockDim + 1u;
+    aclsparsePointerMode_t mode = ACL_SPARSE_POINTER_MODE_HOST;
+    aclsparseStatus_t st = aclsparseGetPointerMode(handle, &mode);
+    if (st != ACL_SPARSE_STATUS_SUCCESS || tiling == nullptr) {
+        return st == ACL_SPARSE_STATUS_SUCCESS ? ACL_SPARSE_STATUS_INVALID_VALUE : st;
     }
-
-    if (inputs.handle->pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
-        tiling.alphaDevicePtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(alpha));
-        tiling.betaDevicePtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(beta));
-    } else if (computeType == ACL_INT32) {
-        tiling.alphaInt = *static_cast<const int32_t*>(alpha);
-        tiling.betaInt = *static_cast<const int32_t*>(beta);
-    } else {
-        tiling.alphaFloat = *static_cast<const float*>(alpha);
-        tiling.betaFloat = *static_cast<const float*>(beta);
-    }
-    return tiling;
-}
-
-aclsparseStatus_t PrepareTranspose(SpmvValidatedInputs& inputs, void* externalBuffer)
-{
-    if (inputs.nnz == 0) {
-        inputs.mat->activeSpmvBuffer = externalBuffer;
+    if (mode == ACL_SPARSE_POINTER_MODE_DEVICE) {
+        tiling->alphaPtr = reinterpret_cast<uint64_t>(alpha);
+        tiling->betaPtr = reinterpret_cast<uint64_t>(beta);
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    if (externalBuffer == nullptr) {
-        OP_LOGE("aclsparseSpMVPreprocess", "externalBuffer is nullptr for transpose with nnz>0");
+    if (computeType == ACL_INT32) {
+        tiling->alphaInt = *reinterpret_cast<const int32_t *>(alpha);
+        tiling->betaInt = *reinterpret_cast<const int32_t *>(beta);
+    } else if (computeType == ACL_COMPLEX64) {
+        const auto *a = reinterpret_cast<const aclsparseComplex *>(alpha);
+        const auto *b = reinterpret_cast<const aclsparseComplex *>(beta);
+        tiling->alphaReal = a->x;
+        tiling->alphaImag = a->y;
+        tiling->betaReal = b->x;
+        tiling->betaImag = b->y;
+    } else {
+        tiling->alphaReal = *reinterpret_cast<const float *>(alpha);
+        tiling->betaReal = *reinterpret_cast<const float *>(beta);
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+void InitializeTiling(const aclsparseSpMatDescr *mat, const aclsparseDnVecDescr *x,
+                      const aclsparseDnVecDescr *y,
+                      aclsparseOperation_t opA, aclDataType computeType,
+                      aclsparseSpMVAlg_t alg, SpmvArch35TilingData *tiling)
+{
+    *tiling = {};
+    tiling->rows = static_cast<uint32_t>(mat->rows);
+    tiling->cols = static_cast<uint32_t>(mat->cols);
+    tiling->nnz = static_cast<uint32_t>(mat->nnz);
+    tiling->indexBase = static_cast<uint32_t>(mat->baseType);
+    tiling->rowPtrBase = tiling->indexBase;
+    const uint64_t outputLength = IsTransposeOperation(opA) ? mat->cols : mat->rows;
+    tiling->rowsPerBlock = outputLength == 0U
+        ? 1U : static_cast<uint32_t>((outputLength + SpmvBlockDim() - 1U) / SpmvBlockDim());
+    tiling->valueType = static_cast<uint32_t>(ValueTypeId(mat->valueType));
+    tiling->outputType = static_cast<uint32_t>(OutputTypeId(y->valueType));
+    tiling->computeType = static_cast<uint32_t>(ComputeTypeId(computeType));
+    tiling->opA = static_cast<uint32_t>(opA);
+    tiling->alg = static_cast<uint32_t>(alg);
+    tiling->rowOffsetsStride = mat->ptrStride;
+    tiling->colIndStride = mat->idxStride;
+    tiling->valuesStride = mat->valueStride;
+    tiling->xStride = x->stride;
+    tiling->yStride = y->stride;
+}
+
+aclsparseStatus_t ConfigureTransposeWorkspace(const aclsparseSpMatDescr *mat,
+                                              aclDataType computeType,
+                                              SpmvArch35TilingData *tiling)
+{
+    size_t offset = 0U;
+    if (!SpmvArch35AccumulatorOffset(mat->rows, &offset)) {
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
-    if (inputs.handle->stream == nullptr) {
-        OP_LOGE("aclsparseSpMVPreprocess", "handle stream is nullptr");
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    size_t workspaceBytes = 0U;
+    if (!SpmvArch35WorkspaceBytes(mat->rows, mat->cols,
+                                  static_cast<uint32_t>(ComputeTypeId(computeType)),
+                                  true, &workspaceBytes)) {
+        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
-    const aclsparseStatus_t status = ValidateSpmvPointers(inputs, false);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-
-    const SpmvWorkspaceLayout layout = GetWorkspaceLayout(inputs);
-    spmv_arch35_preprocess_launch(
-        inputs.mat->ptrs, inputs.mat->idxs, externalBuffer, layout, inputs.rows, inputs.cols, inputs.nnz,
-        inputs.mat->ptrStride, inputs.mat->idxStride, inputs.handle->stream);
-    inputs.mat->activeSpmvBuffer = externalBuffer;
+    (void)workspaceBytes;
+    tiling->accumulatorOffset = static_cast<uint64_t>(offset);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-} // namespace
+aclsparseStatus_t BuildTiling(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                              const void *alpha, aclsparseConstSpMatDescr_t matA,
+                              const void *beta, aclsparseConstDnVecDescr_t vecX,
+                              aclsparseDnVecDescr_t vecY, aclDataType computeType,
+                              aclsparseSpMVAlg_t alg, void *buffer,
+                              SpmvArch35TilingData *tiling)
+{
+    if (tiling == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *mat = SpmvArch35ToMat(matA);
+    auto *x = SpmvArch35ToVec(vecX);
+    auto *y = SpmvArch35ToVec(vecY);
+    InitializeTiling(mat, x, y, opA, computeType, alg, tiling);
+    // Preprocess has no row-metadata launch for a zero-row CSR.  Keep the
+    // original pointer in that case: transpose finalization can still apply
+    // beta to a non-empty Y without ever dereferencing rowPtr.
+    tiling->useNormalizedRowPtr =
+        (mat->rows > 0U &&
+         SpmvArch35ActivePlanMatches(mat, x, y, opA, computeType, alg, buffer,
+                                     SpmvArch35ToHandle(handle)->stream,
+                                     SpmvArch35ToHandle(handle)->stream_epoch))
+            ? 1U : 0U;
+    if (tiling->useNormalizedRowPtr != 0U) {
+        // Preprocess normalizes only row offsets. Column indices retain the
+        // descriptor's original base and must still be adjusted in kernel.
+        tiling->rowPtrBase = 0U;
+        tiling->rowOffsetsStride = 1;
+    }
+    if (IsTransposeOperation(opA)) {
+        const aclsparseStatus_t st = ConfigureTransposeWorkspace(mat, computeType, tiling);
+        if (st != ACL_SPARSE_STATUS_SUCCESS) {
+            return st;
+        }
+    }
+    OP_LOGD("aclsparseSpMV", "A5 tiling rows=%u cols=%u nnz=%u op=%u alg=%u value=%u output=%u compute=%u normalized=%u",
+            tiling->rows, tiling->cols, tiling->nnz, tiling->opA, tiling->alg,
+            tiling->valueType, tiling->outputType, tiling->computeType,
+            tiling->useNormalizedRowPtr);
+    return ReadHostScalars(handle, alpha, beta, computeType, tiling);
+}
 
-extern "C" {
+aclsparseStatus_t PreprocessSpmv(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, void *externalBuffer)
+{
+    aclsparseStatus_t st = ValidateSpmvInputs(
+        handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    // Preprocess only reads row offsets; values and vectors may be bound later.
+    if (SpmvArch35ToMat(matA)->rows > 0U && SpmvArch35ToMat(matA)->ptrs == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    st = ValidateSpmvWorkspace(true, externalBuffer);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    size_t required = 0U;
+    st = aclsparseSpMVGetBufferSize(handle, opA, alpha, matA, vecX, beta, vecY,
+                                    computeType, alg, &required);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    // The public ABI has no buffer-size argument. The active-buffer association
+    // records identity only; callers must allocate the exact GetBufferSize value.
+    (void)required;
+    auto *mat = SpmvArch35ToMat(matA);
+    // This workspace will hold SpMV metadata, invalidating a cached SpMM/SDDMM
+    // layout if the caller reuses the same allocation.
+    if (mat->activeBuffer == externalBuffer) {
+        mat->activeBuffer = nullptr;
+    }
+    if (mat->rows > 0U) {
+        // Normalize on one AIV to avoid cross-core writes to the same cache line.
+        spmv_arch35_preprocess_kernel_do(
+            reinterpret_cast<GM_ADDR>(mat->ptrs), reinterpret_cast<GM_ADDR>(externalBuffer),
+            static_cast<uint32_t>(mat->rows), static_cast<int32_t>(mat->baseType),
+            mat->ptrStride, 1U, SpmvArch35ToHandle(handle)->stream);
+    }
+    SpmvArch35RecordActivePlan(mat, SpmvArch35ToVec(vecX),
+                               SpmvArch35ToVec(vecY), opA, computeType, alg,
+                               externalBuffer, SpmvArch35ToHandle(handle)->stream,
+                               SpmvArch35ToHandle(handle)->stream_epoch);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-aclsparseStatus_t aclsparseSpMVGetBufferSize(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnVecDescr_t vecX, const void* beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpMVAlg_t alg, size_t* bufferSize)
+aclsparseStatus_t ExecuteSpmv(
+    void *externalBuffer, aclsparseHandle_t handle,
+    aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg)
+{
+    aclsparseStatus_t st = ValidateSpmvExecutionInputs(
+        handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg, externalBuffer);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    auto *mat = SpmvArch35ToMat(matA);
+    const uint64_t outputLength = IsTransposeOperation(opA) ? mat->cols : mat->rows;
+    if (outputLength == 0U) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    SpmvArch35TilingData tiling{};
+    st = BuildTiling(handle, opA, alpha, matA, beta, vecX, vecY,
+                     computeType, alg, externalBuffer, &tiling);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    auto *x = SpmvArch35ToVec(vecX);
+    auto *y = SpmvArch35ToVec(vecY);
+    // BuildTiling must inspect the old cache ownership before invalidating it.
+    if (mat->activeBuffer == externalBuffer) {
+        mat->activeBuffer = nullptr;
+        mat->activeSpmvBuffer = nullptr;
+    }
+    spmv_arch35_kernel_do(
+        reinterpret_cast<GM_ADDR>(mat->ptrs), reinterpret_cast<GM_ADDR>(mat->idxs),
+        reinterpret_cast<GM_ADDR>(mat->values), reinterpret_cast<GM_ADDR>(x->values),
+        reinterpret_cast<GM_ADDR>(y->values), reinterpret_cast<GM_ADDR>(externalBuffer),
+        tiling, SpmvBlockDim(), SpmvArch35ToHandle(handle)->stream);
+    OP_LOGI("aclsparseSpMV", "A5 kernel launched blockDim=%u op=%u alg=%u",
+            SpmvBlockDim(), tiling.opA, tiling.alg);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+}  // namespace
+
+extern "C" aclsparseStatus_t aclsparseSpMVGetBufferSize(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, size_t *bufferSize)
 {
     if (bufferSize == nullptr) {
-        OP_LOGE("aclsparseSpMVGetBufferSize", "bufferSize output pointer is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    SpmvValidatedInputs inputs{};
-    const aclsparseStatus_t status =
-        ValidateSpmvInputs(handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg, inputs);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
+    *bufferSize = 0U;
+    aclsparseStatus_t st = ValidateSpmvInputs(
+        handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
-    if (opA == ACL_SPARSE_OP_TRANSPOSE && inputs.nnz > 0) {
-        *bufferSize = GetWorkspaceLayout(inputs).totalBytes;
-    } else {
-        *bufferSize = 0u;
+    auto *mat = SpmvArch35ToMat(matA);
+    if (!SpmvArch35WorkspaceBytes(mat->rows, mat->cols,
+                                  static_cast<uint32_t>(ComputeTypeId(computeType)),
+                                  IsTransposeOperation(opA), bufferSize)) {
+        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpMVPreprocess(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnVecDescr_t vecX, const void* beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpMVAlg_t alg, void* externalBuffer)
+extern "C" aclsparseStatus_t aclsparseSpMVPreprocess(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, void *externalBuffer)
 {
-    SpmvValidatedInputs inputs{};
-    const aclsparseStatus_t status =
-        ValidateSpmvInputs(handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg, inputs);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-    if (opA == ACL_SPARSE_OP_NON_TRANSPOSE) {
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    if (inputs.nnz > 0 && GetAivCoreCount() == 0u) {
-        OP_LOGE("aclsparseSpMVPreprocess", "GetAivCoreCount returned 0");
-        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
-    }
-    return PrepareTranspose(inputs, externalBuffer);
+    return PreprocessSpmv(handle, opA, alpha, matA, vecX, beta, vecY,
+                          computeType, alg, externalBuffer);
 }
 
-aclsparseStatus_t aclsparseSpMV(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnVecDescr_t vecX, const void* beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpMVAlg_t alg, void* externalBuffer)
+extern "C" aclsparseStatus_t aclsparseSpMV(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, void *externalBuffer)
 {
-    SpmvValidatedInputs inputs{};
-    aclsparseStatus_t status = ValidateSpmvInputs(handle, opA, alpha, matA, vecX, beta, vecY, computeType, alg, inputs);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-    if (inputs.handle->stream == nullptr) {
-        OP_LOGE("aclsparseSpMV", "handle stream is nullptr");
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    const uint32_t outputSize = static_cast<uint32_t>(opA == ACL_SPARSE_OP_TRANSPOSE ? inputs.cols : inputs.rows);
-    if (outputSize == 0u) {
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    status = ValidateSpmvPointers(inputs, true);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-    const uint32_t aivCoreNum = GetAivCoreCount();
-    if (aivCoreNum == 0u) {
-        OP_LOGE("aclsparseSpMV", "GetAivCoreCount returned 0");
-        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
-    }
-    const uint32_t blockDim = std::min(outputSize, aivCoreNum);
-
-    if (opA == ACL_SPARSE_OP_TRANSPOSE && inputs.nnz > 0) {
-        if (externalBuffer == nullptr) {
-            OP_LOGE("aclsparseSpMV", "externalBuffer is nullptr for transpose with nnz>0");
-            return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
-        }
-        if (inputs.mat->activeSpmvBuffer != externalBuffer) {
-            status = PrepareTranspose(inputs, externalBuffer);
-            if (status != ACL_SPARSE_STATUS_SUCCESS) {
-                return status;
-            }
-        }
-    }
-
-    const SpmvWorkspaceLayout layout = GetWorkspaceLayout(inputs);
-    const SpmvTilingData tiling = BuildTiling(inputs, opA, alpha, beta, computeType, blockDim);
-    spmv_arch35_kernel_launch(
-        inputs.mat->ptrs, inputs.mat->idxs, inputs.mat->values, inputs.x->values, inputs.y->values, externalBuffer,
-        layout, tiling, blockDim, inputs.handle->stream);
-    return ACL_SPARSE_STATUS_SUCCESS;
+    return ExecuteSpmv(externalBuffer, handle, opA, alpha, matA, vecX,
+                       beta, vecY, computeType, alg);
 }
-
-} // extern "C"

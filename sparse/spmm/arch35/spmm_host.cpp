@@ -206,6 +206,9 @@ static aclsparseStatus_t SpmmBuildTilingToBuffer(
     const void *alpha, const void *beta, aclDataType computeType,
     aclsparseSpMMAlg_t alg, void *buffer)
 {
+    if (matAInner->activeSpmvBuffer == buffer) {
+        matAInner->activeSpmvBuffer = nullptr;
+    }
     const int64_t m = static_cast<int64_t>(matAInner->rows);
     WsOffsets off = ComputeWsOffsets(m, static_cast<int32_t>(GetSpmmBlockDim()));
 
@@ -249,6 +252,9 @@ static aclsparseStatus_t SpmmRefreshActiveTiling(
     aclsparseOperation_t opB, const void *alpha, const void *beta,
     aclDataType computeType, aclsparseSpMMAlg_t alg)
 {
+    if (matA->activeSpmvBuffer == buffer) {
+        matA->activeSpmvBuffer = nullptr;
+    }
     SpmmTilingData td;
     aclError ret = aclrtMemcpy(&td, sizeof(SpmmTilingData),
                                static_cast<uint8_t *>(buffer) + off.tilingOff,
