@@ -1725,13 +1725,13 @@ aclsparseStatus_t aclsparseSgtsv2(
 
 **功能**：求解三对角线性方程组 **A · X = B**（FP32，支持多个右端项 Multiple RHS），其中 **A** 为 m × m 三对角矩阵，由下对角线 `dl`、主对角线 `d`、上对角线 `du` 表示；**B** 为 m × n 的稠密右端矩阵（column-major），解 **X** 原地覆盖 **B**。
 
-采用**带部分选主元（partial pivoting）的 Thomas 算法**。前向消元逐行比较 `|d'[i-1]|` 与 `|dl[i]|` 选主元，必要时交换行并产生 du'/du2' 两类 fill-in；后向回代使用含 fill-in 的修改后系数求解。相比无主元版本（aclsparseSgtsv2Nopivot）数值更稳定、精度更高，代价是额外的比较与交换开销及 3× workspace。
+采用**带部分选主元（partial pivoting）的 Thomas 算法**。前向消元逐行比较 `|d'[i-1]|` 与 `|dl[i]|` 选主元，必要时交换行并产生 du'/du2' 两类 fill-in；后向回代使用含 fill-in 的修改后系数求解。arch22 各 RHS 复用公共矩阵因子；扩展指数路径按初始解的后向误差检查分解方式，必要时切换行均衡或原始尺度并重新分解。对强对角占优且归一化 RHS 范围受限的有限系统，使用 40 次固定向量 Jacobi 迭代快路，其他输入保留直接求解，非强对角占优的有限系统增加两次补偿残差修正。精度标准及公开 FP32 ABI 不变，详细数值门禁与 UB 布局见算子 README。其 workspace 为 `align_up(align_up(17*m,128)+85*m,128)` 字节且与 n 无关，n=0 时为 0。85 字节/行的 scratch 包含五组扩展数值数组（80 字节/行）、原始 RHS（4 字节/行）和独立 pivot（1 字节/行）。例如 `m=3,n=1` 时返回 384 B；因子区的 128 字节对齐边界两侧，`m=7` 和 `m=8` 分别返回 768 B 和 1024 B。**调用方必须以当前 `bufferSizeExt` 查询值分配 workspace，不得按历史公式硬编码容量。**arch35 保持每 RHS 3 组 FP32 workspace 的既有实现。
 
 **产品支持情况**：
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 
 **参数说明**：
 
@@ -1782,8 +1782,8 @@ aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
 **产品支持情况**：
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 
 **参数说明**：
 

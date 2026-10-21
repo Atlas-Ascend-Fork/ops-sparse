@@ -108,16 +108,19 @@ inline void Gtsv2Golden(
         }
 
         // ---- Back substitution (last row upward) ----
-        // x[m-1] = b[m-1] / d[m-1]
-        B[(m - 1) + j * ldb] = static_cast<float>(b_w[m - 1] / d_w[m - 1]);
-
-        // x[i] = (b[i] - du[i]*x[i+1] - du2[i]*x[i+2]) / d[i]
+        // Keep the complete reference solve in FP64.  Casting an already
+        // solved x[i] to FP32 before using it for x[i-1] would make this an
+        // FP32/FP64 hybrid instead of the task-required FP64 CPU golden.
+        b_w[m - 1] /= d_w[m - 1];
         for (int i = m - 2; i >= 0; i--) {
-            double xi = b_w[i] - du_w[i] * static_cast<double>(B[(i + 1) + j * ldb]);
+            double xi = b_w[i] - du_w[i] * b_w[i + 1];
             if (i + 2 < m) {
-                xi -= du2_w[i] * static_cast<double>(B[(i + 2) + j * ldb]);
+                xi -= du2_w[i] * b_w[i + 2];
             }
-            B[i + j * ldb] = static_cast<float>(xi / d_w[i]);
+            b_w[i] = xi / d_w[i];
+        }
+        for (int i = 0; i < m; ++i) {
+            B[i + j * ldb] = static_cast<float>(b_w[i]);
         }
     }
 }

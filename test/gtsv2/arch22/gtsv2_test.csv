@@ -1,0 +1,36 @@
+case_name,level,m,n,ldb,matrixType,value_lo,value_hi,seed,description,expect_result
+# Basic API, shape, pivot, non-alignment, and padding coverage,,,,,,,,,,
+L0_3x1_diagdom,L0,3,1,3,diag_dominant,-5.0,5.0,8525,最小合法规模,success
+L0_4x1_identity,L0,4,1,4,identity,-5.0,5.0,60559,单位矩阵,success
+L0_7x7_random,L0,7,7,7,random,-5.0,5.0,18155,非对齐m和多RHS主元,success
+L0_8x3_diagdom,L0,8,3,8,diag_dominant,-5.0,5.0,44692,小规模多RHS,success
+L1_8x0_diagdom,L1,8,0,8,diag_dominant,-5.0,5.0,37778,n为0提前返回,success
+L1_17x5_ldb19,L1,17,5,19,random,-1.0,1.0,20261,非对齐m和带padding的ldb,success
+L1_31x8_random,L1,31,8,31,random,-1.0,1.0,20262,奇数m和多RHS,success
+L1_64x1_const,L1,64,1,64,constant,4.0,4.0,24697,常值对角,success
+L1_128x16_random,L1,128,16,128,random,-5.0,5.0,59174,中规模多RHS主元,success
+L1_512x32_diagdom,L1,512,32,512,diag_dominant,-5.0,5.0,99607,中规模多RHS,success
+# Formal performance shapes also run as correctness regressions,,,,,,,,,,
+P_4096x64_diagdom,P,4096,64,4096,diag_dominant,-1.0,1.0,20263,Qwen3验收形状,success
+P_7168x128_diagdom,P,7168,128,7168,diag_dominant,-1.0,1.0,20264,DeepSeek验收形状,success
+P_8192x64_diagdom,P,8192,64,8192,diag_dominant,-1.0,1.0,20265,Llama验收形状和UB边界,success
+# GM fallback immediately above UB boundary and maximum existing regression shape,,,,,,,,,,
+L1_8193x2_diagdom,L1,8193,2,8193,diag_dominant,-1.0,1.0,20266,GM路径下边界,success
+L1_16384x2_diagdom,L1,16384,2,16384,diag_dominant,-1.0,1.0,56358,GM路径大规模,success
+# Deterministic pivot branches and singular propagation,,,,,,,,,,
+WB_m3_allswap_n4,WB,3,4,3,pivot_all_swap,-5.0,5.0,10001,全主元交换,success
+WB_m8_swap_first_n4,WB,8,4,8,pivot_first_only,-5.0,5.0,10005,仅首步交换,success
+WB_m8_swap_last_n4,WB,8,4,8,pivot_last_only,-5.0,5.0,10006,仅末步交换,success
+WB_extreme_dl_m8_n4,WB,8,4,8,pivot_extreme_dl,-5.0,5.0,10008,极端交换主元比,success
+WB_extreme_d_m8_n4,WB,8,4,8,pivot_extreme_d,-5.0,5.0,10009,极端不交换主元比,success
+L2_singular_3x1,L2,3,1,3,singular,-5.0,5.0,34352,奇异矩阵传播Inf或NaN,singular
+L2_zero_4x3,L2,4,3,4,singular,0.0,0.0,33633,零矩阵传播Inf或NaN,singular
+# Fused single-RHS pivot branches, padded failed-performance shape and UB boundary,,,,,,,,,,
+S1_4096x1_ldb4112,L1,4096,1,4112,diag_dominant,-1.0,1.0,20261660,单RHS带padding性能回归形状,success
+S1_8192x1_ldb8208,L1,8192,1,8208,diag_dominant,-1.0,1.0,20261756,单RHS融合UB上边界,success
+S1_8193x1_ldb8208,L1,8193,1,8208,diag_dominant,-1.0,1.0,20261661,单RHS保持GM回退,success
+S1_m3_allswap,WB,3,1,5,pivot_all_swap,-5.0,5.0,10001,单RHS连续交换及非对齐padding,success
+S1_m8_swap_first,WB,8,1,9,pivot_first_only,-5.0,5.0,10005,单RHS仅首步交换,success
+S1_m8_swap_last,WB,8,1,9,pivot_last_only,-5.0,5.0,10006,单RHS仅末步交换,success
+S1_extreme_dl_m8,WB,8,1,8,pivot_extreme_dl,-5.0,5.0,10008,单RHS极端交换主元比,success
+S1_extreme_d_m8,WB,8,1,8,pivot_extreme_d,-5.0,5.0,10009,单RHS极端不交换主元比,success

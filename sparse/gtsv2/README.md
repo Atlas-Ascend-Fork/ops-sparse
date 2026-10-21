@@ -19,9 +19,23 @@ B 为 **column-major** 布局的稠密矩阵（ldb × n），解 X 原地覆盖 
 1. **前向消元（Forward Elimination）**：逐行消去下对角线元素，每步比较 |d'[i-1]| 与 |dl[i]| 选主元；若 |dl[i]| > |d'[i-1]| 则交换行 i-1 与 i 的三对角系数及 B 对应行，消元后 du 和 du2 均产生 fill-in
 2. **后向回代（Backward Substitution）**：从最后一行向上逐步求解 x，使用含 fill-in 的修改后 du' 和 du2'
 
-相比 gtsv2_nopivot（无主元版本），带主元的 Thomas 算法数值更稳定、精度更高，代价是额外的比较与交换开销及 3× workspace。
+相比 gtsv2_nopivot（无主元版本），带主元的 Thomas 算法数值更稳定、精度更高。不同架构采用不同实现：arch35 为每个 RHS 独立保存 3 组因子；arch22 将公共矩阵只分解一次，并以 4 组 FP32 因子和 1 组逐行 pivot 标记供全部 RHS 复用。
 
-多核并行沿 RHS 列数 n 维度分布，每个 AI Core 处理一组连续的 RHS 列（SIMT 架构，每个线程处理一个 RHS 列）。
+多核并行沿 RHS 列数 n 维度分布：arch35 的每个 SIMT thread 处理一个 RHS 列；arch22 的快速路径由每个 AIV core 以 grid-stride 方式处理一个或多个 RHS 列。
+
+arch22 对具有充分行对角占优裕量的矩阵（每行 `abs(d) > 2*(abs(dl)+abs(du))`）提供 FP32 向量 Jacobi 快速路径。
+每个 RHS 还须满足所有输入有限、绝对值求和不溢出及保守归一化界 `max(abs(B_column))/min(abs(d)) <= 4`。
+收缩因子小于 1/2，40 次固定迭代消除截断误差；RHS 范围限制控制舍入误差，不放宽对外精度标准。
+`128<=m<=6144` 使用带显式边界区的 UB 双缓冲；`6144<m<=8192` 的多 RHS 路径使用六组对齐 FP32 数组，最多占 192 KiB UB，
+将归一化 RHS 临时写入原地 B，并在每次迭代重新载入，最终原地写回解，不增加 workspace。
+单 RHS 的 UB 内向量快路与直接求解均位于同一个 AIV Kernel 内；不满足上述条件、较小系统或大于 UB 的系统保留带主元直接路径。
+所有选择只依赖尺寸、矩阵性质与输入动态范围，不依赖测试种子或用例编号；Inf/NaN 和大动态范围 RHS 在改写 B 前回退。
+
+arch22 的直接/向量快速路径还要求 `2^-24 <= min(abs(d))`、`max(abs(d)) <= 2^24`、`max(abs(B)) <= 2^24`，在充分行对角占优条件下给消元与回代保留 FP32 动态范围裕量。分解 Kernel 在改写 B 前检查所有 RHS。
+
+其他有限系统由 core 0 使用扩展指数的带主元 LU：每个中间值分别保存两组 FP32 尾数和一个 int64 指数，避免 Schur 补、RHS 前向消元及回代中的中间溢出。每行以精确二次幂进行均衡，只调整独立指数；同一行或不同行中大小悬殊的系数均独立保留。初始输出的分量后向误差超过 1e-6 时，比较不均衡分解并保留误差较小者。五组长度 m 的中间数组和一组原始 FP32 RHS 供所有列复用。有限输出始终尝试两轮扩展指数残差修正：在原始方程计算 b−Ax，复用所选 LU 求解修正量，整列确认更新值有限后写回。病态系统即使残差很小也可能有较大的解误差，因此不能仅因残差小跳过修正；此方法不保证所有病态系统的前向精度。运算仍在 NPU 上执行，不使用硬件 FP64 指令或 CPU fallback。尾数的关键和/积使用舍入屏障维持补偿运算顺序，最终按 FP32 舍入并保留非规格化输出。非有限输入与精确零主元回退到原有 FP32 运算顺序以保留 Inf/NaN 传播语义。
+
+workspace 查询在 `n>0` 时返回 `align_up(align_up(17*m,128)+85*m,128)`，`n=0` 返回 0。调用方必须重新查询当前库所需容量，不得硬编码历史容量；仍须提供足量、128 字节对齐的 workspace，公共 API 与 stream 异步语义不变。
 
 包含以下接口：
 
@@ -37,8 +51,8 @@ B 为 **column-major** 布局的稠密矩阵（ldb × n），解 X 原地覆盖 
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 
 #### 函数原型
 
@@ -74,15 +88,21 @@ aclsparseStatus_t aclsparseSgtsv2(
 - pBuffer 大小必须 ≥ `aclsparseSgtsv2_bufferSizeExt` 返回值
 - dl[0] 必须在调用前置 0
 - du[m-1] 必须在调用前置 0
-- 带部分选主元的 Thomas 算法对一般非奇异地对角系统数值稳定。算子不对奇异矩阵做任何保护：若前向消元或后向回代过程中任一主元为零或接近零，IEEE-754 除零将在输出中产生 Inf/NaN。**调用方必须保证输入的三对角矩阵良态，否则该 RHS 列的精度不可预期**
+- 零主元可能产生 Inf/NaN，沿用 Legacy API 的传播行为。有限病态输入仍须按 FP64 golden 与任务精度阈值验证，不能仅以“病态”标签豁免精度失败；扩展指数和双分量尾数也不是对任意条件数矩阵的无限精度保证。
+
+arch22 实现说明：
+
+- workspace 为 `align_up(align_up(17*m,128)+85*m,128)` 字节，与 RHS 数量 n 无关；包括原有四组 FP32 因子/pivot 标记，以及扩展指数因子、单列 RHS、原始 FP32 RHS 和独立 pivot scratch。`m=8192` 时为 835584 字节。
+- `m <= 8192` 时，多核沿 RHS 列并行；受数值条件保护的向量 Jacobi 与带主元直接求解共存。`m > 8192` 使用单核 GM 标量回退路径，不做 CPU fallback。
+- 当 `ldb × sizeof(float)` 不是 32 字节对齐时，为避免非对齐 DMA 的相邻列边界冲突，arch22 采用单核求解；B 的 padding 行不会被改写。
 
 ### aclsparseSgtsv2_bufferSizeExt
 
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 
 #### 函数原型
 
@@ -142,7 +162,7 @@ aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
 
 | dtype | rtol | atol | 说明 |
 |-------|------|------|------|
-| FP32 | ≤ 1.22e-4 | ≤ 1.22e-4 | 测试使用 MERE_MARE 模式，MERE threshold = 2^-13 ≈ 0.000122，MARE multiplier = 10.0 |
+| FP32 | 2^-10 | 2^-16 | 逐元素混合容差；整体匹配率 ≥ 0.99，绝对误差上限为 max(1e-2, 32 × ULP(golden)) |
 
 ## 调用示例
 
