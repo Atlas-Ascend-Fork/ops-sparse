@@ -84,18 +84,19 @@ typedef struct aclsparseSpMVOpPlan* aclsparseSpMVOpPlan_t;
 
 // Algorithm enum for SpMM.
 typedef enum aclsparseSpMMAlg_t {
+    // Default CSR route; arch22 selects a fast path when the dense layout allows it.
     ACL_SPARSE_SPMM_ALG_DEFAULT = 0,
-    // Recommended entry for any sparse matrix format. V1 routes CSR to the same
-    // SIMT/AIV implementation as ACL_SPARSE_SPMM_CSR_ALG1.
-    ACL_SPARSE_SPMM_CSR_ALG1,
-    // Explicit CSR algorithm 1. V1 uses the same SIMT/AIV implementation as
-    // ACL_SPARSE_SPMM_ALG_DEFAULT.
-    ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG,
-    // fp32 high-precision algorithm. Same SIMT path as the default, but the fp32
-    // accumulation uses Kahan compensated summation to suppress rounding /
-    // cancellation error on long rows. Trades throughput for accuracy and is only
-    // meaningful for fp32 (silently ignored for fp16 / int8). The other algorithms
-    // remain the high-performance choice with standard (lower) fp32 precision.
+    // CSR layout-generic route, preferred for column-major dense matrices.
+    ACL_SPARSE_SPMM_CSR_ALG1 = 1,
+    // fp32 high-precision algorithm. The fp32 accumulation uses Kahan
+    // compensated summation to suppress rounding and cancellation error on long
+    // rows. It is silently treated as DEFAULT for fp16, bf16, and complex64.
+    ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG = 2,
+    // CSR row-major route; arch22 uses the compact row-major fast path when possible.
+    ACL_SPARSE_SPMM_CSR_ALG2 = 3,
+    // Deterministic CSR route with fixed original row order. opA must be
+    // NON_TRANSPOSE and opB must not be CONJUGATE_TRANSPOSE.
+    ACL_SPARSE_SPMM_CSR_ALG3 = 4,
     // ACL_SPARSE_SPMM_COO_ALG1,  // Reserved: COO support (V2).
 } aclsparseSpMMAlg_t;
 

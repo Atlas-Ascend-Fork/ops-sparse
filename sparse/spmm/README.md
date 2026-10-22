@@ -32,8 +32,8 @@ C = alpha * op(A) * op(B) + beta * C
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -46,15 +46,15 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`，Host 内存 |
-| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
+| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_INT32`，Host 内存 |
-| alg | 输入 | aclsparseSpMMAlg_t | 算法类型，支持 `ACL_SPARSE_SPMM_ALG_DEFAULT`、`ACL_SPARSE_SPMM_CSR_ALG1` 或 `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；A2/A3 实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`，Host 内存 |
+| alg | 输入 | aclsparseSpMMAlg_t | 算法类型；A2/A3 支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3 和 FP32_HIGH_PRECISION，Host 内存；不同算法会选择对应的布局/确定性路径 |
 | size | 输出 | size_t* | 输出所需 workspace 大小（字节），Host 内存 |
 
 #### 约束说明
@@ -63,15 +63,22 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 - matA、matB、matC 不可为 nullptr
 - matA 仅支持 CSR 格式（`ACL_SPARSE_FORMAT_CSR`）
 - matA 的行偏移和列索引类型必须均为 `ACL_SPARSE_INDEX_32I`，且两者类型相同
-- matA 的索引基址仅支持 `ACL_SPARSE_INDEX_BASE_ZERO`
-- opA 仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`
-- opB 支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置
-- 数据类型组合仅支持以下三种：
+- A2/A3 的 matA 索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
+- A2/A3 的 opA/opB 支持 `ACL_SPARSE_OP_NON_TRANSPOSE`、`ACL_SPARSE_OP_TRANSPOSE` 和
+  `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`
+- A2/A3 的 B/C 支持行主序和列主序；行主序 `ld >= max(1, cols)`，列主序
+  `ld >= max(1, rows)`
+- A2/A3 数据类型组合支持以下四种：
   - matA=ACL_FLOAT, matB=ACL_FLOAT, matC=ACL_FLOAT, computeType=ACL_FLOAT
   - matA=ACL_FLOAT16, matB=ACL_FLOAT16, matC=ACL_FLOAT16, computeType=ACL_FLOAT
-  - matA=ACL_INT8, matB=ACL_INT8, matC=ACL_INT32, computeType=ACL_INT32
-- 维度匹配：A.cols == B.rows，A.rows == C.rows，B.cols == C.cols
-- 零维输入：m / k / n（matA.rows / matA.cols / matC.cols）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（arch35 与 arch22 行为一致）
+  - matA=ACL_BF16, matB=ACL_BF16, matC=ACL_BF16, computeType=ACL_FLOAT
+  - matA=ACL_COMPLEX64, matB=ACL_COMPLEX64, matC=ACL_COMPLEX64, computeType=ACL_COMPLEX64
+- 维度匹配按 opA/opB 后的逻辑形状校验
+- M/K/N 均允许为 0；零长度输出直接成功返回，K=0 时结果遵循 `C = beta * C`
+- A2/A3 的 `CSR_ALG1` 使用布局感知通用路径，优先用于列主序 B/C；`CSR_ALG2` 在紧凑行主序
+  N/N 组合下使用行主序快路径，其余合法布局回退通用路径；`CSR_ALG3` 使用固定原始行序，
+  要求 opA 为非转置且 opB 不是共轭转置
+- A2/A3 的 `FP32_HIGH_PRECISION` 仅支持 fp32，使用 Kahan 补偿求和
 - size 不可为 nullptr
 
 #### 支持的稀疏格式
@@ -89,8 +96,8 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -103,14 +110,14 @@ aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOpe
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`，Host 内存 |
-| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
+| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_INT32`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；A2/A3 实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型，Host 内存 |
 | buffer | 输入 | void* | workspace 缓冲区（由 GetBufferSize 返回的大小分配），Device 内存 |
 
@@ -134,8 +141,8 @@ aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOpe
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -148,14 +155,14 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`，Host 内存 |
-| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
+| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_INT32`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；A2/A3 实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型，Host 内存 |
 | buffer | 输入 | void* | workspace 缓冲区（由 GetBufferSize 返回的大小分配），Device 内存 |
 
@@ -164,7 +171,9 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 - 同 aclsparseSpMMGetBufferSize 的约束
 - buffer 不可为 nullptr，需按 GetBufferSize 返回的大小分配
 - 调用前须先调用 `aclsparseSpMMPreprocess` 进行预处理
-- `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` 仅在 computeType=ACL_FLOAT 时生效（使用 Kahan 补偿求和提升精度），对 fp16/int8 静默忽略
+- A2/A3 支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3、FP32_HIGH_PRECISION；算法会参与 host
+  侧路径选择，CSR_ALG3 的操作限制见 GetBufferSize 约束
+- A2/A3 的 `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` 仅支持 fp32，使用 Kahan 补偿求和
 
 #### 支持的稀疏格式
 
@@ -411,3 +420,28 @@ C[1] = 0.0, 3.0
 C[2] = 4.0, 0.0
 C[3] = 5.0, 5.0
 ```
+
+## PyTorch/ATen 入口
+
+torch_extension 适配位于 `sparse/spmm/torch_extension/`，注册 `aten::addmm.out` 的
+`SparseCsrPrivateUse1` 实现，使标准公开入口直接走 Dispatcher 到 `aclsparseSpMM*`，
+不经过 CPU 回填：
+
+```python
+import torch
+import torch_npu
+import cann_ops_sparse  # 导入即完成注册
+
+out = torch.addmm(bias, csr_mat1, dense_mat2, beta=-0.5, alpha=1.5)
+```
+
+调用链为 `torch.addmm` → `aten::addmm.out` → SparseCsrPrivateUse1 实现 →
+`aclsparseSpMMGetBufferSize`/`Preprocess`/`aclsparseSpMM` → Ascend C Kernel。
+
+该公开入口固定 opA/opB 为非转置、索引基址为 0（PyTorch 的 `sparse_csr_tensor` 和
+`torch.addmm` 都没有暴露这两个控制项），支持 fp16/bf16/fp32/complex64 四种 dtype、
+可广播的 `self`、以及零维 M/K/N。转置与 1 基索引仍可通过上面的裸 C++ 接口使用。
+
+安装、参数与约束详见 [torch_extension/cann_ops_sparse/docs/zh/spmm.md](../../torch_extension/cann_ops_sparse/docs/zh/spmm.md)，
+其中也说明了当前 `torch.sparse.addmm` 稀疏×稠密调用会被 SpGEMM 的注册遮蔽、需改用
+`torch.addmm` 的已知问题。

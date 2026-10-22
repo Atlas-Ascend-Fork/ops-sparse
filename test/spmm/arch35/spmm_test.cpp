@@ -20,7 +20,7 @@
 //   INT8: A(int8) * B(int8) -> C(int32), computeType=int32 (accumulate in int32)
 
 #include <acl/acl.h>
-#include <cann_ops_sparse.h>
+#include "cann_ops_sparse.h"
 
 #include <chrono>
 #include <cmath>

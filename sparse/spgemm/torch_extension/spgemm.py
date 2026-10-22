@@ -22,7 +22,7 @@ import torch
 
 from ....op_builder.builder import OpBuilder
 from ...matmul.dispatch import MatmulCapability
-from .spgemm_backward import as_coo, sparse_add_inplace, sparse_add_out, sparse_mask, spgemm_backward
+from .spgemm_backward import as_coo, sparse_mask, spgemm_backward
 
 
 class SpGemmOpBuilder(OpBuilder):
@@ -58,8 +58,7 @@ def _backward_spgemm(request, grad_output):
 MATMUL_CAPABILITIES = (
     MatmulCapability(owner="spgemm", route="spgemm", forward=_execute_spgemm,
                      backward=_backward_spgemm,
-                     backward_helpers=(("sparse_mask", sparse_mask), ("add.out", sparse_add_out),
-                                       ("add_.Tensor", sparse_add_inplace)),
+                     backward_helpers=(("sparse_mask", sparse_mask),),
                      dtypes=(torch.float16, torch.bfloat16, torch.float32, torch.complex64),
                      device_types=("npu", "privateuseone")),
 )

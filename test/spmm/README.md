@@ -11,25 +11,21 @@ ops-sparse 仓库中的 SPMM (Sparse Matrix-Dense Matrix Multiplication) 算子�
 | 产品                                                         |  是否支持 |
 | :----------------------------------------------------------- |:-------:|
 | <term>Ascend 950PR/Ascend 950DT</term>                       |    ✓    |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>       |    ✗    |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>       |    ✗    |
+| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>       |    ✓    |
+| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>       |    ✓    |
 
-> SPMM 当前版本在 Ascend 950PR/950DT 平台交付，源码位于 `sparse/spmm/arch35/`，与 SOC 架构映射保持一致。非 `ascend950*` 平台编译时会跳过 `spmm_test`。
+> A2/A3 实现位于 `sparse/spmm/arch22/`，Ascend 950PR/950DT 实现位于
+> `sparse/spmm/arch35/`；构建系统按目标 SOC 选择对应实现，在不受支持的 SOC 上编译时会跳过 `spmm_test`。
 
 ## 目录结构介绍
 
 ```txt
-sparse/spmm/arch35/
-├── spmm_host.cpp       // Host 侧 API 实现与 launch 调度
-├── spmm_csr_mat.cpp    // CSR 矩阵预处理（行重排、分桶）
-├── spmm_kernel.cpp     // Kernel 侧 SIMT 计算实现
-└── spmm.h              // 内部头文件与 Tiling 定义
+sparse/spmm/
+├── arch22/             // A2/A3 Host、预处理、Tiling 与 AscendC Kernel
+└── arch35/             // Ascend 950PR/950DT 实现
 
-test/spmm/
-├── CMakeLists.txt      // 调用 ops_sparse_add_test(spmm ${OPS_SPARSE})
-├── README.md           // 说明文档
-└── arch35/
-    └── spmm_test.cpp   // 950 算子调用样例
+test/spmm/arch22/
+└── spmm_test.cpp       // 主回归、dtype、布局、安全与缺陷回归
 ```
 
 ## 算子描述
@@ -55,9 +51,9 @@ $$
 ### 实现原理
 
 1. **参数校验与 Tiling 配置**：在 `spmm_host.cpp` 中校验矩阵维度、数据类型与算法组合，并写入 Kernel 所需的 Tiling 信息。
-2. **矩阵预处理**：在 `spmm_csr_mat.cpp` 中对 CSR 矩阵进行行重排与分桶，结果写入 workspace。
-3. **并行计算**：在 `spmm_kernel.cpp` 中，基于 SIMT/AIV 路径实现稀疏-稠密矩阵乘。
-4. **结果验证**：在 `spmm_test.cpp` 中，通过 CPU 参考实现计算 golden 真值，验证 NPU 计算结果的正确性。
+2. **矩阵预处理**：在 `spmm_csr_mat.cpp` 中完成 CSR 校验、行重排、分桶和转置索引构建。
+3. **并行计算**：紧凑布局走优化路径，其余合法布局/转置组合走通用正确性路径。
+4. **结果验证**：C++ 与 ATen 测试使用 CPU golden 和任务书双重精度判据验证。
 
 ### 算子规格
 
@@ -66,13 +62,13 @@ $$
   <table>
   <tr><td rowspan="1" align="center">算子类型(OpType)</td><td colspan="6" align="center">Spmm</td></tr>
   <tr><td rowspan="7" align="center">算子输入</td><td align="center">name</td><td align="center">shape</td><td align="center">data type</td><td align="center">format</td></tr>
-  <tr><td align="center">A</td><td align="center">CSR 格式 (rows × cols)</td><td align="center">fp32 / fp16 / int8</td><td align="center">CSR</td></tr>
-  <tr><td align="center">B</td><td align="center">cols × colsOut</td><td align="center">fp32 / fp16 / int8</td><td align="center">行主序 / 列主序</td></tr>
-  <tr><td align="center">C</td><td align="center">rows × colsOut</td><td align="center">fp32 / fp16 / int32</td><td align="center">行主序 / 列主序</td></tr>
-  <tr><td align="center">alpha</td><td align="center">1</td><td align="center">fp32 / int32</td><td align="center">scalar</td></tr>
-  <tr><td align="center">beta</td><td align="center">1</td><td align="center">fp32 / int32</td><td align="center">scalar</td></tr>
-  <tr><td align="center">opA / opB</td><td align="center">-</td><td align="center">-</td><td align="center">opA 仅 N；opB 支持 N / T</td></tr>
-  <tr><td rowspan="1" align="center">算子输出</td><td align="center">C</td><td align="center">rows × colsOut</td><td align="center">fp32 / fp16 / int32</td><td align="center">行主序 / 列主序</td></tr>
+  <tr><td align="center">A</td><td align="center">CSR 格式 (rows × cols)</td><td align="center">fp16 / bf16 / fp32 / complex64</td><td align="center">CSR</td></tr>
+  <tr><td align="center">B</td><td align="center">逻辑 K × N</td><td align="center">fp16 / bf16 / fp32 / complex64</td><td align="center">行主序 / 列主序</td></tr>
+  <tr><td align="center">C</td><td align="center">逻辑 M × N</td><td align="center">fp16 / bf16 / fp32 / complex64</td><td align="center">行主序 / 列主序</td></tr>
+  <tr><td align="center">alpha</td><td align="center">1</td><td align="center">fp32 / complex64</td><td align="center">scalar</td></tr>
+  <tr><td align="center">beta</td><td align="center">1</td><td align="center">fp32 / complex64</td><td align="center">scalar</td></tr>
+  <tr><td align="center">opA / opB</td><td align="center">-</td><td align="center">-</td><td align="center">N / T / CT（CSR_ALG3 按接口限制）</td></tr>
+  <tr><td rowspan="1" align="center">算子输出</td><td align="center">C</td><td align="center">逻辑 M × N</td><td align="center">fp16 / bf16 / fp32 / complex64</td><td align="center">行主序 / 列主序</td></tr>
   <tr><td rowspan="1" align="center">核函数名</td><td colspan="6" align="center">spmm_kernel_launch</td></tr>
   </table>
 
@@ -82,23 +78,27 @@ $$
   |---|---|---|-------------|
   | fp32 | fp32 | fp32 | fp32 |
   | fp16 | fp16 | fp16 | fp32（fp32 累加） |
-  | int8 | int8 | int32 | int32 |
+  | bf16 | bf16 | bf16 | fp32（fp32 累加） |
+  | complex64 | complex64 | complex64 | complex64 |
 
 - 约束限制：
   - 稀疏矩阵 A 当前仅支持 CSR 格式
-  - `opA` 当前仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`（非转置）
-  - `opB` 支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 与 `ACL_SPARSE_OP_TRANSPOSE`
+  - `opA` / `opB` 支持非转置、转置和共轭转置
   - 索引类型当前仅支持 `ACL_SPARSE_INDEX_32I`（`ACL_SPARSE_INDEX_64I` 暂未支持）
   - `beta = 0` 时会跳过 C 的读取，提供快路径
-  - fp32 高精度算法（`ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG`）仅对 fp32 生效，fp16 / int8 会自动忽略
+  - M/K/N 允许为 0；稠密矩阵的 `ld` 始终至少为 1
+  - A2/A3 支持 DEFAULT、CSR_ALG1、FP32_HIGH_PRECISION_ALG、CSR_ALG2 和
+    CSR_ALG3；CSR_ALG3 要求 opA=N 且 opB!=CT
 
 ### 算法说明
 
 | 算法枚举 | 说明 |
 |---------|------|
-| `ACL_SPARSE_SPMM_ALG_DEFAULT` | 默认算法，推荐使用；当前版本对 CSR 格式走 SIMT/AIV 实现 |
-| `ACL_SPARSE_SPMM_CSR_ALG1` | CSR 算法 1，显式指定 CSR 路径；当前版本与 DEFAULT 同一实现 |
-| `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` | fp32 高精度算法；同一 SIMT Kernel，fp32 累加使用 Kahan 补偿求和；仅对 fp32 生效 |
+| `ACL_SPARSE_SPMM_ALG_DEFAULT` | 默认 CSR 算法；按布局自动选择快路径或通用路径 |
+| `ACL_SPARSE_SPMM_CSR_ALG1` | CSR 布局感知通用算法，优先用于列主序稠密矩阵 |
+| `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` | FP32 高精度算法，使用补偿求和通用路径 |
+| `ACL_SPARSE_SPMM_CSR_ALG2` | CSR 行主序算法；紧凑行主序 N/N 选择快路径，其他合法布局回退通用路径 |
+| `ACL_SPARSE_SPMM_CSR_ALG3` | 固定原始 CSR 行序的确定性算法；opA=N 且 opB!=CT |
 
 ### 测试实现
 
@@ -106,7 +106,7 @@ $$
 
 1. **初始化**：初始化 ACL 环境，设置设备和创建 stream
 2. **生成测试数据**：在线生成随机 CSR 矩阵与稠密矩阵 B、C
-3. **CPU 参考计算**：使用 `SpmmCpuFp32` / `SpmmCpuInt8` 等函数计算参考结果
+3. **CPU 参考计算**：按声明 dtype 与复数语义计算高精度参考结果
 4. **设备内存管理**：分配和拷贝数据到设备内存
 5. **稀疏矩阵操作**：使用 aclsparse API 创建 CSR 矩阵与稠密矩阵描述符
 6. **获取 workspace**：调用 `aclsparseSpMMGetBufferSize` 获取缓冲区大小
@@ -172,15 +172,21 @@ CHECK_ACL_SPARSE(aclsparseSpMM(handle,
 ### 样例执行
 
 ```bash
-bash build.sh --ops=spmm --soc=ascend950 --run
+# A2/A3
+CMAKE_BUILD_TYPE=Release bash build.sh --ops=spmm --run
+
+# 仅运行定向套件
+SPMM_TEST_ONLY_DTYPE=1 CMAKE_BUILD_TYPE=Release bash build.sh --ops=spmm --run
+SPMM_TEST_ONLY_LAYOUT=1 CMAKE_BUILD_TYPE=Release bash build.sh --ops=spmm --run
+SPMM_TEST_ONLY_SAFETY=1 CMAKE_BUILD_TYPE=Release bash build.sh --ops=spmm --run
 ```
 
 执行结果如下，说明精度对比成功：
 
 ```bash
-========== Results ==========
-  FP32: PASS  FP16: PASS  INT8: PASS
-  Overall: PASS
+========================================
+Total: 0 failed
+========================================
 ```
 
 ## 接口说明
@@ -209,8 +215,8 @@ aclsparseStatus_t aclsparseSpMM(
 **参数说明**：
 
 - `handle`：稀疏矩阵操作的句柄（`aclsparseHandle_t`）
-- `opA`：稀疏矩阵 A 的转置选项，当前版本仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`
-- `opB`：稠密矩阵 B 的转置选项（`ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`）
+- `opA`：稀疏矩阵 A 的非转置、转置或共轭转置选项
+- `opB`：稠密矩阵 B 的非转置、转置或共轭转置选项
 - `alpha`：标量 alpha
 - `matA`：CSR 稀疏矩阵描述符（`aclsparseConstSpMatDescr_t`，只读输入）
 - `matB`：输入稠密矩阵 B 描述符（`aclsparseConstDnMatDescr_t`，只读输入）

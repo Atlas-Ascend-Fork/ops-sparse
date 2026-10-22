@@ -1195,8 +1195,8 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏计算句柄。
-- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，当前版本仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
-- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，A2/A3 支持非转置、转置和共轭转置。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，A2/A3 支持非转置、转置和共轭转置。
 - `alpha`（IN）：HOST/DEVICE，标量 alpha 参数。
 - `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
 - `matB`（IN）：HOST，输入稠密矩阵 B 的描述符。
@@ -1272,12 +1272,12 @@ aclsparseStatus_t aclsparseSpMM(
 );
 ```
 
-**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。零维输入：matA.rows / matA.cols / matC.cols（即 m/k/n）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（aclsparseSpMMGetBufferSize / aclsparseSpMMPreprocess / aclsparseSpMM 三个入口行为一致）。
+**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。零维输入：arch35 上 matA.rows / matA.cols / matC.cols（即 m/k/n）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；**A2/A3（arch22）不同**——M/K/N 均允许为 0，零长度输出直接返回 `ACL_SPARSE_STATUS_SUCCESS`（K=0 时结果遵循 `C = beta * C`），三个入口（GetBufferSize / Preprocess / SpMM）行为一致，详见 `sparse/spmm/README.md`。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏矩阵处理器句柄。
-- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，当前版本仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，A2/A3 支持非转置、转置和共轭转置。
 - `opB`（IN）：HOST，稠密矩阵 B 的操作类型。
 - `alpha`（IN）：HOST/DEVICE，标量 alpha。
 - `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
@@ -2070,9 +2070,11 @@ SpMM算法枚举：
 
 | 枚举值 | 说明 |
 |--------|------|
-| `ACL_SPARSE_SPMM_ALG_DEFAULT` | 默认算法，推荐使用；当前版本对 CSR 格式走 SIMT/AIV 实现 |
-| `ACL_SPARSE_SPMM_CSR_ALG1` | CSR 算法 1，显式指定 CSR 路径；当前版本与 DEFAULT 同一实现 |
-| `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` | fp32 高精度算法；同一 SIMT Kernel，fp32 累加使用 Kahan 补偿求和；仅对 fp32 生效 |
+| `ACL_SPARSE_SPMM_ALG_DEFAULT` | 默认 CSR 算法；arch22 按布局自动选择快路径或通用路径 |
+| `ACL_SPARSE_SPMM_CSR_ALG1` | CSR 布局感知通用算法，优先用于列主序稠密矩阵 |
+| `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` | fp32 高精度算法；fp32 累加使用 Kahan 补偿求和；仅对 fp32 生效 |
+| `ACL_SPARSE_SPMM_CSR_ALG2` | CSR 行主序算法；arch22 在紧凑行主序 N/N 时选择快路径，其他合法布局回退通用路径 |
+| `ACL_SPARSE_SPMM_CSR_ALG3` | 固定原始 CSR 行序的确定性算法；`opA` 仅支持非转置，`opB` 不支持共轭转置 |
 
 ### aclsparseSpMMOpAlg_t
 

@@ -56,7 +56,7 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 | beta | 输入 | const void* | 标量 beta 指针，类型须为 float（ACL_FLOAT）。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
 | computeType | 输入 | aclDataType | 计算精度类型，仅支持 `ACL_FLOAT`，Host 内存 |
-| alg | 输入 | aclsparseSpMMAlg_t | 算法类型，支持 `ACL_SPARSE_SPMM_ALG_DEFAULT` 或 `ACL_SPARSE_SPMM_CSR_ALG1`，Host 内存 |
+| alg | 输入 | aclsparseSpMMAlg_t | 算法类型，支持 DEFAULT、CSR_ALG1、FP32_HIGH_PRECISION、CSR_ALG2 和 CSR_ALG3，Host 内存 |
 | size | 输出 | size_t* | 输出所需 workspace 大小（字节），Host 内存 |
 
 #### 约束说明
@@ -163,7 +163,7 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 
 - 同 aclsparseSpMMGetBufferSize 的约束
 - buffer 不可为 nullptr，需按 GetBufferSize 返回的大小分配
-- 调用前须先调用 `aclsparseSpMMPreprocess` 进行预处理（或确保 matA 的 activeBuffer 已指向当前 buffer）
+- 调用前须以相同的 CSR pattern、稠密矩阵形状/布局、opA/opB 和 alg 调用 `aclsparseSpMMPreprocess`。若该 buffer 被其他矩阵或参数组合重新预处理覆盖，须再次调用 Preprocess；执行接口不会同步回读 CSR 数据并自动重建预处理结果
 - **异步执行**：本接口下发 kernel 后立即返回，不等待计算完成。调用方须自行调用 `aclrtSynchronizeStream` 等待结果，并在同步完成前保证 buffer 与矩阵数据有效
 
 #### 支持的稀疏格式

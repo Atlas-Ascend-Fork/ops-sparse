@@ -14,14 +14,25 @@ import torch
 
 from .dispatch import BACKWARD_HELPER_KEYS, MatmulRequest
 from .autograd import register_autograd
+from .sparse_helpers import sparse_add_inplace, sparse_add_out
 
 
 TORCH_NPU_SPARSE_FACADE_APIS = {"mm": torch.sparse.mm, "addmm": torch.sparse.addmm}
+
+COMMON_BACKWARD_HELPERS = {
+    "add.out": sparse_add_out,
+    "add_.Tensor": sparse_add_inplace,
+}
 
 
 def register_aten(registry):
     """Return the Library guard; its lifetime must span all registered kernels."""
     library = torch.library.Library("aten", "IMPL")
+    overlap = set(COMMON_BACKWARD_HELPERS).intersection(registry.backward_helpers)
+    if overlap:
+        raise RuntimeError("backward helpers are owned by the shared matmul layer: "
+                           + ", ".join(sorted(overlap)))
+    backward_helpers = {**COMMON_BACKWARD_HELPERS, **registry.backward_helpers}
 
     def mm(mat1, mat2):
         return registry.dispatch(MatmulRequest("mm", mat1, mat2, schema="aten::mm"))
@@ -58,7 +69,7 @@ def register_aten(registry):
     for dispatch_key in ("SparsePrivateUse1", "SparseCsrPrivateUse1"):
         for schema, implementation in implementations.items():
             library.impl(schema, implementation, dispatch_key)
-        for schema, implementation in registry.backward_helpers.items():
+        for schema, implementation in backward_helpers.items():
             if dispatch_key in BACKWARD_HELPER_KEYS[schema]:
                 library.impl(schema, implementation, dispatch_key)
     if any(capability.backward is not None for capability in registry.capabilities.values()):

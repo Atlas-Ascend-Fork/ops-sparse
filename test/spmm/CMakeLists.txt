@@ -26,14 +26,19 @@ if(SOC_VERSION_LOWER MATCHES "^ascend950")
 elseif(SOC_VERSION_LOWER MATCHES "^ascend910_93" OR SOC_VERSION_LOWER MATCHES "^ascend910b")
     add_executable(spmm_test
         arch22/spmm_test.cpp
+        arch22/spmm_defect_extra_test.cpp
+        arch22/spmm_precision_test.cpp
     )
     target_include_directories(spmm_test PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         $ENV{LINUX_INCLUDE_PATH}
     )
+    # libc_sec 是 memcpy_s/snprintf_s 的实现，ops_sparse_add_test 里默认带上，
+    # 这里的 target 是手写的，得自己链。
     target_link_libraries(spmm_test PRIVATE
         ${OPS_SPARSE}
         $ENV{EAGER_LIBRARY_PATH}/libascendcl.so
+        ${_ops_sparse_libc_sec}
     )
 else()
     message(STATUS "[test/spmm] SOC=${SOC_VERSION} not supported, skipping spmm_test")
@@ -41,3 +46,10 @@ else()
         "spmm|SOC not supported (${SOC_VERSION})\n")
     return()
 endif()
+
+# Keep the in-tree public API ahead of any older header installed with CANN.
+target_compile_options(spmm_test PRIVATE
+    "SHELL:-iquote ${CMAKE_SOURCE_DIR}/include"
+    "SHELL:-iquote ${CMAKE_SOURCE_DIR}/sparse/common"
+    "SHELL:-iquote ${CMAKE_SOURCE_DIR}/sparse/spmm/arch22"
+)

@@ -25,8 +25,8 @@ import torch
 _SUPPORTED_SPARSE = (torch.sparse_coo, torch.sparse_csr, torch.sparse_csc)
 BACKWARD_HELPER_KEYS = {
     "sparse_mask": ("SparsePrivateUse1", "SparseCsrPrivateUse1"),
-    "add.out": ("SparseCsrPrivateUse1",),
-    "add_.Tensor": ("SparseCsrPrivateUse1",),
+    "add.out": ("SparsePrivateUse1", "SparseCsrPrivateUse1"),
+    "add_.Tensor": ("SparsePrivateUse1", "SparseCsrPrivateUse1"),
 }
 
 
@@ -114,7 +114,7 @@ def _route(request):
             raise RuntimeError("self must be dense for a dense output")
         # Validate broadcasting without replacing self: backward must reduce
         # the accumulated gradient to the original operand's shape.
-        request.self.expand(request.mat1.size(0), request.mat2.size(1))
+        _ = request.self.expand(request.mat1.size(0), request.mat2.size(1))
     if request.out is not None:
         expected = request.mat1.layout if route == "spgemm" else torch.strided
         if request.out.layout != expected:
@@ -217,6 +217,8 @@ class MatmulRegistry:
             raise RuntimeError("matrix out implementation must return the supplied out tensor")
         if transpose:
             result = result.transpose(0, 1)
+            if request.out is None:
+                result = result.contiguous()
         if request.out is not None:
             # The operator's out implementation owns resizing and copying.
             return request.out

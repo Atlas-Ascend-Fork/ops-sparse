@@ -294,10 +294,10 @@ MATMUL_CAPABILITIES = (
 反向的转置或投影。不得对零 alpha/beta 直接返回零梯度，否则会屏蔽原生的 NaN 传播。
 
 `backward_helpers` 可声明构造器反向或梯度累加所需的辅助实现，例如
-`(("sparse_mask", sparse_mask_impl),)`。当前公共层允许的 schema 为 `sparse_mask`、
-`add.out`、`add_.Tensor`，按公共层规定的 dispatch key 注册，不允许不同 provider
-重复声明同一个 helper；已有 helper 应复用，新增 helper 须同步扩展公共层并验证
-完整 ATen 语义。声明 helper 不会替代主算子的 `backward`。
+`(("sparse_mask", sparse_mask_impl),)`。当前 provider 可声明的 schema 为
+`sparse_mask`；CSR 梯度累加所需的 `add.out`、`add_.Tensor` 由公共 matmul 层统一实现和
+注册，provider 不得重复声明。新增 helper 须同步扩展公共层并验证完整 ATen 语义。
+声明 helper 不会替代主算子的 `backward`。
 
 当前公共 autograd 包装器仅支持一阶反向，不支持二阶反向和 `out=` 自动求导。
 新增 provider 应覆盖两侧输入、累加项、广播、复数、原始稀疏布局和梯度累加，

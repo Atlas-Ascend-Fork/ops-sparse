@@ -34,6 +34,13 @@ for name in (
     module.__path__ = []
     sys.modules[name] = module
 sys.modules["_spgemm_unit.ops.matmul.dispatch"] = router
+_HELPER_SPEC = importlib.util.spec_from_file_location(
+    "_spgemm_unit.ops.matmul.sparse_helpers",
+    _ROOT / "torch_extension/cann_ops_sparse/ops/matmul/sparse_helpers.py",
+)
+helpers = importlib.util.module_from_spec(_HELPER_SPEC)
+sys.modules[_HELPER_SPEC.name] = helpers
+_HELPER_SPEC.loader.exec_module(helpers)
 _SPEC = importlib.util.spec_from_file_location(
     "_spgemm_unit.ops.sparse.spgemm.backward",
     _ROOT / "sparse/spgemm/torch_extension/spgemm_backward.py",
@@ -320,12 +327,116 @@ def test_csr_add_helpers_preserve_union_and_out_alias(dtype):
     left = torch.tensor([[1., 0.], [0., 2.]], dtype=dtype).to_sparse_csr()
     right = torch.tensor([[0., 3.], [4., 0.]], dtype=dtype).to_sparse_csr()
     out = torch.sparse_csr_tensor([0, 0, 0], [], torch.empty(0, dtype=dtype), size=(2, 2))
-    assert backward.sparse_add_out(left, right, alpha=2, out=out) is out
+    assert helpers.sparse_add_out(left, right, alpha=2, out=out) is out
     expected = torch.tensor([[1., 6.], [8., 2.]], dtype=dtype)
     torch.testing.assert_close(out.to_dense(), expected)
     original = left
-    assert backward.sparse_add_inplace(left, right, alpha=2) is original
+    assert helpers.sparse_add_inplace(left, right, alpha=2) is original
     torch.testing.assert_close(left.to_dense(), expected)
+
+
+@pytest.fixture
+def sparse_add_calls(monkeypatch):
+    """Record public sparse additions to distinguish the general path."""
+    calls = []
+    original = torch.add
+
+    def record_add(left, right, *args, **kwargs):
+        if left.layout != torch.strided or right.layout != torch.strided:
+            calls.append((left.layout, right.layout))
+        return original(left, right, *args, **kwargs)
+
+    monkeypatch.setattr(torch, 'add', record_add)
+    return calls
+
+
+@pytest.mark.parametrize('different_view', ['right', 'out'])
+def test_sparse_add_shared_index_pointer_with_different_stride(different_view, sparse_add_calls):
+    storage = torch.tensor([0, 0, 0, 1, 1])
+    row_pattern = storage.as_strided((2, 2), (2, 1))
+    diagonal_pattern = storage.as_strided((2, 2), (1, 3))
+    left = torch.sparse_coo_tensor(row_pattern, [1., 2.], (2, 2), is_coalesced=True)
+    right_indices = diagonal_pattern if different_view == 'right' else row_pattern
+    out_indices = diagonal_pattern if different_view == 'out' else row_pattern
+    right = torch.sparse_coo_tensor(right_indices, [3., 4.], (2, 2), is_coalesced=True)
+    out = torch.sparse_coo_tensor(out_indices, [0., 0.], (2, 2), is_coalesced=True)
+    assert left.indices().data_ptr() == right.indices().data_ptr() == out.indices().data_ptr()
+    assert left.indices().shape == right.indices().shape == out.indices().shape
+    assert left.indices().stride() != (
+        right.indices() if different_view == 'right' else out.indices()).stride()
+    expected = left.to_dense() + right.to_dense()
+    assert helpers.sparse_add_out(left, right, out=out) is out
+    assert sparse_add_calls == [(torch.sparse_coo, torch.sparse_coo)]
+    torch.testing.assert_close(out.to_dense(), expected)
+
+
+@pytest.mark.parametrize('operand_dtype,out_dtype', [
+    (torch.int64, torch.int64),
+    (torch.int64, torch.float32),
+    (torch.int64, torch.complex64),
+    (torch.float32, torch.float32),
+    (torch.float32, torch.complex64),
+    (torch.complex64, torch.complex64),
+])
+@pytest.mark.parametrize('alpha', [0.5, 1 + 0j, 1 + 1j, True, 2])
+@pytest.mark.parametrize('shared', [False, True])
+def test_sparse_add_alpha_matches_operand_scalar_rules(
+        operand_dtype, out_dtype, alpha, shared, sparse_add_calls):
+    indices = torch.tensor([[0, 1], [0, 1]])
+    left = torch.sparse_coo_tensor(indices, torch.tensor([1, 2], dtype=operand_dtype),
+                                   (2, 2), is_coalesced=True)
+    right = torch.sparse_coo_tensor(indices if shared else indices.clone(),
+                                    torch.tensor([1, 2], dtype=operand_dtype), (2, 2), is_coalesced=True)
+    out = torch.sparse_coo_tensor(indices, torch.tensor([-7, -9], dtype=out_dtype),
+                                  (2, 2), is_coalesced=True)
+    assert (left.indices().data_ptr() == right.indices().data_ptr() == out.indices().data_ptr()) == shared
+    assert left.indices().stride() == right.indices().stride() == out.indices().stride()
+    old_values = out.values().clone()
+    old_indices = out.indices().clone()
+    try:
+        expected = torch.add(left.values(), right.values(), alpha=alpha)
+    except (RuntimeError, TypeError) as error:
+        with pytest.raises(type(error)) as actual:
+            helpers.sparse_add_out(left, right, alpha=alpha, out=out)
+        assert str(actual.value) == str(error)
+        assert not sparse_add_calls
+        torch.testing.assert_close(out.values(), old_values)
+        torch.testing.assert_close(out.indices(), old_indices)
+    else:
+        assert helpers.sparse_add_out(left, right, alpha=alpha, out=out) is out
+        assert sparse_add_calls == ([] if shared else [(torch.sparse_coo, torch.sparse_coo)])
+        torch.testing.assert_close(out.values(), expected.to(out_dtype))
+        torch.testing.assert_close(out.indices(), old_indices)
+
+
+@pytest.mark.parametrize('dtype,alpha', [
+    (torch.int64, 0.5), (torch.float32, 1 + 0j), (torch.float32, 1 + 1j),
+])
+@pytest.mark.parametrize('shared', [False, True])
+def test_sparse_add_invalid_alpha_does_not_modify_inplace(dtype, alpha, shared):
+    indices = torch.tensor([[0, 1], [0, 1]])
+    left = torch.sparse_coo_tensor(indices, torch.tensor([1, 2], dtype=dtype),
+                                   (2, 2), is_coalesced=True)
+    right = torch.sparse_coo_tensor(indices if shared else indices.clone(),
+                                    torch.tensor([1, 2], dtype=dtype), (2, 2), is_coalesced=True)
+    before = left.to_dense()
+    old_indices = left.indices().clone()
+    with pytest.raises(RuntimeError):
+        helpers.sparse_add_inplace(left, right, alpha=alpha)
+    torch.testing.assert_close(left.to_dense(), before)
+    torch.testing.assert_close(left.indices(), old_indices)
+
+
+def test_sparse_add_identical_strided_index_views_keep_fast_path(sparse_add_calls):
+    storage = torch.tensor([0, 0, 0, 1, 1])
+    indices = storage.as_strided((2, 2), (1, 3))
+    left = torch.sparse_coo_tensor(indices, [1., 2.], (2, 2), is_coalesced=True)
+    right = torch.sparse_coo_tensor(indices.view_as(indices), [3., 4.], (2, 2), is_coalesced=True)
+    out = torch.sparse_coo_tensor(indices.view_as(indices), [0., 0.], (2, 2), is_coalesced=True)
+    assert not indices.is_contiguous()
+    helpers.sparse_add_out(left, right, out=out)
+    assert not sparse_add_calls
+    torch.testing.assert_close(out.to_dense(), torch.tensor([[4., 0.], [0., 6.]]))
 
 
 @pytest.mark.parametrize('schema', ["aten::mm", "aten::addmm"])

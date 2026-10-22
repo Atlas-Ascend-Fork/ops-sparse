@@ -787,7 +787,7 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (ld <= 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (values == nullptr) {
+    if (rows > 0 && cols > 0 && values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (!IsValidSparseValueType(valueType)) {

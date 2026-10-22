@@ -17,26 +17,14 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <iostream>
 #include <vector>
 #include <unordered_set>
 #include <random>
 
-#define CHECK_ACL(x)                                                                        \
-    do {                                                                                    \
-        aclError __ret = x;                                                                 \
-        if (__ret != ACL_ERROR_NONE) {                                                      \
-            std::cerr << __FILE__ << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
-        }                                                                                   \
-    } while (0);
-
-#define CHECK_ACL_SPARSE(x)                                                                       \
-    do {                                                                                          \
-        aclsparseStatus_t __ret = x;                                                                \
-        if (__ret != ACL_SPARSE_STATUS_SUCCESS) {                                                 \
-            std::cerr << __FILE__ << ":" << __LINE__ << " aclSparseError:" << __ret << std::endl; \
-        }                                                                                         \
-    } while (0);
+// CHECK_ACL / CHECK_ACL_SPARSE live in the shared defect-test header so this TU
+// and spmm_defect_extra_test.cpp do not duplicate the same macro definitions
+// (the CI codecheck flags cross-file duplicate code).
+#include "spmm_defect_common.h"
 
 // Thread-safe random column index generation (replaces non-reentrant rand())
 static inline int random_col(uint64_t cols)
@@ -108,24 +96,38 @@ void generate_powerlaw_csr(uint64_t rows, uint64_t cols, uint64_t nnz,
     if (total == 0.0) {
         return;
     }
-    // Assign nnz per row proportional to weight
+    // Assign nnz per row proportional to the Zipf weight, capped at `cols`
+    // (a row can hold at most `cols` distinct columns).  Capping here — instead
+    // of silently truncating in the write loop — keeps offsets[rows] == nnz, so
+    // the CSR descriptor's declared nnz matches the elements actually written.
+    const uint64_t max_nnz = rows * cols;
+    if (nnz > max_nnz) {
+        nnz = max_nnz;
+    }
     std::vector<uint64_t> row_nnz(rows, 0);
     uint64_t assigned = 0;
     for (uint64_t i = 0; i < rows; i++) {
-        row_nnz[i] = (uint64_t)(nnz * weight[i] / total);
-        assigned += row_nnz[i];
+        uint64_t r_nnz = (uint64_t)(nnz * weight[i] / total);
+        if (r_nnz > cols) {
+            r_nnz = cols;
+        }
+        row_nnz[i] = r_nnz;
+        assigned += r_nnz;
     }
-    // Distribute remaining nnz to top rows
-    for (uint64_t i = 0; assigned < nnz && i < rows; i++) {
-        row_nnz[i]++;
-        assigned++;
+    // Distribute the remaining non-zeros across rows that still have column
+    // capacity, wrapping around so a single pass cannot under-fill the tail.
+    uint64_t i = 0;
+    while (assigned < nnz) {
+        if (row_nnz[i] < cols) {
+            row_nnz[i]++;
+            assigned++;
+        }
+        i = (i + 1) % rows;
     }
 
     uint64_t cur = 0;
     for (uint64_t i = 0; i < rows; i++) {
-        uint64_t r_nnz = row_nnz[i];
-        if (r_nnz > cols) r_nnz = cols;
-        cur = fill_row_random_cols(r_nnz, cols, indices, values, cur);
+        cur = fill_row_random_cols(row_nnz[i], cols, indices, values, cur);
         offsets[i + 1] = (int)cur;
     }
 }
@@ -713,12 +715,12 @@ static int run_test_cases(const TestCaseParam *test_cases, size_t case_count,
     return fail;
 }
 
-// Zero-dim guard verification: when any of M/K/N is 0, ValidateSpmmInputs must
-// return INVALID_VALUE (dimension matching passes 0==0, the zero-dim guard on
-// matA->rows/cols and matC->cols rejects). Only calls GetBufferSize, never
-// executes the kernel. Dimension relations: A is M×K CSR, B is K×n DnMat (ROW),
-// C is m×N DnMat (ROW); the dimension matching in AclsparseValidateSpmmCommon
-// (sparse/common/aclsparse_descr_internal.h) requires A.cols==B.rows(K),
+// Zero-dim verification: arch22 SpMM deliberately accepts zero-dim M/K/N
+// (sparse/spmm/README.md: "M/K/N 均允许为 0；零长度输出直接成功返回"), diverging
+// from the shared AclsparseValidateSpmmCommon which rejects them (Issue #180).
+// GetBufferSize must therefore return SUCCESS, not INVALID_VALUE. Only calls
+// GetBufferSize, never executes the kernel. Dimension relations: A is M×K CSR,
+// B is K×n DnMat (ROW), C is m×N DnMat (ROW); A.cols==B.rows(K),
 // A.rows==C.rows(M), B.cols==C.cols(N).
 // Descriptor-layer constraints: aclsparseCreateDnMat accepts 0-dim (ld>0,
 // ROW order ld>=cols, non-null values >=1 element); aclsparseCreateCsr accepts
@@ -762,8 +764,8 @@ static int run_spmm_zero_dim_case(const char *name, uint64_t M, uint64_t K, uint
     CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matC, (int64_t)M, (int64_t)N, (int64_t)ld,
         dC, ACL_FLOAT, ACL_SPARSE_ORDER_ROW))
 
-    // dtype combo (all FP32) and dimension matching (0==0 passes) are valid,
-    // so INVALID_VALUE can only come from the zero-dim guard.
+    // dtype combo (all FP32) and dimension matching (0==0 passes) are valid, so
+    // arch22's zero-dim acceptance (return SUCCESS) is the expected outcome.
     const float alpha = 1.0f;
     const float beta = 0.0f;
     size_t bufferSize = 0;
@@ -771,9 +773,9 @@ static int run_spmm_zero_dim_case(const char *name, uint64_t M, uint64_t K, uint
         ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
         &alpha, matA, matB, &beta, matC,
         ACL_FLOAT, ACL_SPARSE_SPMM_ALG_DEFAULT, &bufferSize);
-    const int pass = (ret == ACL_SPARSE_STATUS_INVALID_VALUE);
-    printf("  [%s] GetBufferSize ret=%d (expect %d INVALID_VALUE): %s\n",
-        name, (int)ret, (int)ACL_SPARSE_STATUS_INVALID_VALUE,
+    const int pass = (ret == ACL_SPARSE_STATUS_SUCCESS);
+    printf("  [%s] GetBufferSize ret=%d (expect %d SUCCESS): %s\n",
+        name, (int)ret, (int)ACL_SPARSE_STATUS_SUCCESS,
         pass ? "PASS" : "FAIL");
 
     CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matB))
@@ -819,6 +821,8 @@ int main(int, char **, char **envp)
     fail += run_spmm_zero_dim_case("zero_dim_m0", 0, 16, 8, stream);
     fail += run_spmm_zero_dim_case("zero_dim_k0", 8, 0, 8, stream);
     fail += run_spmm_zero_dim_case("zero_dim_n0", 8, 16, 0, stream);
+    fail += run_defect_regression_tests_extra(stream);
+    fail += run_precision_regression_tests(stream);
 
     printf("========================================\n");
     printf("Total: %d failed\n", fail);

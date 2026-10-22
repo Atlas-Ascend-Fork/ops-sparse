@@ -161,11 +161,13 @@ set_source_files_properties(
     PROPERTIES LANGUAGE ASC
 )
 
+# 仓内头文件必须排在 CANN 安装目录之前。已安装的 ops-sparse 运行包会在 CANN 目录下
+# 留一份同名的 cann_ops_sparse.h；使用旧头文件会导致本仓新增枚举无法解析。
+
 # The A5 SpMV kernel uses the SIMD+SIMT hybrid model: an ordinary AIV entry
 # coordinates __simt_vf__ work through asc_vf_call.  Do not pass
 # --enable-simt here; that option selects the pure-SIMT compilation mode and
 # rejects kernel_operator.h / other SIMD headers required by the hybrid TU.
-
 target_include_directories(${OPS_SPARSE} BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common
@@ -182,6 +184,8 @@ target_include_directories(${OPS_SPARSE} PRIVATE
 )
 
 target_compile_options(${OPS_SPARSE} PRIVATE
+    "$<$<COMPILE_LANGUAGE:ASC>:SHELL:-iquote ${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<$<COMPILE_LANGUAGE:ASC>:SHELL:-iquote ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common>"
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH}>
 )
 

@@ -283,34 +283,3 @@ def spgemm_backward(request, grad_output, execute):
             gradients.append(_format_sparse_matrix_gradient(
                 request, grad_output.layout, product, operand, scale))
     return grad_self, gradients[0], gradients[1]
-
-
-@torch.no_grad()
-def sparse_add_out(self, other, *, alpha=1, out):
-    """CSR gradient accumulation, including union patterns and complex values."""
-    if self.device != other.device or out.device != self.device:
-        raise RuntimeError("sparse add requires operands and out on the same device")
-    left, right = self.detach().cpu(), other.detach().cpu()
-    if left.layout == right.layout == torch.sparse_csr and left.shape == right.shape:
-        # COO addition handles complex and union patterns without a CPU MKL
-        # dependency; preserve CSR as the public result layout.
-        result_dtype = torch.result_type(left, right)
-        compute_dtype = torch.float32 if result_dtype in (torch.float16, torch.bfloat16) else result_dtype
-        result = torch.add(left.to(compute_dtype).to_sparse_coo(),
-                           right.to(compute_dtype).to_sparse_coo(), alpha=alpha).to_sparse_csr()
-        result = result.to(result_dtype)
-    else:
-        result = torch.add(left, right, alpha=alpha)
-    if result.layout != out.layout or not torch.can_cast(result.dtype, out.dtype):
-        raise RuntimeError("sparse add out has an incompatible layout or dtype")
-    result = result.to(device=out.device, dtype=out.dtype)
-    if out.layout == torch.strided:
-        out.resize_(result.shape)
-    else:
-        out.resize_as_sparse_(result)
-    out.copy_(result)
-    return out
-
-
-def sparse_add_inplace(self, other, *, alpha=1):
-    return sparse_add_out(self, other, alpha=alpha, out=self)
