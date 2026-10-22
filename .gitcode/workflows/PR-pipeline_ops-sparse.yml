@@ -49,7 +49,6 @@ stages:
               echo "Compile_Ascend_X86_A5: ${{ steps.revise_image.outputs.Compile_Ascend_X86_A5 }}"
               echo "Compile_Ascend_ARM_A2: ${{ steps.revise_image.outputs.Compile_Ascend_ARM_A2 }}"
               echo "Compile_Ascend_ARM_A5: ${{ steps.revise_image.outputs.Compile_Ascend_ARM_A5 }}"
-              echo "Compile_Ascend_ARM_A2_openeuler: ${{ steps.revise_image.outputs.Compile_Ascend_ARM_A2_openeuler }}"
               echo "PreSmoke_A900: ${{ steps.revise_image.outputs.PreSmoke_A900 }}"
               echo "precommit: ${{ steps.revise_image.outputs.precommit }}"
               echo "codecheck: ${{ steps.revise_image.outputs.codecheck }}"
@@ -130,24 +129,6 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM_A5 }}
           arch: 'arm64'
           package_name: 'cann-ops-sparse-A5_ubuntu24_linux-aarch64.run'
-      JOB_arm_A2_openeuler_compile:
-        name: Compile_Ascend_ARM_A2_openeuler
-        uses: .gitcode/workflows/compile_action.yml
-        with:
-          task_name: 'Compile_Ascend_ARM_A2_openeuler'
-          image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM_A2_openeuler }}
-          arch: 'arm64'
-          package_name: 'cann-ops-sparse-A2_linux-aarch64_openeuler.run'
-        if: "${{ jobs.__JOB_SET_CI_BRANCH.outputs.CI_BRANCH == 'wyx_image2' }}"
-      JOB_arm_A5_ubuntu24_390_compile:
-        name: Compile_Ascend_ARM_A5_ubuntu24_390
-        uses: .gitcode/workflows/compile_action.yml
-        with:
-          task_name: 'Compile_Ascend_ARM_A5_ubuntu24'
-          image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM_A5 }}
-          arch: 'arm64'
-          package_name: 'cann-ops-sparse-A5_linux-aarch64_openeuler.run'
-        if: "${{ jobs.__JOB_SET_CI_BRANCH.outputs.CI_BRANCH == 'wyx_image2' }}"
       JOB_codecheck:
         name: CodeCheck
         uses: cann/.gitcode/.gitcode/workflows/codecheck_action.yml@master
