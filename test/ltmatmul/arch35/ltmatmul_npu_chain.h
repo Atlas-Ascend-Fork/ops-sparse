@@ -14,20 +14,22 @@
 #define TEST_LTMATMUL_NPU_CHAIN_H_
 
 // =============================================================================
-// Matmul chain implementation extracted from
-// ltmatmul_npu_wrapper.h to reduce header file size.
+// Matmul chain implementation（A-sparse / dense*dense 链 runner）。
 //
 // Provides the internal chain runners consumed by RunMatmulNpu:
-//   - MatmulChainCtx / MatmulBSparseCtx: aggregated descriptor + buffer context
+//   - MatmulChainCtx: aggregated descriptor + buffer context (A-sparse / dense)
 //   - PrepareMatmulChainBuffers / CreateMatmulABDescriptors /
 //     PrepareMatmulChainContext: A-sparse / dense*dense context setup
-//   - PrepareBSparseChainContext: B-sparse context setup
 //   - PreparePlanAndWorkspace: algSel + plan + workspace
-//   - RunPruneForASparse / RunBSparsePruneAndTranspose: prune helpers
+//   - CopyPrunedToHost / RunPruneForASparse: prune readback / A-sparse prune
 //   - MatmulRunArgs / ChainSetupResult / SetupVecEpiPlanWorkspace: shared
 //     post-context sequence (vec scaling + epilogue + plan + workspace)
 //   - RunMatmulChain: A-sparse / dense*dense chain runner
-//   - RunMatmulBSparseChainWithTrans: B-sparse chain runner
+//
+// B-sparse 链族 + 物理布局计算段（MatmulBSparseCtx /
+// Compute{A,B}SparsePhysicalLayout / PrepareBSparseChainContext /
+// RunBSparsePruneAndTranspose / RunMatmulBSparseChainWithTrans 等）位于
+// ltmatmul_npu_chain_bsparse.h，由本文件尾部 include 转发。
 //
 // Include order: this header is included by ltmatmul_npu_wrapper.h AFTER
 // MatmulNpuResult, the epilogue helpers (ltmatmul_npu_epilogue.h),
@@ -41,7 +43,6 @@
 // -----------------------------------------------------------------------------
 // MatmulChainCtx: aggregated context for RunMatmulChain (descriptors + buffers).
 // Uses unique_ptr for RAII guards since they have no default constructor.
-// Extracted from RunMatmulChain to reduce NBNC.
 // -----------------------------------------------------------------------------
 struct MatmulChainCtx {
     sparse_test::SparseLtHandleGuard handle;
@@ -59,30 +60,19 @@ struct MatmulChainCtx {
     size_t mk = 0;
     int32_t numBatches = 1;
     int64_t batchStride = 0;
-};
-
-// -----------------------------------------------------------------------------
-// MatmulBSparseCtx: aggregated context for RunMatmulBSparseChainWithTrans.
-// -----------------------------------------------------------------------------
-struct MatmulBSparseCtx {
-    sparse_test::SparseLtHandleGuard handle;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matA;
-    std::unique_ptr<sparse_test::SparseLtMatDescGuard> matB;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matC;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matD;
-    std::unique_ptr<sparse_test::SparseLtMatmulDescGuard> matmulDesc;
-    sparse_test::DeviceBuffer dA;
-    sparse_test::DeviceBuffer dB;
-    sparse_test::DeviceBuffer dC;
-    sparse_test::DeviceBuffer dD;
-    size_t kn = 0;
-    int32_t numBatches = 1;
-    int64_t batchStride = 0;
+    // C/D 布局（回读尺寸与解包由 runner / test.cpp 消费）
+    sparse_test::MatmulLayoutOpts layout;
+    size_t cdSpan = 0;  // C/D 单 batch 物理 span（元素数；紧凑时 == m*n）
 };
 
 // -----------------------------------------------------------------------------
 // PrepareMatmulChainBuffers: compute physical layout + allocate device buffers.
-// Extracted from PrepareMatmulChainContext to reduce NBNC.
+//
+// opts 尾参：ld/order 布局覆盖（默认 MatmulLayoutOpts{} = 既有
+// 紧凑行为，全部既有调用点零变化）。覆盖语义：
+//   - A structured（A-sparse）：ldSparse>0 → aLd=ldSparse + 物理重排 padded
+//   - B dense（A-sparse）：ldDense>0 / denseOrder=COL → bLd + 物理重排
+//   - C/D：cdOrder/ldCd → hCPhys（pack 后 host 数据）+ dC/dD 尺寸按物理 span
 // -----------------------------------------------------------------------------
 template <typename InT, typename OutT>
 inline void PrepareMatmulChainBuffers(
@@ -91,7 +81,9 @@ inline void PrepareMatmulChainBuffers(
     aclsparseOrder_t order, aclsparseOperation_t opA, aclsparseOperation_t opB,
     MatmulChainCtx& ctx,
     int64_t& physRowsA, int64_t& physColsA, int64_t& aLd,
-    int64_t& bPhysRows, int64_t& bPhysCols, int64_t& bLd)
+    int64_t& bPhysRows, int64_t& bPhysCols, int64_t& bLd,
+    const sparse_test::MatmulLayoutOpts& opts = sparse_test::MatmulLayoutOpts{},
+    std::vector<InT>* hCPhysOut = nullptr)
 {
     using namespace sparse_test;
     constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize;
@@ -101,41 +93,66 @@ inline void PrepareMatmulChainBuffers(
     ctx.mk = static_cast<size_t>(m) * k;
     const size_t kn = static_cast<size_t>(k) * n;
     const size_t mn = static_cast<size_t>(m) * n;
-    std::vector<InT> hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, order, aLd,
-        ctx.numBatches, ctx.batchStride);
-    std::vector<InT> hB_phys = PreparePhysicalB<InT>(hB, k, n, transB,
-        ctx.numBatches, ctx.batchStride);
     physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
     physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
+    bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
+    bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
+    std::vector<InT> hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, order, aLd,
+        ctx.numBatches, ctx.batchStride);
+    if (opts.ldSparse > 0) {
+        aLd = opts.ldSparse;
+        hA_phys = PackBatchStridedPhysical<InT>(hA_phys,
+            static_cast<int32_t>(physRowsA), static_cast<int32_t>(physColsA),
+            order, aLd, ctx.numBatches, ctx.batchStride);
+    }
+    std::vector<InT> hB_phys = PreparePhysicalB<InT>(hB, k, n, transB,
+        ctx.numBatches, ctx.batchStride);
+    bLd = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
+    if (opts.ldDense > 0 || opts.denseOrder == ACL_SPARSE_ORDER_COL) {
+        bLd = (opts.ldDense > 0) ? opts.ldDense : bPhysRows;  // COL 紧凑 ld=physRows
+        hB_phys = PackBatchStridedPhysical<InT>(hB_phys,
+            static_cast<int32_t>(bPhysRows), static_cast<int32_t>(bPhysCols),
+            opts.denseOrder, bLd, ctx.numBatches, ctx.batchStride);
+    }
     const size_t aPhysSize = (order == ACL_SPARSE_ORDER_COL)
         ? static_cast<size_t>(physColsA) * static_cast<size_t>(aLd)
         : static_cast<size_t>(physRowsA) * static_cast<size_t>(aLd);
-    const size_t bPhysSize = transB ? static_cast<size_t>(n) * k : kn;
+    // B dense 物理 span（denseOrder 感知：COL 布局下元素 (i,j) 位于
+    // i + j*ld，物理缓冲 = physCols*ld；恒 ROW 口径会在 COL 且 k>n 时使
+    // host vector 小于上传长度（越界读 host）、k<n 时截断设备输入）。
+    const size_t bPhysSize = (opts.denseOrder == ACL_SPARSE_ORDER_COL)
+        ? static_cast<size_t>(bPhysCols) * static_cast<size_t>(bLd)
+        : static_cast<size_t>(bPhysRows) * static_cast<size_t>(bLd);
     // Batch: each matrix buffer is num_batches * batch_stride elements (with
     // padding between batches when batch_stride > matrix_size). The host data
     // must be pre-laid-out with this stride.
     const size_t totalAElems = BatchTotalElems(aPhysSize, ctx.numBatches, ctx.batchStride);
     const size_t totalBElems = BatchTotalElems(bPhysSize, ctx.numBatches, ctx.batchStride);
-    const size_t totalCElems = BatchTotalElems(mn, ctx.numBatches, ctx.batchStride);
-    const size_t totalDElems = BatchTotalElems(mn, ctx.numBatches, ctx.batchStride);
+    const size_t cdSpan = CdSpanElems(m, n, opts);
+    const size_t totalCElems = BatchTotalElems(cdSpan, ctx.numBatches, ctx.batchStride);
+    const size_t totalDElems = BatchTotalElems(cdSpan, ctx.numBatches, ctx.batchStride);
     ctx.dA = DeviceBuffer::copyFrom(hA_phys.data(), totalAElems * kInElt);
     ctx.dB = DeviceBuffer::copyFrom(hB_phys.data(), totalBElems * kInElt);
-    ctx.dC = DeviceBuffer::copyFrom(hC.data(), totalCElems * kInElt);
+    // C 按 (cdOrder, ldCd) 物理布局上传（ROW 紧凑快路径原样）；
+    // hCPhysOut 供搜索链 rerun 重复上传同一物理布局。
+    std::vector<InT> hCPhys = PackBatchStridedPhysical<InT>(hC, m, n,
+        opts.cdOrder, CdLdOf(m, n, opts), ctx.numBatches, ctx.batchStride);
+    ctx.dC = DeviceBuffer::copyFrom(hCPhys.data(), totalCElems * kInElt);
     ctx.dD = DeviceBuffer::alloc(totalDElems * kOutElt);
-    bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
-    bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
-    bLd = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
+    if (hCPhysOut != nullptr) { *hCPhysOut = std::move(hCPhys); }
 }
 
 // -----------------------------------------------------------------------------
 // CreateMatmulABDescriptors: create matA/matB descriptors based on path
 // (dense*dense / A-sparse / B-sparse). Extracted from PrepareMatmulChainContext.
+// dense B 侧 order/ld 由 opts 覆盖（denseOrder/ldDense）。
 // -----------------------------------------------------------------------------
 template <typename InT>
 inline void CreateMatmulABDescriptors(
     MatmulChainCtx& ctx, bool isDensePath, bool isSparseA,
     aclsparseOrder_t order, int64_t physRowsA, int64_t physColsA, int64_t aLd,
     int64_t bPhysRows, int64_t bPhysCols, int64_t bLd,
+    const sparse_test::MatmulLayoutOpts& opts,
     aclsparseLtMatDescriptor_t& matADesc, aclsparseLtMatDescriptor_t& matBDesc)
 {
     using namespace sparse_test;
@@ -145,7 +162,9 @@ inline void CreateMatmulABDescriptors(
             ctx.handle.get(), physRowsA, physColsA, aLd, 16, kInDtype, order);
         matADesc = ctx.matADense->get();
         ctx.matBDense = std::make_unique<SparseLtDnMatDescGuard>(
-            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
+            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype,
+            (opts.ldDense > 0 || opts.denseOrder == ACL_SPARSE_ORDER_COL)
+                ? opts.denseOrder : ACL_SPARSE_ORDER_ROW);
         matBDesc = ctx.matBDense->get();
     } else if (isSparseA) {
         ctx.matAStructured = std::make_unique<SparseLtMatDescGuard>(
@@ -153,7 +172,9 @@ inline void CreateMatmulABDescriptors(
             ACL_SPARSE_LT_SPARSITY_50_PERCENT);
         matADesc = ctx.matAStructured->get();
         ctx.matBDense = std::make_unique<SparseLtDnMatDescGuard>(
-            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
+            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype,
+            (opts.ldDense > 0 || opts.denseOrder == ACL_SPARSE_ORDER_COL)
+                ? opts.denseOrder : ACL_SPARSE_ORDER_ROW);
         matBDesc = ctx.matBDense->get();
     } else {
         ctx.matADense = std::make_unique<SparseLtDnMatDescGuard>(
@@ -168,7 +189,9 @@ inline void CreateMatmulABDescriptors(
 
 // -----------------------------------------------------------------------------
 // PrepareMatmulChainContext: compute physical layout + allocate device buffers
-// + create descriptors + matmulDesc. Extracted from RunMatmulChain to reduce NBNC.
+// + create descriptors + matmulDesc.
+// opts 尾参（默认 = 既有紧凑行为）；hCPhysOut 输出 pack 后的 C host 数据
+// （搜索链 rerun 用；nullptr = 调用方不需要）。
 // -----------------------------------------------------------------------------
 template <typename InT, typename OutT>
 inline void PrepareMatmulChainContext(
@@ -176,14 +199,15 @@ inline void PrepareMatmulChainContext(
     const std::vector<InT>& hA, const std::vector<InT>& hB, const std::vector<InT>& hC,
     aclsparseOrder_t order, aclsparseOperation_t opA, aclsparseOperation_t opB,
     bool isSparseA, bool isDensePath, int32_t num_batches, int64_t batch_stride,
-    MatmulNpuResult& result, MatmulChainCtx& ctx)
+    MatmulNpuResult& result, MatmulChainCtx& ctx,
+    const sparse_test::MatmulLayoutOpts& opts = sparse_test::MatmulLayoutOpts{},
+    std::vector<InT>* hCPhysOut = nullptr)
 {
     using namespace sparse_test;
     constexpr aclDataType kInDtype = NpuDtypeTrait<InT>::kAclDtype;
     constexpr aclDataType kOutDtype = NpuDtypeTrait<OutT>::kAclDtype;
     constexpr aclsparseComputeType_t kComputeType = MatmulComputeTrait<InT>::kComputeType;
-    ctx.numBatches = num_batches;
-    ctx.batchStride = batch_stride;
+    InitChainCtxBase(ctx, num_batches, batch_stride, opts, m, n);
     int64_t physRowsA = 0;
     int64_t physColsA = 0;
     int64_t aLd = 0;
@@ -191,13 +215,17 @@ inline void PrepareMatmulChainContext(
     int64_t bPhysCols = 0;
     int64_t bLd = 0;
     PrepareMatmulChainBuffers<InT, OutT>(m, k, n, hA, hB, hC, order, opA, opB,
-        ctx, physRowsA, physColsA, aLd, bPhysRows, bPhysCols, bLd);
+        ctx, physRowsA, physColsA, aLd, bPhysRows, bPhysCols, bLd, opts, hCPhysOut);
     aclsparseLtMatDescriptor_t matADesc = nullptr;
     aclsparseLtMatDescriptor_t matBDesc = nullptr;
     CreateMatmulABDescriptors<InT>(ctx, isDensePath, isSparseA, order,
-        physRowsA, physColsA, aLd, bPhysRows, bPhysCols, bLd, matADesc, matBDesc);
-    ctx.matC = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matD = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kOutDtype, ACL_SPARSE_ORDER_ROW);
+        physRowsA, physColsA, aLd, bPhysRows, bPhysCols, bLd, opts, matADesc, matBDesc);
+    // C/D 描述符接入 (cdOrder, ldCd)（C/D 同 order 同 ld，ValidateCDConsistency）
+    const int64_t cdLd = CdLdOf(m, n, opts);
+    ctx.matC = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, cdLd,
+        16, kInDtype, opts.cdOrder);
+    ctx.matD = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, cdLd,
+        16, kOutDtype, opts.cdOrder);
     // Set batch attributes on all four matrix descriptors BEFORE MatmulDescriptorInit
     // (consistency check requires A/B/C/D numBatches to match).
     SetBatchAttrsOnAllMatDescs(ctx.handle.get(), &matADesc, &matBDesc,
@@ -209,7 +237,6 @@ inline void PrepareMatmulChainContext(
 
 // -----------------------------------------------------------------------------
 // PreparePlanAndWorkspace: create algSel + plan + workspace.
-// Extracted from RunMatmulChain/RunMatmulBSparseChainWithTrans to reduce NBNC.
 // -----------------------------------------------------------------------------
 inline bool PreparePlanAndWorkspace(MatmulNpuResult& result,
     sparse_test::SparseLtHandleGuard& handle,
@@ -245,11 +272,33 @@ inline bool PreparePlanAndWorkspace(MatmulNpuResult& result,
 }
 
 // -----------------------------------------------------------------------------
+// [Prune 回读共享段] 剪枝结果回读 host：npuPrunedA 扩容 + D2H memcpy，
+// 失败时置 pruneRet=EXECUTION_FAILED（ltmatmul RunPruneForASparse 与
+// PruneInt8CDBSparse 共用）。同步检查段保留在各调用方（A-sparse 链
+// 记录 result.syncRet，Int8CD 链内联判断）。
+// -----------------------------------------------------------------------------
+inline bool CopyPrunedToHost(MatmulNpuResult& result,
+    sparse_test::DeviceBuffer& dPruned, size_t totalBytes)
+{
+    result.npuPrunedA.resize(totalBytes);
+    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), totalBytes,
+        dPruned.get(), totalBytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (result.memcpyRet != ACL_SUCCESS) {
+        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
 // RunPruneForASparse: run prune on A-sparse path, update matAPtr + npuPrunedA.
 // When num_batches > 1, prune each batch separately (loop with batch stride
 // offset). The pruned buffer is num_batches * batch_stride * kInElt bytes.
-// Extracted from RunMatmulChain to reduce NBNC.
 // -----------------------------------------------------------------------------
+// prune 单调用化：描述符携带 numBatches/batchStride，一次调用处理全
+// batch（传 batch0 基址）。host 侧切片循环会使末切片基址被算子按 numBatches
+// 二次推进而越界——禁止切片。输出布局（batch-strided）与切片版一致。
+// 回读段（CopyPrunedToHost）与 PruneInt8CDBSparse 共享。
 inline bool RunPruneForASparse(MatmulNpuResult& result,
     aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
     sparse_test::DeviceBuffer& dA, sparse_test::DeviceBuffer& dPruned,
@@ -259,29 +308,15 @@ inline bool RunPruneForASparse(MatmulNpuResult& result,
     aclrtStream stream = 0;
     const size_t totalElems = BatchTotalElems(mk, num_batches, batch_stride);
     dPruned = sparse_test::DeviceBuffer::alloc(totalElems * kInElt);
-    const int32_t nb = (num_batches > 1) ? num_batches : 1;
-    const int64_t bs = (num_batches > 1 && batch_stride > 0) ? batch_stride
-                       : static_cast<int64_t>(mk);
-    for (int32_t b = 0; b < nb; ++b) {
-        const size_t byteOff = static_cast<size_t>(b) * static_cast<size_t>(bs) * kInElt;
-        uint8_t* dInB = static_cast<uint8_t*>(dA.get()) + byteOff;
-        uint8_t* dOutB = static_cast<uint8_t*>(dPruned.get()) + byteOff;
-        result.pruneRet = aclsparseLtSpMMAPrune(
-            handle, &matmulDesc, dInB, dOutB, pruneAlg, stream);
-        if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
-    }
+    result.pruneRet = aclsparseLtSpMMAPrune(
+        handle, &matmulDesc, dA.get(), dPruned.get(), pruneAlg, stream);
+    if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
     result.syncRet = aclrtSynchronizeStream(stream);
     if (result.syncRet != ACL_SUCCESS) {
         result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return false;
     }
-    result.npuPrunedA.resize(totalElems * kInElt);
-    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), totalElems * kInElt,
-        dPruned.get(), totalElems * kInElt, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (result.memcpyRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return false;
-    }
+    if (!CopyPrunedToHost(result, dPruned, totalElems * kInElt)) { return false; }
     matAPtr = dPruned.get();
     return true;
 }
@@ -290,6 +325,7 @@ inline bool RunPruneForASparse(MatmulNpuResult& result,
 // MatmulRunArgs: common parameters for matmul chain functions.
 // Extracted to eliminate duplicate parameter lists between RunMatmulChain,
 // RunMatmulBSparseChainWithTrans, and RunMatmulNpu.
+// layout: ld/order 布局覆盖（默认紧凑，既有用例零变化）。
 // -----------------------------------------------------------------------------
 template <typename InT, typename OutT>
 struct MatmulRunArgs {
@@ -321,6 +357,8 @@ struct MatmulRunArgs {
     // INT8 → FP32 per cuSPARSELt). Set by RunMatmulNpu from BiasDtypeTrait<InT>.
     size_t biasEltSize = sizeof(float);
     aclDataType biasDtype = ACL_FLOAT;
+    // ld/order 布局覆盖（ldSparse/ldDense/denseOrder/cdOrder/ldCd）
+    sparse_test::MatmulLayoutOpts layout;
 };
 
 // -----------------------------------------------------------------------------
@@ -381,10 +419,10 @@ inline MatmulNpuResult RunMatmulChain(
                                          args.order, args.opA, args.opB,
                                          isSparseA, isDensePath,
                                          args.numBatches, args.batchStride,
-                                         result, ctx);
+                                         result, ctx, args.layout);
     ChainSetupResult setup;
     if (!SetupVecEpiPlanWorkspace<InT, OutT>(ctx.handle, *ctx.matmulDesc, args, args.m,
-                                               result, setup)) { return result; }
+                                                result, setup)) { return result; }
     DeviceBuffer dPruned;
     void* matAPtr = ctx.dA.get();
     if (!isDensePath && isSparseA) {
@@ -392,7 +430,8 @@ inline MatmulNpuResult RunMatmulChain(
                 ctx.dA, dPruned, ctx.mk, kInElt, args.pruneAlg, matAPtr,
                 args.numBatches, args.batchStride)) { return result; }
     }
-    const size_t totalOutElems = BatchTotalElems(mn, ctx.numBatches, ctx.batchStride);
+    // 回读尺寸 = C/D 物理 span（batch 布局含 stride padding；紧凑时 == mn*nb）
+    const size_t totalOutElems = BatchTotalElems(ctx.cdSpan, ctx.numBatches, ctx.batchStride);
     ExecMatmulAndCopyResult<OutT>(result, ctx.handle.get(), setup.plan->cptr(),
         matAPtr, ctx.dB.get(), ctx.dC.get(), ctx.dD.get(), setup.wsPtr, setup.vecBufs, args.alpha, args.beta,
         args.alpha_vector_scaling, args.beta_vector_scaling, ctx.dD, args.hD, totalOutElems, kOutElt);
@@ -400,148 +439,15 @@ inline MatmulNpuResult RunMatmulChain(
 }
 
 // -----------------------------------------------------------------------------
-// PrepareBSparseChainContext: compute physical layout + allocate device buffers
-// + create B-sparse descriptors. Extracted from RunMatmulBSparseChainWithTrans.
+// B-sparse 链族 + 物理布局计算段（MatmulBSparseCtx / BSparsePhysicalLayout /
+// Compute{A,B}SparsePhysicalLayout / AllocBSparseChainBuffers /
+// PrepareBSparseChainContext / RunBSparsePruneAndTranspose /
+// RunMatmulBSparseChainWithTrans）位于 ltmatmul_npu_chain_bsparse.h，
+// 此处尾部 include 转发——本头的全部既有 include 点
+// （ltmatmul_npu_wrapper.h / matmulSearch_npu_wrapper.h 等）对
+// B-sparse 族符号零改动可见。
 // -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline void PrepareBSparseChainContext(
-    int32_t m, int32_t k, int32_t n,
-    const std::vector<InT>& hA, const std::vector<InT>& hB, const std::vector<InT>& hC,
-    aclsparseOrder_t order, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    int32_t num_batches, int64_t batch_stride, MatmulNpuResult& result,
-    MatmulBSparseCtx& ctx)
-{
-    using namespace sparse_test;
-    constexpr aclDataType kInDtype = NpuDtypeTrait<InT>::kAclDtype;
-    constexpr aclDataType kOutDtype = NpuDtypeTrait<OutT>::kAclDtype;
-    constexpr aclsparseComputeType_t kComputeType = MatmulComputeTrait<InT>::kComputeType;
-    constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize;
-    constexpr size_t kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    ctx.numBatches = num_batches;
-    ctx.batchStride = batch_stride;
-    const bool transA = (opA == ACL_SPARSE_OP_TRANSPOSE);
-    const bool transB = (opB == ACL_SPARSE_OP_TRANSPOSE);
-    const size_t mn = static_cast<size_t>(m) * n;
-    ctx.kn = static_cast<size_t>(k) * n;
-    int64_t aLd = 0;
-    int64_t bLdOut = 0;
-    std::vector<InT> hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, ACL_SPARSE_ORDER_ROW, aLd,
-        num_batches, batch_stride);
-    std::vector<InT> hB_phys = PreparePhysicalA<InT>(hB, k, n, transB, order, bLdOut,
-        num_batches, batch_stride);
-    const int64_t physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
-    const int64_t physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
-    const size_t aPhysSize = static_cast<size_t>(physRowsA) * static_cast<size_t>(aLd);
-    const size_t bPhysSize = static_cast<size_t>(ctx.kn);
-    // Batch: each matrix buffer is num_batches * batch_stride elements.
-    const size_t totalAElems = BatchTotalElems(aPhysSize, num_batches, batch_stride);
-    const size_t totalBElems = BatchTotalElems(bPhysSize, num_batches, batch_stride);
-    const size_t totalCElems = BatchTotalElems(mn, num_batches, batch_stride);
-    const size_t totalDElems = BatchTotalElems(mn, num_batches, batch_stride);
-    ctx.dA = DeviceBuffer::copyFrom(hA_phys.data(), totalAElems * kInElt);
-    ctx.dB = DeviceBuffer::copyFrom(hB_phys.data(), totalBElems * kInElt);
-    ctx.dC = DeviceBuffer::copyFrom(hC.data(), totalCElems * kInElt);
-    ctx.dD = DeviceBuffer::alloc(totalDElems * kOutElt);
-    const int64_t bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
-    const int64_t bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
-    ctx.matA = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), physRowsA, physColsA, aLd, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matB = std::make_unique<SparseLtMatDescGuard>(ctx.handle.get(), bPhysRows, bPhysCols, bLdOut, 16, kInDtype,
-                                order, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
-    ctx.matC = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matD = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kOutDtype, ACL_SPARSE_ORDER_ROW);
-    // Set batch attributes on all four matrix descriptors BEFORE MatmulDescriptorInit.
-    SetBatchAttrsOnAllMatDescs(ctx.handle.get(), &ctx.matA->get(), &ctx.matB->get(),
-        &ctx.matC->get(), &ctx.matD->get(),
-        num_batches, batch_stride, result);
-    ctx.matmulDesc = std::make_unique<SparseLtMatmulDescGuard>(ctx.handle.get(), opA, opB,
-        ctx.matA->get(), ctx.matB->get(), ctx.matC->get(), ctx.matD->get(), kComputeType);
-}
+#include "ltmatmul_npu_chain_bsparse.h"
 
-// -----------------------------------------------------------------------------
-// RunBSparsePruneAndTranspose: prune B for B-sparse path.
-// Extracted from RunMatmulBSparseChainWithTrans to reduce NBNC.
-//
-// Key insight (verified via prune_kernel.cpp SpltPruneTransRowOrder path):
-// The pruned B from aclsparseLtSpMMAPrune is ALWAYS in (k,n) row layout,
-// regardless of transB. For transB=T, the prune kernel reads the physical
-// (n,k) layout and transposes internally, outputting (k,n). For transB=F,
-// the physical B is already (k,n) and prune keeps it. The matmul internally
-// forces td.transB=0 for B-sparse and reads B as NDExt(k,n), so no host-side
-// transpose is needed — the pruned B is used directly by both matmul and golden.
-// -----------------------------------------------------------------------------
-template <typename InT>
-inline void RunBSparsePruneAndTranspose(MatmulNpuResult& result,
-    aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
-    sparse_test::DeviceBuffer& dB, sparse_test::DeviceBuffer& dBPruned,
-    size_t kn, size_t kInElt,
-    aclsparseLtPruneAlg_t pruneAlg, void*& matBPtr,
-    int32_t numBatches = 1, int64_t batchStride = 0)
-{
-    using namespace sparse_test;
-    aclrtStream stream = 0;
-    const size_t totalElems = BatchTotalElems(kn, numBatches, batchStride);
-    dBPruned = DeviceBuffer::alloc(totalElems * kInElt);
-    const int32_t nb = (numBatches > 1) ? numBatches : 1;
-    const int64_t bs = (numBatches > 1 && batchStride > 0) ? batchStride
-                       : static_cast<int64_t>(kn);
-    for (int32_t b = 0; b < nb; ++b) {
-        const size_t byteOff = static_cast<size_t>(b) * static_cast<size_t>(bs) * kInElt;
-        uint8_t* dInB = static_cast<uint8_t*>(dB.get()) + byteOff;
-        uint8_t* dOutB = static_cast<uint8_t*>(dBPruned.get()) + byteOff;
-        result.pruneRet = aclsparseLtSpMMAPrune(
-            handle, &matmulDesc, dInB, dOutB, pruneAlg, stream);
-        if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return; }
-    }
-    result.syncRet = aclrtSynchronizeStream(stream);
-    if (result.syncRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return;
-    }
-    // Pruned B is already in (k,n) row layout — used directly by matmul (which
-    // forces td.transB=0 for B-sparse) and by golden (which expects B[k][n]).
-    matBPtr = dBPruned.get();
-    // Copy pruned B back to host for golden use (already in k×n layout).
-    result.npuPrunedA.resize(totalElems * kInElt);
-    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), totalElems * kInElt,
-        dBPruned.get(), totalElems * kInElt, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (result.memcpyRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return;
-    }
-}
-
-// -----------------------------------------------------------------------------
-// B-sparse chain with transB support (proper buffer lifetime management).
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline MatmulNpuResult RunMatmulBSparseChainWithTrans(
-    const MatmulRunArgs<InT, OutT>& args)
-{
-    using namespace sparse_test;
-    MatmulNpuResult result{};
-    constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize;
-    constexpr size_t kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    const size_t mn = static_cast<size_t>(args.m) * args.n;
-    MatmulBSparseCtx ctx;
-    PrepareBSparseChainContext<InT, OutT>(args.m, args.k, args.n,
-                                          args.hA, args.hB, args.hC,
-                                          args.order, args.opA, args.opB,
-                                          args.numBatches, args.batchStride,
-                                          result, ctx);
-    ChainSetupResult setup;
-    if (!SetupVecEpiPlanWorkspace<InT, OutT>(ctx.handle, *ctx.matmulDesc, args, args.m,
-                                               result, setup)) { return result; }
-    void* matBPtr = nullptr;
-    DeviceBuffer dBPruned;
-    RunBSparsePruneAndTranspose<InT>(result, ctx.handle.get(), ctx.matmulDesc->get(),
-        ctx.dB, dBPruned, ctx.kn, kInElt, args.pruneAlg, matBPtr,
-        args.numBatches, args.batchStride);
-    if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
-    const size_t totalOutElems = BatchTotalElems(mn, ctx.numBatches, ctx.batchStride);
-    ExecMatmulAndCopyResult<OutT>(result, ctx.handle.get(), setup.plan->cptr(),
-        ctx.dA.get(), matBPtr, ctx.dC.get(), ctx.dD.get(), setup.wsPtr, setup.vecBufs, args.alpha, args.beta,
-        args.alpha_vector_scaling, args.beta_vector_scaling, ctx.dD, args.hD, totalOutElems, kOutElt);
-    return result;
-}
 
 #endif  // TEST_LTMATMUL_NPU_CHAIN_H_

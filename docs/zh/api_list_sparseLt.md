@@ -36,7 +36,7 @@
 | [aclsparseLtMatmulPlanDestroy](#aclsparseltmatmulplandestroy) | 销毁 matmul 执行计划 |
 | [aclsparseLtMatmulGetWorkspace](#aclsparseltmatmulgetworkspace) | 获取 matmul 所需 workspace 大小 |
 | [aclsparseLtMatmul](#aclsparseltmatmul) | 执行结构化稀疏矩阵乘法 |
-| [aclsparseLtMatmulSearch](#aclsparseltmatmulsearch) | 搜索最优 matmul 算法（**暂未支持**） |
+| [aclsparseLtMatmulSearch](#aclsparseltmatmulsearch) | 搜索最优 matmul 算法并回写 plan（auto-tuning） |
 | [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
 | [aclsparseLtSpMMAPruneCheck](#aclsparseltspmmaprunecheck) | 校验稠密矩阵是否已满足 2:4 结构化稀疏约束 |
 | [aclsparseLtSpMMACompressedSize](#aclsparseltspmmacompressedsize) | 查询压缩后矩阵及临时空间所需存储大小（Ascend950） |
@@ -400,7 +400,7 @@ aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
     size_t dataSize);
 ```
 
-**功能**：设置 matmul 描述符的指定属性，用于配置 epilogue 链的向量缩放（alpha/beta）、bias 与 activation。须在 `aclsparseLtMatmulPlanInit` 之前设置——PlanInit 读取属性计算 tiling，之后修改不会生效（需重新初始化计划）。设置 `BETA_VECTOR_SCALING` 为非 0 时隐含启用 `ALPHA_VECTOR_SCALING`（cuSPARSELt 语义）。
+**功能**：设置 matmul 描述符的指定属性，用于配置 epilogue 链的向量缩放（alpha/beta）、bias 与 activation。上述属性在执行期（`aclsparseLtMatmul` / `aclsparseLtMatmulSearch` 每次执行时）从描述符读取，`aclsparseLtMatmulPlanInit` 之后修改对后续执行生效（宽容时序，无需重新初始化计划）。设置 `BETA_VECTOR_SCALING` 为非 0 时隐含启用 `ALPHA_VECTOR_SCALING`（cuSPARSELt 语义）。
 
 **参数说明**：
 
@@ -523,7 +523,7 @@ aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
     size_t attrValueSize);
 ```
 
-**功能**：设置算法选择描述符的指定属性（如算法配置 ID、splitK 切分因子、搜索迭代次数、Split-K 模式等）。须在 PlanInit 之前调用。ALG_CONFIG_MAX_ID 为只读属性，不可设置。
+**功能**：设置算法选择描述符的指定属性（如算法配置 ID、splitK 切分因子、搜索迭代次数、Split-K 模式等）。三元组属性（algConfigId / splitK / splitKMode）须在 PlanInit 之前调用（PlanInit 读取它们计算 tiling）；`ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` 为搜索入口活读属性，PlanInit 之后设置对随后的 Search 仍生效。ALG_CONFIG_MAX_ID 为只读属性，不可设置。
 
 **参数说明**：
 
@@ -692,47 +692,55 @@ aclsparseStatus_t aclsparseLtMatmul(
 
 ### aclsparseLtMatmulSearch
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmulSearch(
     aclsparseLtConstHandle_t handle,
     aclsparseLtMatmulPlan_t* plan,
     const void* alpha,
-    const void* d_A,
-    const void* d_B,
+    const void* matA,
+    const void* matB,
     const void* beta,
-    const void* d_C,
-    void* d_D,
+    const void* matC,
+    void* matD,
     void* workspace,
     aclrtStream* streams,
     int32_t numStreams);
 ```
 
-**功能**：对 `plan` 描述的 matmul 评估所有可用算法，自动选择最快的算法并更新关联的算法选择描述符，用于同一运算多次执行时的自动调优。语义类似 `aclsparseLtMatmul`，但本接口为阻塞调用，且 in-place（`d_C == d_D`）时 `d_D` 结果可能累积。
+**功能**：搜索 matmul 最优算法配置并回写 plan（auto-tuning）。评估 plan 描述的 matmul 的可用算法候选（algConfigId × splitKMode × splitK），每个候选在 streams[0] 上按 aclsparseLtMatmul 相同语义计时执行 searchIterations 次（默认 5，经 `aclsparseLtMatmulAlgSetAttribute` + `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` 设置）取最小耗时，自动选择最快的配置并回写 plan 绑定的 algSelection 属性（可经 `aclsparseLtMatmulAlgGetAttribute` 查询）与 plan 内 tilingData / workspaceSize（按选中配置重算）。面向同一 matmul 重复执行多次的自动调优场景；数值计算由既有 aclsparseLtMatmul kernel 承载，数据类型支持与 aclsparseLtMatmul 相同（FP32/FP16/BF16/INT8）。
+
+行为声明：
+
+- **阻塞语义**：本接口相对 streams[0] 为阻塞调用（返回前完成流同步），区别于 aclsparseLtMatmul 的异步语义；返回后可直接回读 matD。
+- **matD 终态**：搜索过程被反复写入；搜索结束后以选中配置无条件再执行一次（不计时），返回时内容为选中配置的完整输出；in-place（matC == matD）时 matD 值随执行次数累积，不可预测。
+- **候选失败**：个别候选执行失败视为不可用候选跳过（日志留痕，不影响搜索返回），在可用候选中选优；全部候选执行失败时返回 EXECUTION_FAILED，此时 plan 与 algSelection 恢复进入搜索前的状态，可继续用原配置执行 Matmul。
+- **搜索后 workspace**：方案 A（候选裁剪）保证选中配置的 workspace 需求不超过进入搜索时的 workspaceSize，已分配 workspace 必然够用，不会出现要求更大分配的情况；选中配置的需求可能更小（plan->workspaceSize 随之变小），建议重新调用 `aclsparseLtMatmulGetWorkspace` 校验实际值。想搜索更大 splitK 的候选，须先经 `aclsparseLtMatmulAlgSetAttribute` 设大 splitK 并将 splitKMode 设为 `ACLSPARSELT_SPLIT_K_MODE_TWO_KERNELS`，再重新 PlanInit 并按新 workspaceSize 分配（详见 [matmul_search README](../../sparseLt/matmul_search/README.md)）。三元组属性（algConfigId / splitK / splitKMode）须在 PlanInit 之前设置；`ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` 为搜索入口活读属性，PlanInit 之后设置对随后的 Search 仍生效。
+- **非紧凑布局直通**：dense 侧非紧凑布局（ld 大于物理维度）时，候选直接以调用方原始指针与布局执行（cube GM 搬运按 ld 行距直通跳过行尾 padding，无入口拷贝或预处理步骤）；候选计时与终态执行均按该语义进行。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
-- `plan`（IN/OUT）：HOST，matmul 执行计划；搜索完成后内部更新关联的算法选择描述符。
-- `alpha`（IN）：HOST，标量 α（`float` 类型指针）。
-- `d_A`（IN）：DEVICE，矩阵 A 的指针（结构化稀疏或稠密）。
-- `d_B`（IN）：DEVICE，矩阵 B 的指针（结构化稀疏或稠密）。
-- `beta`（IN）：HOST，标量 β（`float` 类型指针）。
-- `d_C`（IN）：DEVICE，稠密矩阵 C 的指针。
-- `d_D`（OUT）：DEVICE，稠密矩阵 D 的输出指针。
-- `workspace`（IN）：DEVICE，workspace 指针。
-- `streams`（IN）：HOST，指向 ACL stream 数组的指针。
-- `numStreams`（IN）：HOST，`streams` 数组中的 stream 数量。
+- `plan`（IN/OUT）：HOST，matmul 执行计划（非 const，区别于 aclsparseLtMatmul 的只读 plan）；搜索更新 plan 绑定的 algSelection 属性（algConfigId / splitKMode / splitK ← 最优值）及 plan 内 tilingData / workspaceSize（按最优配置重算）。
+- `alpha`（IN）：HOST/DEVICE，标量 α（`float` 类型指针，nullptr 按 1.0 处理）；向量缩放（启用 `ALPHA_VECTOR_SCALING`）时为 DEVICE float[M] 指针，不可为 nullptr。计时执行按 aclsparseLtMatmul 相同语义透传。
+- `matA`（IN）：DEVICE，矩阵 A 的指针（结构化稀疏侧为剪枝后矩阵），须 16 字节对齐。可为 nullptr（回退到 workspace 的 A_pruned 区域，须已由 SpMMAPrune 填充，仅限 numBatches=1；numBatches>1 时须先显式调用 SpMMAPrune 产出 A_pruned 再传入；dense×dense 与 B-sparse 路径须显式传入）。
+- `matB`（IN）：DEVICE，矩阵 B 的指针，须 16 字节对齐，不可为 nullptr。
+- `beta`（IN）：HOST/DEVICE，标量 β（`float` 类型指针，nullptr 按 0.0 处理）；向量缩放（启用 `BETA_VECTOR_SCALING`）时为 DEVICE float[M] 指针，不可为 nullptr；启用 `ALPHA_VECTOR_SCALING` 且未启用 `BETA_VECTOR_SCALING` 时可为 nullptr（按 0.0 处理）。
+- `matC`（IN）：DEVICE，稠密矩阵 C 的指针（累加项），须 16 字节对齐，不可为 nullptr。按 matC 描述符 (order, ld) 布局访问（支持列主序与 ld padding，语义同 aclsparseLtMatmul）。支持 in-place（matC == matD，此时 matD 值在搜索中累积）。
+- `matD`（OUT）：DEVICE，稠密矩阵 D 的输出指针，须 16 字节对齐，不可为 nullptr。按 matD 描述符 (order, ld) 布局写出。搜索过程被反复写入；返回时内容为选中配置的完整输出。
+- `workspace`（IN）：DEVICE，workspace 指针（进入搜索前按当前配置 `aclsparseLtMatmulGetWorkspace` 查询并分配），须 16 字节对齐，不可为 nullptr。纳入评估的候选 workspace 需求均不超过进入时的 workspaceSize，无越界风险。
+- `streams`（IN）：HOST，指向 ACL stream 数组的指针；streams[0] 可为 nullptr（默认流）。当前仅使用 streams[0]（多流不支持）。
+- `numStreams`（IN）：HOST，`streams` 数组中的 stream 数量（须 > 0；> 1 时不报错，仅使用 streams[0]）。
 
 **返回值**：
 
-- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_SUCCESS`：搜索完成，最优配置已写入 plan/algSelection
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：plan 为空、矩阵指针为空
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：不支持的数据类型组合或操作
-- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：kernel 执行失败
-- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：资源不足
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：plan/streams 为空、numStreams <= 0、matB/matC/matD 为空、数据指针未 16 字节对齐、matA 为空且不满足 A-sparse 回退条件、searchIterations <= 0、启用向量缩放时 alpha/beta 为 nullptr（以上均为搜索入口一次性校验；缩放向量的 32 字节对齐与 device 内存判定经候选执行链沿用 `aclsparseLtMatmul` 执行期校验）
+- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：workspace 为空
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：不支持的数据类型（仅支持 FP32/FP16/BF16/INT8）
+- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：全部候选执行失败、选中配置的最终回写执行失败，或 aclrt 计时/同步调用失败（失败时 plan/algSelection 恢复进入搜索前状态）
+
+完整调用链、约束说明与调用示例见 [matmul_search README](../../sparseLt/matmul_search/README.md)。
 
 ---
 
@@ -1129,12 +1137,12 @@ aclsparseLt 矩阵乘法的工作流分为初始化、描述符构建、计划�
 1. 调用 `aclsparseLtInit` 创建库上下文。
 2. 对稀疏侧矩阵（A 或 B）调用 `aclsparseLtStructuredDescriptorInit` 创建结构化描述符，对稠密侧矩阵调用 `aclsparseLtDenseDescriptorInit` 创建稠密描述符。如需 batch 批量计算，通过 `aclsparseLtMatDescSetAttribute` 设置 `NUM_BATCHES` / `BATCH_STRIDE`（须在步骤 3 之前）。
 3. 调用 `aclsparseLtMatmulDescriptorInit` 构建 Matmul 描述符，传入 opA/opB、四个矩阵描述符（matA/matB/matC/matD）与 computeType（Init 时校验 A/B/C/D 四个矩阵 numBatches 一致性）。
-4. （可选）通过 `aclsparseLtMatmulDescSetAttribute` 设置 bias（`BIAS_POINTER` / `BIAS_STRIDE`）、activation（`ACTIVATION_RELU` / `RELU_UPPERBOUND` / `RELU_THRESHOLD` / `ACTIVATION_GELU` / `GELU_SCALING`）、向量缩放（`ALPHA_VECTOR_SCALING` / `BETA_VECTOR_SCALING`）。须在 PlanInit 之前设置。
+4. （可选）通过 `aclsparseLtMatmulDescSetAttribute` 设置 bias（`BIAS_POINTER` / `BIAS_STRIDE`）、activation（`ACTIVATION_RELU` / `RELU_UPPERBOUND` / `RELU_THRESHOLD` / `ACTIVATION_GELU` / `GELU_SCALING`）、向量缩放（`ALPHA_VECTOR_SCALING` / `BETA_VECTOR_SCALING`）。上述描述符属性在执行期读取，PlanInit 之后修改对后续执行生效。
 5. （可选）调用 `aclsparseLtSpMMAPrune` 对稠密矩阵执行 2:4 剪枝，生成稀疏侧输入。自行实现剪枝的输入（未经 `aclsparseLtSpMMAPrune` 产出）可调用 `aclsparseLtSpMMAPruneCheck` 校验是否满足 2:4 约束（`aclsparseLtSpMMAPrune` 的产出保证通过该检查，无需重复校验）。
 6. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
 7. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划（读取上述全部属性计算 tiling）。
 8. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
-9. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法（`aclsparseLtMatmulSearch` 暂未支持）。bias 与 activation 已通过描述符属性配置，执行接口不额外传参。
+9. （可选，auto-tuning）调用 `aclsparseLtMatmulSearch` 搜索最优算法配置（阻塞调用；搜索后建议重新调用 `aclsparseLtMatmulGetWorkspace` 校验），之后以选中配置多次调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法。bias 与 activation 已通过描述符属性配置，执行接口不额外传参。
 10. 按依赖逆序销毁执行计划、算法选择描述符、Matmul 描述符、矩阵描述符，最后调用 `aclsparseLtDestroy` 释放库句柄。
 
 压缩需先创建 Plan，具体步骤见[压缩调用说明](../../sparseLt/spmma_compress/README.md#调用说明)。压缩结果尚不支持作为现有 Matmul 或 MatmulSearch 的输入。
@@ -1178,7 +1186,7 @@ int aclsparseLtExample()
         ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
         &matA, &matB, &matC, &matD, ACL_SPARSE_COMPUTE_32F);
 
-    // 3.1（可选）配置 bias + ReLU activation（须在 PlanInit 之前设置）
+    // 3.1（可选）配置 bias + ReLU activation（执行期读取，PlanInit 前后设置均生效）
     //     bias：长度 = m 的逐行广播向量（dtype 与 C 相同，INT8 路径为 FP32），Device 内存
     //     activation：ReLU（threshold=0.0f、upperBound=FLT_MAX 退化为标准 ReLU）
     void *dBias = nullptr;

@@ -98,7 +98,7 @@ typedef enum aclsparseLtMatmulAlgAttribute_t {
     ACLSPARSELT_MATMUL_SEARCH_ITERATIONS = 1,    // search iterations
     ACLSPARSELT_MATMUL_SPLIT_K = 2,              // split-k factor [1, K]
     ACLSPARSELT_MATMUL_SPLIT_K_MODE = 3,         // split-k mode
-    // [OPT-P3] Aligned with cuSPARSELt: additional alg attributes.
+    // Aligned with cuSPARSELt: additional alg attributes.
     ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID = 4,   // read-only: returns max algConfigId+1
     ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS = 5,     // accepted, stored; TWO_KERNELS uses max (splitK-1)
 } aclsparseLtMatmulAlgAttribute_t;
@@ -109,7 +109,6 @@ typedef enum aclsparseLtMatmulAlgAttribute_t {
  * is a device pointer to a float array of length M (per-row scaling).
  * BETA_VECTOR_SCALING implies ALPHA_VECTOR_SCALING (setting beta vector
  * auto-enables alpha vector).
- *
  * Bias + activation attributes (values 2~8) extend the epilogue chain:
  *   D = alpha * A * B + beta * C + bias, then apply activation (ReLU/GeLU).
  * ReLU and GeLU are mutually exclusive; enabling one while the other is
@@ -148,11 +147,9 @@ extern "C" {
 
 /**
  * @brief 初始化 aclsparseLt 库句柄。
- *
  * 在主机端分配轻量级硬件资源，创建 aclsparseLt 库上下文。
  * 必须在调用任何其他 aclsparseLt 函数之前调用。
  * 库上下文绑定到当前 NPU 设备，多设备使用需为每个设备创建独立 handle。
- *
  * @param handle OUT, HOST, aclsparseLt 库句柄输出参数。调用前 *handle 必须为 nullptr。
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 指针为空
@@ -163,9 +160,7 @@ aclsparseStatus_t aclsparseLtInit(aclsparseLtHandle_t* handle);
 
 /**
  * @brief 释放 aclsparseLt 库句柄占用的全部资源。
- *
  * 与特定 handle 关联的最后一次调用。调用后该 handle 不可再使用。
- *
  * @param handle IN, HOST, 指向要销毁的 aclsparseLt 库句柄的指针。
  *               若 handle 指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
  *               若 handle 指向的句柄值为 nullptr 则视为空操作，返回 SUCCESS。
@@ -176,7 +171,6 @@ aclsparseStatus_t aclsparseLtDestroy(const aclsparseLtHandle_t* handle);
 
 /**
  * @brief 返回状态码对应的枚举名字符串。
- *
  * @param status IN, HOST, 要转换的状态码。
  * @return const char* 指向枚举名字符串的指针（如 "ACL_SPARSE_STATUS_SUCCESS"）。
  *         未识别的状态码返回 "unrecognized error code"。
@@ -185,7 +179,6 @@ const char* aclsparseLtGetErrorName(aclsparseStatus_t status);
 
 /**
  * @brief 返回状态码对应的描述性字符串。
- *
  * @param status IN, HOST, 要转换的状态码。
  * @return const char* 指向描述性字符串的指针。
  *         未识别的状态码返回 "unrecognized error code"。
@@ -196,9 +189,7 @@ const char* aclsparseLtGetErrorString(aclsparseStatus_t status);
 
 /**
  * @brief 初始化稠密矩阵描述符。
- *
  * 在主机端分配并填充矩阵描述符结构体，记录稠密矩阵的形状、布局、数据类型等元信息。
- *
  * @param handle     IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
  * @param matDescr   OUT, HOST, 矩阵描述符输出。调用前 *matDescr 须为 nullptr。
  * @param rows       IN,  HOST, 行数（须 > 0 且为对应 valueType 对齐倍数的整数倍）。
@@ -226,10 +217,8 @@ aclsparseStatus_t aclsparseLtDenseDescriptorInit(
 
 /**
  * @brief 初始化结构化稀疏矩阵描述符（2:4 结构化稀疏）。
- *
  * 与 aclsparseLtDenseDescriptorInit 类似，但描述符标记为 structured，
  * 对齐倍数采用 structured 档位，并记录稀疏模式。
- *
  * @param handle     IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
  * @param matDescr   OUT, HOST, 矩阵描述符输出。调用前 *matDescr 须为 nullptr。
  * @param rows       IN,  HOST, 行数（须 > 0 且为 structured 档位对齐倍数的整数倍）。
@@ -259,7 +248,6 @@ aclsparseStatus_t aclsparseLtStructuredDescriptorInit(
 
 /**
  * @brief 销毁矩阵描述符，释放其占用的主机内存。
- *
  * @param matDescr INOUT, HOST, 指向要销毁的矩阵描述符的指针。
  *                 若指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
  *                 若 *matDescr 为 nullptr 则视为空操作，返回 SUCCESS。
@@ -271,12 +259,10 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(aclsparseLtMatDescriptor_t* ma
 
 /**
  * @brief 设置矩阵描述符属性（对齐 cuSPARSELt cusparseLtMatDescSetAttribute）。
- *
  * 设置 batch 相关属性：NUM_BATCHES（batch 数量，默认 1）、BATCH_STRIDE
  * （batch 间步长，元素数为单位）。需在 PlanInit 之前调用。
  * 一致性校验：同一 matmul descriptor 中的 A/B/C/D 四个矩阵的 numBatches
  * 须一致，否则返回 ACL_SPARSE_STATUS_INVALID_VALUE。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param matDescr INOUT, HOST, 矩阵描述符。
  * @param matAttribute IN, HOST, 要设置的属性枚举。
@@ -297,9 +283,7 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
 
 /**
  * @brief 查询矩阵描述符属性当前值（对齐 cuSPARSELt cusparseLtMatDescGetAttribute）。
- *
  * 查询 NUM_BATCHES / BATCH_STRIDE 的当前值。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param matDescr IN, HOST, 矩阵描述符（const 只读）。
  * @param matAttribute IN, HOST, 要查询的属性枚举。
@@ -321,17 +305,14 @@ aclsparseStatus_t aclsparseLtMatDescGetAttribute(
 
 /**
  * @brief 初始化矩阵乘法描述符。
- *
  * 在主机端分配并填充 matmul 描述符结构体，记录 matmul 运算的完整元信息：
  * 操作类型（opA/opB）、四个矩阵描述符引用（matA/matB/matC/matD）、计算精度。
  * matA/matB/matC/matD 为非所有权引用，Destroy 时不会销毁它们，用户须自行释放。
- *
  * 约束：
  * - matA 与 matB 中有且仅有一个为 structured 描述符。
  * - matC 与 matD 须具有相同的 ld 和 order。
  * - INT8/FP8/FP4 类型下（以 matA.valueType 为准），opA/opB 须满足与 orderA/orderB 的组合约束。
  * - matC/matD 的 rows、cols 均 <= 2097120。
- *
  * @param handle       IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
  * @param matmulDescr  OUT, HOST, matmul 描述符输出。调用前 *matmulDescr 须为 nullptr。
  * @param opA          IN,  HOST, 作用于矩阵 A 的操作（NON_TRANSPOSE / TRANSPOSE）。
@@ -361,10 +342,8 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
 
 /**
  * @brief 销毁 matmul 描述符，释放其占用的主机内存。
- *
  * 注意：本接口不销毁 matA/matB/matC/matD 描述符（非所有权引用），
  * 用户须自行调用 aclsparseLtMatDescriptorDestroy 释放它们。
- *
  * @param matmulDescr INOUT, HOST, 指向要销毁的 matmul 描述符的指针。
  *                   若指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
  *                   若 *matmulDescr 为 nullptr 则视为空操作，返回 SUCCESS。
@@ -378,10 +357,8 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorDestroy(aclsparseLtMatmulDescriptor
 
 /**
  * @brief 初始化 matmul 算法选择描述符。
- *
  * 在主机端分配并填充算法选择描述符结构体，记录算法模式及其关联的 matmul 描述符引用。
  * matmulDescr 为非所有权引用，Destroy 时不会销毁它，用户须自行释放。
- *
  * @param handle        IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
  * @param algSelection  OUT, HOST, 算法选择描述符输出。调用前 *algSelection 须为 nullptr。
  * @param matmulDescr   IN,  HOST, matmul 描述符引用，不可为 nullptr 且须已初始化（*matmulDescr 非 nullptr）。
@@ -399,9 +376,7 @@ aclsparseStatus_t aclsparseLtMatmulAlgSelectionInit(
 
 /**
  * @brief 销毁 matmul 算法选择描述符，释放其占用的主机内存。
- *
  * 注意：本接口不销毁 matmulDescr（非所有权引用），用户须自行调用 aclsparseLtMatmulDescriptorDestroy 释放。
- *
  * @param algSelection INOUT, HOST, 指向要销毁的算法选择描述符的指针。
  *                     若指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
  *                     若 *algSelection 为 nullptr 则视为空操作，返回 SUCCESS。
@@ -413,10 +388,8 @@ aclsparseStatus_t aclsparseLtMatmulAlgSelectionDestroy(aclsparseLtMatmulAlgSelec
 
 /**
  * @brief 初始化 matmul 执行计划。
- *
  * 在主机端分配并填充 plan 结构体，绑定 matmul 描述符与算法选择描述符，作为后续 matmul 执行的规划对象。
  * matmulDescr 与 algSelection 均为非所有权引用，Destroy 时不会销毁它们，用户须自行释放。
- *
  * @param handle        IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
  * @param plan          OUT, HOST, 执行计划输出。调用前 *plan 须为 nullptr。
  * @param matmulDescr   IN,  HOST, matmul 描述符引用，不可为 nullptr 且须已初始化（*matmulDescr 非 nullptr）。
@@ -434,10 +407,8 @@ aclsparseStatus_t aclsparseLtMatmulPlanInit(
 
 /**
  * @brief 销毁 matmul 执行计划，释放其占用的主机内存。
- *
  * 注意：本接口不销毁 matmulDescr 和 algSelection（非所有权引用），用户须自行调用对应 Destroy 释放。
  * 生命周期约束：plan 须在 algSelection 与 matmul 描述符之前销毁。
- *
  * @param plan INOUT, HOST, 指向要销毁的执行计划的指针。
  *             若指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
  *             若 *plan 为 nullptr 则视为空操作，返回 SUCCESS。
@@ -452,10 +423,8 @@ aclsparseStatus_t aclsparseLtMatmulPlanDestroy(aclsparseLtMatmulPlan_t* plan);
 
 /**
  * @brief 对稠密矩阵执行 2:4 结构化稀疏剪枝（对齐 cuSPARSELt cusparseLtSpMMAPrune）。
- *
  * 直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA
  * 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。
- *
  * @param handle       IN,  HOST, aclsparseLt 库句柄的 const 指针，不可为 nullptr。
  * @param matmulDescr  IN,  HOST, Matmul 操作描述符，算子从中读取矩阵 A 的维度/数据类型/order/opA。
  * @param d_in         IN,  DEVICE, 待剪枝的稠密矩阵 A 的指针，须 16 字节对齐，不可为 nullptr。
@@ -477,7 +446,6 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 
 /**
  * @brief 校验矩阵是否满足 2:4 结构化稀疏条件（对齐 cuSPARSELt cusparseLtSpMMAPruneCheck）。
- *
  * 逐分组统计非零元素个数（±0 按零、NaN/非规格数按非零，位级判零），与保留上限比较：
  * 全部分组满足条件时 d_valid=0（correct），任一分组超限时 d_valid=1（wrong）。
  * 校验对象与分组方向由 Matmul 描述符中稀疏侧（matA/matB 须恰有一个 isStructured）
@@ -488,7 +456,6 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
  * numBatches=1（默认）时为单 batch 判定。
  * 经 aclsparseLtSpMMAPrune 剪枝产出的数据保证通过本检查。
  * 算子异步启动，内部不执行 stream 同步，调用方如需读取 d_valid 须自行同步。
- *
  * @param handle       IN,  HOST, aclsparseLt 库句柄的 const 指针，不可为 nullptr。
  * @param matmulDescr  IN,  HOST, Matmul 操作描述符，matA/matB 须恰有一个结构化稀疏侧。
  * @param d_in         IN,  DEVICE, 待校验矩阵的指针，行主序存储，须 32 字节对齐（实现要求：
@@ -515,7 +482,6 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 
 /**
  * @brief 查询结构化稀疏压缩的输出和临时区大小（Ascend950）。
- *
  * @param handle             IN,  HOST, 有效的库句柄，不可为 nullptr。
  * @param plan               IN,  HOST, 有效 Plan，A/B 中恰有一个结构化稀疏矩阵。
  * @param compressedSize     OUT, HOST, 压缩结果的精确字节数，指针不可为 nullptr。
@@ -529,10 +495,8 @@ aclsparseStatus_t aclsparseLtSpMMACompressedSize(
 
 /**
  * @brief 按 Plan 描述的布局异步压缩结构化稀疏矩阵（Ascend950）。
- *
  * 输入须满足 FP32 的 1:2 或 FP16/BF16/INT8 的 2:4 稀疏条件，选中值的位模式保持不变。
  * 输入输出首址须满足描述符的对齐要求（至少 16 字节）。读取结果或释放相关对象前须同步 stream。
- *
  * @param handle              IN,    HOST, 有效的库句柄，不可为 nullptr。
  * @param plan                IN,    HOST, 有效 Plan，A/B 中恰有一个结构化稀疏矩阵。
  * @param d_dense             IN,    DEVICE, 满足稀疏条件的输入矩阵，不可为 nullptr。
@@ -554,9 +518,7 @@ aclsparseStatus_t aclsparseLtSpMMACompress(
 
 /**
  * @brief 返回 aclsparseLt 库版本号（对齐 cuSPARSELt cusparseLtGetVersion）。
- *
  * 版本编码格式：MAJOR*10000 + MINOR*100 + PATCH（如 0.1.0 -> 100）。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄（版本为编译期常量，handle 仅做合法性校验）。
  * @param version OUT, HOST, 版本号输出。
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
@@ -566,9 +528,7 @@ aclsparseStatus_t aclsparseLtGetVersion(aclsparseLtConstHandle_t handle, int* ve
 
 /**
  * @brief 返回库属性（对齐 cuSPARSELt cusparseLtGetProperty）。
- *
  * 根据 propertyType 返回版本号的 MAJOR / MINOR / PATCH 分量到 int* value。
- *
  * @param propertyType IN, HOST, 要查询的属性类型（MAJOR_VERSION / MINOR_VERSION / PATCH_LEVEL）。
  * @param value OUT, HOST, 属性值输出。
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
@@ -578,13 +538,11 @@ aclsparseStatus_t aclsparseLtGetProperty(aclsparseLtLibraryPropertyType_t proper
 
 /**
  * @brief 设置 matmul 描述符属性（对齐 cuSPARSELt cusparseLtMatmulDescSetAttribute）。
- *
  * 设置向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING），
  * bias 属性（BIAS_POINTER / BIAS_STRIDE），以及 activation 属性
  * （ACTIVATION_RELU / RELU_UPPERBOUND / RELU_THRESHOLD / ACTIVATION_GELU / GELU_SCALING）。
  * 设置 BETA_VECTOR_SCALING=true 时隐含 ALPHA_VECTOR_SCALING=true（cuSPARSELt 语义）。
  * ReLU 与 GeLU 互斥：启用一种时若另一种已启用，返回 INVALID_VALUE。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param matmulDescr INOUT, HOST, matmul 描述符。
  * @param matmulAttribute IN, HOST, 要设置的属性枚举。
@@ -604,11 +562,9 @@ aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
 
 /**
  * @brief 查询 matmul 描述符属性当前值（对齐 cuSPARSELt cusparseLtMatmulDescGetAttribute）。
- *
  * 查询向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING），
  * bias 属性（BIAS_POINTER / BIAS_STRIDE），以及 activation 属性
  * （ACTIVATION_RELU / RELU_UPPERBOUND / RELU_THRESHOLD / ACTIVATION_GELU / GELU_SCALING）的当前值。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param matmulDescr IN, HOST, matmul 描述符（const 只读）。
  * @param matmulAttribute IN, HOST, 要查询的属性枚举。
@@ -628,10 +584,10 @@ aclsparseStatus_t aclsparseLtMatmulDescGetAttribute(
 
 /**
  * @brief 设置算法选择属性（对齐 cuSPARSELt cusparseLtMatmulAlgSetAttribute）。
- *
  * 设置 algConfigId / splitK / searchIterations / splitKMode / splitKBuffers 等算法属性。
- * ALG_CONFIG_MAX_ID 为只读属性，不可设置。须在 PlanInit 之前调用。
- *
+ * ALG_CONFIG_MAX_ID 为只读属性，不可设置。三元组属性（algConfigId / splitK /
+ * splitKMode）须在 PlanInit 之前调用；ACLSPARSELT_MATMUL_SEARCH_ITERATIONS 为
+ * 搜索入口活读属性，PlanInit 之后设置对随后的 Search 仍生效。
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param algSelection INOUT, HOST, 算法选择描述符。
  * @param attr IN, HOST, 要设置的属性枚举。
@@ -652,7 +608,6 @@ aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
 
 /**
  * @brief 查询算法选择属性当前值（对齐 cuSPARSELt cusparseLtMatmulAlgGetAttribute）。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param algSelection IN, HOST, 算法选择描述符。
  * @param attr IN, HOST, 要查询的属性枚举。
@@ -676,10 +631,8 @@ aclsparseStatus_t aclsparseLtMatmulAlgGetAttribute(
 
 /**
  * @brief 查询 matmul 执行所需的 workspace 大小（对齐 cuSPARSELt cusparseLtMatmulGetWorkspace）。
- *
  * 根据 PlanInit 阶段计算的 tiling 参数返回 workspace 字节数。调用方据此分配 Device 内存，
  * 再将指针传递给 aclsparseLtMatmul。workspaceSize 为 0 时无需分配。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param plan IN, HOST, 执行计划。
  * @param workspaceSize OUT, HOST, workspace 字节数输出。
@@ -693,12 +646,10 @@ aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
 
 /**
  * @brief 执行结构化稀疏矩阵乘法（对齐 cuSPARSELt cusparseLtMatmul）。
- *
  * 计算 D = alpha * A_pruned * B + beta * C。A 须为已剪枝的矩阵（通过 aclsparseLtSpMMAPrune 产出）。
  * 当 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充）。
  * alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。
  * 该接口异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
- *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param plan IN, HOST, 执行计划。
  * @param alpha IN, HOST/DEVICE, alpha 缩放因子（标量时为 float 指针，向量缩放时为 Device float[M] 指针）。
@@ -720,6 +671,93 @@ aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
 aclsparseStatus_t aclsparseLtMatmul(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatmulPlan_t* plan,
+    const void* alpha,
+    const void* matA, const void* matB,
+    const void* beta,
+    const void* matC, void* matD,
+    void* workspace,
+    aclrtStream* streams, int32_t numStreams);
+
+/**
+ * @brief 搜索 matmul 最优算法配置并回写 plan。
+ * 评估 plan 描述的 matmul 的可用算法候选（algConfigId × splitKMode × splitK，候选空间由
+ * 库内生成规则枚举：fused 等价类代表、splitK 有界幂次集、当前配置保底，且仅评估
+ * workspace 需求不超过进入搜索时 plan->workspaceSize 的候选），每个候选在 streams[0]
+ * 上按 aclsparseLtMatmul 相同语义计时执行 searchIterations 次（经
+ * aclsparseLtMatmulAlgSetAttribute + ACLSPARSELT_MATMUL_SEARCH_ITERATIONS 设置，默认 5），
+ * 取最小耗时，自动选择最快的配置并回写：plan 绑定的 algSelection 属性（algConfigId /
+ * splitKMode / splitK，可经 aclsparseLtMatmulAlgGetAttribute 查询）、plan 内 tilingData 与
+ * workspaceSize（按选中配置重算）。面向同一 matmul 重复执行多次的 auto-tuning 场景。
+ * 阻塞语义：本接口相对 streams[0] 为阻塞调用（返回前完成流同步），区别于
+ * aclsparseLtMatmul 的异步语义。matD 在搜索过程中被反复写入；搜索结束后以选中
+ * 配置无条件再执行一次，返回时内容为选中配置的完整输出；in-place
+ * （matC == matD）时 matD 值随执行次数累积，不可预测。个别候选执行失败视为
+ * 不可用候选跳过（日志留痕，不影响搜索返回）；搜索失败（返回
+ * EXECUTION_FAILED）时 plan 与 algSelection 恢复进入搜索前的状态。
+ * 非紧凑布局直通：dense 侧非紧凑布局（ld 大于物理维度）时，候选直接以
+ * 调用方原始指针与布局执行（cube GM 搬运按 ld 行距直通，无入口拷贝或
+ * 预处理步骤）；候选计时与终态执行均按该语义进行（含描述符属性活读）。
+ * 搜索后 workspace：候选裁剪保证选中配置的 workspace 需求不超过进入搜索时
+ * 的 workspaceSize，已分配 workspace 必然够用；选中配置的需求可能更小
+ * （plan->workspaceSize 随之变小），建议重新调用 aclsparseLtMatmulGetWorkspace
+ * 校验实际值。想搜索更大 splitK 的候选：先经 aclsparseLtMatmulAlgSetAttribute
+ * 设大 splitK 并将 splitKMode 设为 ACLSPARSELT_SPLIT_K_MODE_TWO_KERNELS →
+ * 重新 PlanInit → 按新 workspaceSize 分配 → 再调用本接口。三元组属性
+ * （algConfigId / splitK / splitKMode）须在 PlanInit 之前设置；
+ * ACLSPARSELT_MATMUL_SEARCH_ITERATIONS 为搜索入口活读属性，PlanInit 之后
+ * 设置对随后的 Search 仍生效。
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针，不可为 nullptr。
+ * @param plan INOUT, HOST, 执行计划（aclsparseLtMatmulPlanInit 产出）。搜索更新 plan
+ *             绑定的 algSelection 属性及 plan 内 tilingData / workspaceSize。非 const，
+ *             区别于 aclsparseLtMatmul 的只读 plan。
+ * @param alpha IN, HOST/DEVICE, alpha 缩放因子（标量模式为 Host 端 float 指针，nullptr
+ *              按 1.0 处理；向量缩放模式为 Device float[M] 指针，不可为 nullptr）。计时
+ *              执行按 aclsparseLtMatmul 相同语义透传。
+ * @param matA IN, DEVICE, 矩阵 A 数据指针（剪枝后），须 16 字节对齐。可为 nullptr
+ *             （A-sparse 回退到 workspace 的 A_pruned 区域，须已由 aclsparseLtSpMMAPrune
+ *             填充，仅限 numBatches=1；numBatches>1 时须先显式调用 aclsparseLtSpMMAPrune
+ *             产出 A_pruned 再传入；B-sparse 路径须显式传入）。
+ * @param matB IN, DEVICE, 矩阵 B 数据指针，须 16 字节对齐，不可为 nullptr。
+ * @param beta IN, HOST/DEVICE, beta 缩放因子（标量模式为 Host 端 float 指针，nullptr
+ *              按 0.0 处理；向量缩放模式为 Device float[M] 指针；ALPHA_VECTOR_SCALING
+ *              启用且 BETA_VECTOR_SCALING 未启用时可为 nullptr，按 0.0 处理）。
+ * @param matC IN, DEVICE, 矩阵 C 数据指针（累加项），须 16 字节对齐，不可为 nullptr，
+ *             按其描述符 (order, ld) 布局访问。支持 in-place（matC == matD，此时
+ *             matD 值在搜索中累积，见上文行为声明）。
+ * @param matD OUT, DEVICE, 矩阵 D 数据指针（输出），须 16 字节对齐，不可为 nullptr，
+ *             按其描述符 (order, ld) 布局写出。搜索过程被反复写入；搜索结束后以
+ *             选中配置无条件再执行一次，返回时内容为选中配置的完整输出。
+ * @param workspace IN, DEVICE, workspace 指针（进入搜索前按当前配置
+ *                  aclsparseLtMatmulGetWorkspace 查询并分配），须 16 字节对齐，不可为
+ *                  nullptr。计时执行复用该 workspace；纳入评估的候选 workspace 需求均
+ *                  不超过进入时的 workspaceSize，无越界风险。
+ * @param streams IN, HOST, ACL 流指针数组，不可为 nullptr；streams[0] 可为 nullptr
+ *                （默认流）。当前仅使用 streams[0]（多流不支持，沿用 aclsparseLtMatmul
+ *                既有差异）。
+ * @param numStreams IN, HOST, 流数量，须 > 0；当前仅支持 1（> 1 时不报错，仅使用
+ *                   streams[0]）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 搜索完成，最优配置已写入 plan/algSelection
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为 nullptr 或 *handle 为 nullptr
+ *         ACL_SPARSE_STATUS_INVALID_VALUE plan/streams 为 nullptr、*plan 为 nullptr 或
+ *                                          plan 内部（matmulDescr/tilingData/algSelection）
+ *                                          为空、numStreams <= 0、matB/matC/matD 为
+ *                                          nullptr、数据指针未 16 字节对齐、matA 为
+ *                                          nullptr 且不满足 A-sparse 回退条件、
+ *                                          searchIterations <= 0、向量缩放启用时
+ *                                          alpha/beta 为 nullptr（以上均为搜索入口
+ *                                          一次性校验；缩放向量的 32 字节对齐与
+ *                                          device 内存判定经候选执行链沿用
+ *                                          aclsparseLtMatmul 执行期校验）
+ *         ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES workspace 为 nullptr
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED dtype 不支持
+ *         ACL_SPARSE_STATUS_EXECUTION_FAILED 全部候选执行失败、选中配置的最终回写
+ *                                            执行失败，或 aclrt 计时/同步调用失败
+ *                                            （失败时 plan/algSelection 恢复进入搜索前
+ *                                            状态）
+ */
+aclsparseStatus_t aclsparseLtMatmulSearch(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtMatmulPlan_t* plan,
     const void* alpha,
     const void* matA, const void* matB,
     const void* beta,

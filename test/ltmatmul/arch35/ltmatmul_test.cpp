@@ -12,13 +12,11 @@
 
 /**
  * @file ltmatmul_test.cpp
- * @brief GTest + CSV-driven test for aclsparseLtMatmul (v2: 4 dtype × 2 path).
- *
+ * @brief GTest + CSV-driven test for aclsparseLtMatmul (4 dtype × 2 path).
  * Simplified test binary: the matmul path runs the full chain
  * (init → descriptor → setAttr → planInit(internal getAttr) → prune → matmul)
  * and explicitly asserts getAttr roundtrip, so standalone alg_set/alg_get
  * TEST_P suites have been removed.
- *
  * Test suites:
  *   - MatmulTest (TEST_P, CSV-driven): functional precision, 4 dtype × 2 path.
  *   - MatmulExceptionTest (TEST_F): matmul parameter validation.
@@ -30,50 +28,24 @@
 
 #include "ltmatmul_golden.h"
 #include "ltmatmul_npu_wrapper.h"
-#include "ltmatmul_exception_helper.h"  // MatmulExceptionCtx, MatmulRawParams, MatmulNpuRaw
+#include "ltmatmul_exception_helper.h"  // MatmulExceptionCtx, MatmulRawParams, MatmulNpuRaw, FillMatmulRawParams
+#include "ltmatmul_fixture.h"  // MatmulEnvMixin / MatmulTestFixture / MatmulParamFixture（neg TU 共享）
 #include "ltmatmul_param.h"
 
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
 #include <fstream>
+#include <filesystem>
 #include <random>
 #include <type_traits>
 
 using namespace sparse_test;
 
+// MatmulEnvMixin / MatmulTestFixture / MatmulParamFixture 已移至
+// ltmatmul_fixture.h（WB_L2 负向系拆分至 ltmatmul_test_neg.cpp 后两 TU 共用）。
+
 namespace {
-
-// ============================================================================
-// Test fixture
-// ============================================================================
-class MatmulEnvMixin {
-protected:
-    inline static std::unique_ptr<AclEnvScope> env_;
-    aclrtStream stream_ = nullptr;
-    static void InitEnv() {
-        env_ = std::make_unique<AclEnvScope>();
-    }
-    static void FiniEnv() { env_.reset(); }
-    void SetUpStream() { stream_ = env_->stream(); }
-};
-
-class MatmulTestFixture : public testing::Test, public MatmulEnvMixin {
-public:
-    static void SetUpTestSuite() { InitEnv(); }
-    static void TearDownTestSuite() { FiniEnv(); }
-protected:
-    void SetUp() override { SetUpStream(); }
-};
-
-template <typename P>
-class MatmulParamFixture : public testing::TestWithParam<P>, public MatmulEnvMixin {
-public:
-    static void SetUpTestSuite() { InitEnv(); }
-    static void TearDownTestSuite() { FiniEnv(); }
-protected:
-    void SetUp() override { SetUpStream(); }
-};
 
 // ============================================================================
 // Helpers
@@ -90,6 +62,25 @@ inline aclsparseOrder_t ToNpuOrder(const MatmulParam& p) {
 
 inline aclsparseOperation_t ToNpuOp(bool trans) {
     return trans ? ACL_SPARSE_OP_TRANSPOSE : ACL_SPARSE_OP_NON_TRANSPOSE;
+}
+
+// CSV 布局列 → MatmulLayoutOpts（ld_sparse/ld_dense/dense_order/cd_order/ld_cd）
+inline sparse_test::MatmulLayoutOpts ToNpuLayoutOpts(const MatmulParam& p) {
+    sparse_test::MatmulLayoutOpts o;
+    o.ldSparse = p.ldSparse;
+    o.ldDense = p.ldDense;
+    o.denseOrder = p.isDenseColOrder() ? ACL_SPARSE_ORDER_COL : ACL_SPARSE_ORDER_ROW;
+    o.cdOrder = p.isCdColOrder() ? ACL_SPARSE_ORDER_COL : ACL_SPARSE_ORDER_ROW;
+    o.ldCd = p.ldCd;
+    return o;
+}
+
+// C/D 布局感知解包：NPU 输出（物理 span + batch-strided）→ packed 逻辑输出。
+// ROW 紧凑 + nb==1 时原样（既有用例数值零变化锚点）。
+template <typename T>
+inline std::vector<T> ExtractOutputPacked(const std::vector<T>& npuOut, const MatmulParam& p) {
+    return sparse_test::ExtractCdLogicalBatch<T>(npuOut, p.m, p.n, ToNpuLayoutOpts(p),
+                                                 p.numBatches, p.batchStride);
 }
 
 // F1: activation_type=3 means "GELU_SCALING only" (implies GeLU). The operator
@@ -314,7 +305,9 @@ inline void RunAndVerifyNpu(const MatmulParam& p,
         // Epilogue (bias + activation + batch).
         p.biasEnabled, p.biasStride,
         p.activationType, p.reluUpperBound, p.reluThreshold, p.geluScaling,
-        p.numBatches, p.batchStride, vecs.biasPtr);
+        p.numBatches, p.batchStride, vecs.biasPtr,
+        // ld/order 布局覆盖
+        ToNpuLayoutOpts(p));
     ASSERT_EQ(npu.algSetCfgRet, ACL_SPARSE_STATUS_SUCCESS) << p.caseId() << " algConfigId set failed";
     ASSERT_EQ(npu.algSetSplitRet, ACL_SPARSE_STATUS_SUCCESS) << p.caseId() << " splitK set failed";
     ASSERT_EQ(npu.algSetSplitKModeRet, ACL_SPARSE_STATUS_SUCCESS) << p.caseId() << " splitKMode set failed";
@@ -334,28 +327,8 @@ inline void RunAndVerifyNpu(const MatmulParam& p,
     ASSERT_EQ(npu.matmulRet, ACL_SPARSE_STATUS_SUCCESS) << p.caseId() << " matmul failed";
 }
 
-// ----------------------------------------------------------------------------
-// FillMatmulRawParams: fill the common MatmulRawParams fields for exception
-// tests. Individual tests override specific fields after calling this.
-// ----------------------------------------------------------------------------
-inline void FillMatmulRawParams(MatmulRawParams& p,
-    aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulPlan_t plan,
-    const void* alpha, const void* matA, const void* matB,
-    const void* beta, const void* matC, void* matD,
-    void* workspace, aclrtStream* streams, int32_t numStreams)
-{
-    p.handle = handle;
-    p.plan = plan;
-    p.alpha = alpha;
-    p.matA = matA;
-    p.matB = matB;
-    p.beta = beta;
-    p.matC = matC;
-    p.matD = matD;
-    p.workspace = workspace;
-    p.streams = streams;
-    p.numStreams = numStreams;
-}
+// FillMatmulRawParams 已移至 ltmatmul_exception_helper.h（WB_L2 负向系
+// 拆分至 ltmatmul_test_neg.cpp 后两 TU 共用）。
 
 // Verify with mixed tolerance for float-convertible types.
 inline void VerifyMixedTol(const std::vector<float>& goldenF,
@@ -391,7 +364,6 @@ inline void VerifyExactInt32(const std::vector<int32_t>& golden,
 
 // ----------------------------------------------------------------------------
 // ComputeFloatGoldenWithNpuPrune: golden computation using NPU's pruned matrix.
-// Extracted from RunFloatCase to reduce NBNC.
 // ----------------------------------------------------------------------------
 template <typename T>
 inline void ComputeFloatGoldenWithNpuPrune(const MatmulParam& p, const MatmulNpuResult& npu,
@@ -428,7 +400,6 @@ inline void ComputeFloatGoldenWithNpuPrune(const MatmulParam& p, const MatmulNpu
 
 // ----------------------------------------------------------------------------
 // ComputeFloatGoldenStandard: golden computation without NPU pruned matrix.
-// Extracted from RunFloatCase to reduce NBNC.
 // ----------------------------------------------------------------------------
 template <typename T>
 inline void ComputeFloatGoldenStandard(const MatmulParam& p,
@@ -562,7 +533,7 @@ inline void ComputeFloatGoldenBatch(const MatmulParam& p, const MatmulNpuResult&
 // threshold, verdict} and appends it to the on-disk assertion log at
 // .cannbot/ltmatmul/tmp/precision_assertions.log (JSON-lines). The self-built
 // loose tolerance (if any) is only a cross-check; the authority table values
-// (§2.3 of the test plan) are the sole pass criterion.
+// of the authority table are the sole pass criterion.
 // ----------------------------------------------------------------------------
 struct PrecisionAssertionRecord {
     std::string caseId;
@@ -579,9 +550,24 @@ struct PrecisionAssertionRecord {
 };
 
 inline std::string AssertLogPath() {
-    // Fixed path under .cannbot (pre-approved write area). The hooks allow
-    // writes under the workspace .cannbot/ tree.
-    return ".cannbot/ltmatmul/tmp/precision_assertions.log";
+    // 锚定含 .cannbot 的目录（build/test/ltmatmul → 仓根），目录不存在时创建
+    //（对齐 matmulSearch SearchAssertLogPath 的锚定 + create_directories 逻辑；
+    //  既有固定相对路径在 build 目录运行时因父目录缺失而静默丢失断言记录）。
+    namespace fs = std::filesystem;
+    static const std::string anchored = []() -> std::string {
+        for (const char* c : {".", "..", "../..", "../../..", "../../../.."}) {
+            fs::path probe = fs::path(c) / ".cannbot";
+            std::error_code ec;
+            if (fs::exists(probe, ec) && fs::is_directory(probe, ec)) {
+                return (fs::path(c) / ".cannbot" / "ltmatmul" / "tmp" /
+                        "precision_assertions.log").string();
+            }
+        }
+        return ".cannbot/ltmatmul/tmp/precision_assertions.log";
+    }();
+    std::error_code ec;
+    fs::create_directories(fs::path(anchored).parent_path(), ec);
+    return anchored;
 }
 
 inline void AppendAssertionRecord(const PrecisionAssertionRecord& r) {
@@ -600,27 +586,13 @@ inline void AppendAssertionRecord(const PrecisionAssertionRecord& r) {
         << ",\"verdict\":\"" << r.verdict << "\"}\n";
 }
 
-// Compute measured maxAbsErr / maxRelErr between golden and npu (float domain).
-inline void ComputeErrorMetrics(const std::vector<float>& goldenF,
-                                 const std::vector<float>& npuF,
-                                 double& maxAbsErr, double& maxRelErr)
-{
-    maxAbsErr = 0.0;
-    maxRelErr = 0.0;
-    for (size_t i = 0; i < goldenF.size() && i < npuF.size(); ++i) {
-        double diff = std::fabs(static_cast<double>(goldenF[i]) - static_cast<double>(npuF[i]));
-        if (diff > maxAbsErr) { maxAbsErr = diff; }
-        double denom = std::fabs(static_cast<double>(goldenF[i]));
-        if (denom > 1e-12) {
-            double rel = diff / denom;
-            if (rel > maxRelErr) { maxRelErr = rel; }
-        }
-    }
-}
+// ComputeErrorMetrics 位于 ltmatmul_test_utils.h 共享层（与
+// matmulSearch_test.cpp 共用；`using namespace sparse_test` 使既有调用点
+// 零改动）。
 
 // ----------------------------------------------------------------------------
 // VerifyFloatOutput: verify FP32/FP16/BF32 output with mixed tolerance.
-// Authority table (§2.3): FP32 atol=1e-5 rtol=1e-5; FP16/BF16 atol=5e-3 rtol=5e-3.
+// Authority table: FP32 atol=1e-5 rtol=1e-5; FP16/BF16 atol=5e-3 rtol=5e-3.
 // ----------------------------------------------------------------------------
 template <typename T>
 inline void VerifyFloatOutput(const std::vector<T>& hGoldenD, const std::vector<T>& hNpuD,
@@ -752,9 +724,9 @@ void RunFloatCase(const MatmulParam& p, aclrtStream /*stream*/, bool goldenOnly 
         LogGoldenOutputStats<T>(hGoldenD, p.caseId(), dtypeStr);
         return;
     }
-    // Verify: extract packed NPU output from batch-strided layout.
-    if (isBatch) {
-        auto hNpuDPacked = ExtractPackedFromBatchStrided<T>(hNpuD, p.m, p.n, p.numBatches, p.batchStride);
+    // Verify: extract packed NPU output from batch-strided / C-D physical layout.
+    if (isBatch || p.hasCdLayout()) {
+        auto hNpuDPacked = ExtractOutputPacked<T>(hNpuD, p);
         VerifyFloatOutput<T>(hGoldenD, hNpuDPacked, p.caseId());
     } else {
         VerifyFloatOutput<T>(hGoldenD, hNpuD, p.caseId());
@@ -903,7 +875,7 @@ inline void ComputeInt8Int32GoldenBatch(const MatmulParam& p, const MatmulNpuRes
 
 // ----------------------------------------------------------------------------
 // VerifyInt8Int32Output: verify INT8->INT32 output (exact or mixed tolerance).
-// Authority table (§2.3):
+// Authority table:
 //   INT32 (no bias/activation): EXACT atol=0 rtol=0
 //   INT32 (has bias/activation): MERE_MARE atol=1 rtol=0 + maxAbsErrLim=65
 // Dispatch logic: hasBiasOrActivation = (bias_enabled || activation_type != 0).
@@ -1013,7 +985,6 @@ inline void ComputeInt8DenseWithEpilogue(const std::vector<int8_t>& Ab,
 // ============================================================================
 // ComputeInt8Int8GoldenBatchOne: per-batch INT8->INT8 golden.
 // Handles vec/scalar × dense/sparse dispatch + NPU-prune slicing.
-// Extracted from RunInt8Int8Case to reduce NBNC + CCN.
 // ============================================================================
 inline void ComputeInt8Int8GoldenBatchOne(const MatmulParam& p, const MatmulNpuResult& npu,
     int32_t bIdx, const std::vector<int8_t>& hA, const std::vector<int8_t>& hB,
@@ -1135,6 +1106,177 @@ void RunInt8Int8Case(const MatmulParam& p, aclrtStream /*stream*/, bool goldenOn
     VerifyInt8Output(hGoldenD, hNpuDPacked, p.caseId());
 }
 
+// INT8 × C=D=INT32：MERE atol=1（β*C 半整数 round-half-away 舍入吸收）
+inline void VerifyInt8CDInt32Output(const std::vector<int32_t>& golden,
+    const std::vector<int32_t>& npu, const std::string& caseId)
+{
+    const std::vector<float> goldenF = MatmulToFloat(golden);
+    const std::vector<float> npuF = MatmulToFloat(npu);
+    ASSERT_EQ(goldenF.size(), npuF.size()) << caseId << ": size mismatch";
+    VerifyConfig cfg;
+    applyMixedTolerance(cfg, ACL_FLOAT, goldenF.data(), goldenF.size());
+    cfg.SetMixedTol(1.0, 0.0);
+    cfg.SetMixedMaxAbsErrLim(65.0);
+    const bool ok = Verifier::verifyVector(npuF, goldenF, cfg, caseId);
+    double maxAbsErr = 0.0, maxRelErr = 0.0;
+    ComputeErrorMetrics(goldenF, npuF, maxAbsErr, maxRelErr);
+    PrecisionAssertionRecord rec;
+    rec.caseId = caseId; rec.tensor = "D"; rec.dtype = "INT32";
+    rec.metric = "MERE (int8-x-cd-i32: atol=1/rtol=0/lim=65, round-half-away absorbed)";
+    rec.maxAbsErr = maxAbsErr; rec.maxRelErr = maxRelErr;
+    rec.atol = 1.0; rec.rtol = 0.0; rec.maxAbsErrLim = 65.0;
+    rec.verdict = ok ? "PASS" : "FAIL";
+    AppendAssertionRecord(rec);
+    EXPECT_TRUE(ok) << caseId << " INT8-CD-INT32 MERE failed: maxAbsErr=" << maxAbsErr;
+}
+
+// INT8 × C=D=FP16/BF16：frame 默认混合容差（matmulSearch VerifyFloatSearchOutput
+// 口径镜像；超集组合判据以 matmulSearch H 组为权威）
+template <typename CDT>
+inline void VerifyInt8CDFloatOutput(const std::vector<CDT>& golden,
+    const std::vector<CDT>& npu, const std::string& caseId)
+{
+    const std::vector<float> goldenF = MatmulToFloat(golden);
+    const std::vector<float> npuF = MatmulToFloat(npu);
+    ASSERT_EQ(goldenF.size(), npuF.size()) << caseId << ": size mismatch";
+    const aclDataType aclDtype = NpuDtypeTrait<CDT>::kAclDtype;
+    VerifyConfig cfg;
+    applyMixedTolerance(cfg, aclDtype, goldenF.data(), goldenF.size());
+    const bool ok = Verifier::verifyVector(npuF, goldenF, cfg, caseId);
+    double maxAbsErr = 0.0, maxRelErr = 0.0;
+    ComputeErrorMetrics(goldenF, npuF, maxAbsErr, maxRelErr);
+    PrecisionAssertionRecord rec;
+    rec.caseId = caseId; rec.tensor = "D";
+    rec.dtype = (std::is_same_v<CDT, uint16_t>) ? "FP16" : "BF16";
+    rec.metric = "MIXED_TOLERANCE (frame default, matmulSearch H-group parity)";
+    rec.maxAbsErr = maxAbsErr; rec.maxRelErr = maxRelErr;
+    rec.verdict = ok ? "PASS" : "FAIL";
+    AppendAssertionRecord(rec);
+    EXPECT_TRUE(ok) << caseId << " INT8-CD-float MIXED_TOLERANCE failed: maxAbsErr="
+                    << maxAbsErr;
+}
+// ----------------------------------------------------------------------------
+// RunInt8CDCase：INT8 A/B × C=D=CDT（FP16/BF16/I32CD）。
+// C/D 描述符独立 dtype（RunMatmulNpuInt8CD 链）；golden：acc = Σ A_pruned·B
+// （int32 精确，NPU 剪枝回读范式）→ α/β/bias/act FP 域 → cast<CDT>。
+// 验证口径（matmulSearch H 组权威同构）：C=D=INT32 → MERE atol=1/rtol=0/lim=65
+// （β*C 半整数 round-half-away 舍入吸收）；FP16/BF16 → 按 D dtype 混合容差。
+// 数据生成段见 PrepareInt8CDCaseInputs，golden 段见
+// ComputeInt8CDCaseGolden。
+// batch（num_batches/batch_stride）与布局（ld/order 5 列）维度
+// 透传 Int8CD 链——B-sparse × TILE × batch × splitK × COL/ld 布局的
+// 四重正交组合经本入口覆盖。
+// ----------------------------------------------------------------------------
+// 输入生成：A/B 离散小整数域（[-5,5]）+ C 离散小整数域经 CDT 存储
+// （FP16/BF16 精确可表，共享 GenInt8CDInputC）+ vec/bias 向量。batch 时
+// A/B/C 按 GenBatchStridedMatrix / GenInt8CDInputCBatch 铺设（batch-strided，
+// 段间 padding 置零）。
+// 注意：vecs 必须经「按值返回 + 调用方 auto 接收」（NRVO）传递——
+// AlphaBetaVecs 的 alphaPtr/betaPtr/biasPtr 指向返回值自身成员，若经输出
+// 参数拷贝/移动赋值传递会悬空（alphaVec=1/bias=1 用例读垃圾 → inf）。
+template <typename CDT>
+AlphaBetaVecs PrepareInt8CDCaseInputs(const MatmulParam& p, uint32_t seed,
+    std::vector<int8_t>& hA, std::vector<int8_t>& hB, std::vector<CDT>& hC)
+{
+    if (p.hasBatch()) {
+        hA = GenBatchStridedMatrix<int8_t>(p.m, p.k, p.range_low, p.range_high,
+            seed, p.numBatches, p.batchStride);
+        hB = GenBatchStridedMatrix<int8_t>(p.k, p.n, p.range_low, p.range_high,
+            seed + 1, p.numBatches, p.batchStride);
+        GenInt8CDInputCBatch<CDT>(p.m, p.n, p.numBatches, p.batchStride, hC);
+    } else {
+        hA = MatmulGenTestMatrix<int8_t>(p.m, p.k, -5.0f, 5.0f, seed);
+        hB = MatmulGenTestMatrix<int8_t>(p.k, p.n, -5.0f, 5.0f, seed + 1);
+        GenInt8CDInputC<CDT>(p.m, p.n, hC);
+    }
+    return GenAlphaBetaVectors(p, seed);
+}
+
+// golden 计算（NPU 剪枝回读范式）：acc = Σ A_pruned·B（int32 精确，共享
+// ComputeInt8CDGoldenCore）→ α/β/bias/act FP 域 → cast<CDT>。batch 时
+// per-batch 切片（A/B/C/npuPrunedA 按 batchStride 切段 + CopyVecsForBatch
+// 的 bias 切片）循环计算，输出 packed（num_batches * m * n）——与主链
+// ComputeInt8Int32GoldenBatch 同范式；单 batch 退化为整段。
+template <typename CDT>
+void ComputeInt8CDCaseGolden(const MatmulParam& p, const MatmulNpuResult& npu,
+    const std::vector<int8_t>& hA, const std::vector<int8_t>& hB,
+    const std::vector<CDT>& hC, const AlphaBetaVecs& vecs, std::vector<CDT>& hGoldenD)
+{
+    const size_t mk = static_cast<size_t>(p.m) * p.k;
+    const size_t kn = static_cast<size_t>(p.k) * p.n;
+    const size_t mn = static_cast<size_t>(p.m) * p.n;
+    const int32_t nb = p.hasBatch() ? p.numBatches : 1;
+    const int64_t bs = p.batchStride;
+    const size_t prunedSize = p.isSparseA() ? mk : kn;
+    const bool useVec = p.alpha_vector_scaling || p.beta_vector_scaling;
+    hGoldenD.resize(static_cast<size_t>(nb) * mn);
+    for (int32_t b = 0; b < nb; ++b) {
+        std::vector<int8_t> Ab = SliceBatch(hA, mk, b, bs);
+        std::vector<int8_t> Bb = SliceBatch(hB, kn, b, bs);
+        std::vector<CDT> Cb = SliceBatch(hC, mn, b, bs);
+        std::vector<int8_t> prunedB = SliceBatch(npu.npuPrunedA, prunedSize, b, bs);
+        AlphaBetaVecs batchVecs = CopyVecsForBatch(vecs, p, b);
+        std::vector<float> Df = ComputeInt8CDGoldenCore<CDT>(p.m, p.k, p.n, p.isSparseA(),
+            useVec, p.alpha, p.beta, batchVecs.alphaVec, batchVecs.betaVec,
+            Ab, Bb, prunedB, Cb);
+        ApplyEpilogueFp32(Df, batchVecs.biasVec, GoldenActType(p.activationType),
+                          p.reluUpperBound, p.reluThreshold, p.geluScaling, p.m, p.n);
+        std::vector<CDT> Db;
+        TruncateToOutput<CDT>(Df, Db, mn);
+        std::copy(Db.begin(), Db.end(), hGoldenD.begin() + static_cast<size_t>(b) * mn);
+    }
+}
+
+template <typename CDT>
+void RunInt8CDCase(const MatmulParam& p, aclrtStream /*stream*/)
+{
+    const uint32_t seed = SeedForCase(p.case_id);
+    const std::string caseId = p.caseId();
+    std::vector<int8_t> hA, hB;
+    std::vector<CDT> hC;
+    auto vecs = PrepareInt8CDCaseInputs<CDT>(p, seed, hA, hB, hC);
+
+    std::vector<CDT> hNpuD;
+    MatmulNpuResult npu = RunMatmulNpuInt8CD<CDT>(p.m, p.k, p.n, hA, hB, hC, hNpuD,
+        p.alpha, p.beta, p.algConfigId, p.splitK, p.splitKMode,
+        p.isSparseA(),
+        ToNpuOp(p.isTransA()), ToNpuOp(p.isTransB()), ToNpuPruneAlg(p),
+        p.alpha_vector_scaling, p.beta_vector_scaling,
+        vecs.alphaPtr, vecs.betaPtr,
+        p.biasEnabled, vecs.biasPtr,
+        p.activationType, p.reluUpperBound, p.reluThreshold, p.geluScaling,
+        // order / batch / 布局透传（单 batch 紧凑 = 既有形态）
+        ToNpuOrder(p), p.numBatches, p.batchStride, ToNpuLayoutOpts(p));
+    ASSERT_EQ(npu.algSetCfgRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " algConfigId set failed";
+    ASSERT_EQ(npu.algSetSplitRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " splitK set failed";
+    ASSERT_EQ(npu.algSetSplitKModeRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " splitKMode set failed";
+    ASSERT_EQ(npu.descSetRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " descSetAttribute failed";
+    ASSERT_EQ(npu.batchSetRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " batch MatDescSetAttribute failed";
+    ASSERT_EQ(npu.pruneRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " prune failed";
+    ASSERT_EQ(npu.wsRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " workspace failed";
+    ASSERT_EQ(npu.matmulRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " matmul failed";
+
+    // ---- golden（NPU 剪枝回读范式；batch 时 per-batch 切片循环，输出 packed）----
+    std::vector<CDT> hGoldenD;
+    ComputeInt8CDCaseGolden<CDT>(p, npu, hA, hB, hC, vecs, hGoldenD);
+
+    // ---- 验证（两级口径，与 matmulSearch H 组权威口径逐位一致）----
+    // C=D=INT32 → MERE atol=1/rtol=0/lim=65（β*C 半整数 round-half-away 吸收）；
+    // FP16/BF16 → frame 默认混合容差（applyMixedTolerance；镜像 VerifyFloatSearchOutput
+    // 口径而非 ltmatmul 既有 5e-3 硬编码——被镜像超集组合以 matmulSearch 判据为准）
+    // NPU 输出按 (cdOrder, ldCd) + batch-strided 解包（ROW 紧凑 +
+    // 单 batch 时原样）
+    std::vector<CDT> hNpuDPacked = (p.hasBatch() || p.hasCdLayout())
+        ? ExtractOutputPacked<CDT>(hNpuD, p) : hNpuD;
+    if constexpr (std::is_same_v<CDT, int32_t>) {
+        VerifyInt8CDInt32Output(hGoldenD, hNpuDPacked, p.caseId());
+    } else {
+        VerifyInt8CDFloatOutput<CDT>(hGoldenD, hNpuDPacked, p.caseId());
+    }
+}
+
+
+
 // ============================================================================
 // Dispatch by dtype × output_dtype
 // goldenOnly=true: skip NPU run, only compute golden + log stats (used when
@@ -1170,6 +1312,15 @@ void RunOneCase(const MatmulParam& p, aclrtStream stream, bool goldenOnly = fals
         RunInt8Int32Case(p, stream, goldenOnly);
     } else if (p.isInt8() && p.isInt8Output()) {
         RunInt8Int8Case(p, stream, goldenOnly);
+    } else if (p.isInt8() && p.output_dtype == "FP16") {
+        // INT8 × C=D=FP16（超集组合，数值验证主力回 ltmatmul）
+        RunInt8CDCase<uint16_t>(p, stream);
+    } else if (p.isInt8() && p.output_dtype == "BF16") {
+        // INT8 × C=D=BF16
+        RunInt8CDCase<bf16_bits_t>(p, stream);
+    } else if (p.isInt8() && p.output_dtype == "I32CD") {
+        // INT8 × C=D=INT32（独立 C dtype）
+        RunInt8CDCase<int32_t>(p, stream);
     } else {
         FAIL() << "Unknown dtype/output_dtype combination for " << p.caseId();
     }
@@ -1205,8 +1356,7 @@ INSTANTIATE_TEST_SUITE_P(
 // L2 Exception tests (TEST_F)
 // ============================================================================
 
-class MatmulExceptionTest : public MatmulTestFixture {
-};
+// MatmulExceptionTest fixture 定义于 ltmatmul_fixture.h（neg TU 共享）。
 
 // M-L2-01: null plan
 TEST_F(MatmulExceptionTest, L2_01_NullPlan) {
@@ -1464,81 +1614,6 @@ TEST_F(MatmulExceptionTest, L2_41_ComputeTypeMismatch) {
 }
 
 // ============================================================================
-// Whitebox supplement (3.3): branches not covered by 3.2 CSV/TEST_F cases.
-// ============================================================================
-
-// WB-L2-42: null handle → HANDLE_IS_NULLPTR
-// Covers validate_matmul_params branch: `handle == nullptr || *handle == nullptr`.
-// (3.2 L2_01 covered null plan, but null handle was not directly exercised.)
-TEST_F(MatmulExceptionTest, WB_L2_42_NullHandle) {
-    MatmulExceptionCtx ctx;
-    MatmulRawParams p;
-    float alpha = 1.0f, beta = 0.0f;
-    aclrtStream stream = ctx.stream;
-    FillMatmulRawParams(p, nullptr, ctx.plan.get(), &alpha,
-        ctx.dA.get(), ctx.dB.get(), &beta, ctx.dC.get(), ctx.dD.get(),
-        ctx.dWorkspace.get(), &stream, 1);
-    auto ret = MatmulNpuRaw(p);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
-}
-
-// WB-L2-43: streams[0]==null → SUCCESS (nullptr is valid default stream)
-// streams[0] may be nullptr — the ACL runtime treats 0/nullptr as
-// the default stream, which is valid for all aclrtMemcpy / kernel-launch APIs.
-// The previous test expected INVALID_VALUE, but the implementation correctly
-// accepts nullptr as the default stream and proceeds with kernel launch.
-TEST_F(MatmulExceptionTest, WB_L2_43_Streams0Null) {
-    MatmulExceptionCtx ctx;
-    MatmulRawParams p;
-    float alpha = 1.0f, beta = 0.0f;
-    aclrtStream nullStream = nullptr;  // streams[0] == null (default stream)
-    FillMatmulRawParams(p, ctx.handle.get(), ctx.plan.get(), &alpha,
-        ctx.dA.get(), ctx.dB.get(), &beta, ctx.dC.get(), ctx.dD.get(),
-        ctx.dWorkspace.get(), &nullStream, 1);  // numStreams > 0, streams[0] is null (valid default)
-    auto ret = MatmulNpuRaw(p);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
-}
-
-// WB-L2-44: matA=null B-sparse → INVALID_VALUE
-// Covers prepare_matmul_pointers branch: `!md->isSparseA` (B-sparse) when matA
-// is null. 3.2 L2_23 covered A-sparse + matA=null (workspace fallback),
-// L2_36 (dense×dense) not supported: upstream MatmulDescriptorInit requires
-// exactly one structured descriptor (both-dense returns INVALID_VALUE).
-// The B-sparse + matA=null branch is covered here by WB_L2_44.
-TEST_F(MatmulExceptionTest, WB_L2_44_MatANullBSparse) {
-    // Build a B-sparse plan: matA dense, matB structured (2:4 sparse).
-    SparseLtHandleGuard handle;
-    SparseLtDnMatDescGuard matA(handle.get(), 8, 8, 8, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    SparseLtMatDescGuard matB(handle.get(), 8, 8, 8, 16, ACL_FLOAT,
-                              ACL_SPARSE_ORDER_ROW, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
-    SparseLtDnMatDescGuard matC(handle.get(), 8, 8, 8, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    SparseLtDnMatDescGuard matD(handle.get(), 8, 8, 8, 16, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    SparseLtMatmulDescGuard md(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE,
-        ACL_SPARSE_OP_NON_TRANSPOSE, matA.get(), matB.get(), matC.get(), matD.get(),
-        ACL_SPARSE_COMPUTE_32F);
-    SparseLtAlgSelectionGuard algSel(handle.get(), md.get(), ACL_SPARSE_LT_MATMUL_ALG_DEFAULT);
-    SparseLtPlanGuard plan(handle.get(), md.get(), algSel.get());
-
-    size_t wsSize = 0;
-    ASSERT_EQ(aclsparseLtMatmulGetWorkspace(handle.get(), plan.cptr(), &wsSize),
-              ACL_SPARSE_STATUS_SUCCESS);
-    auto dWorkspace = sparse_test::DeviceBuffer::alloc(wsSize);
-    auto dA = sparse_test::DeviceBuffer::alloc(8 * 8 * sizeof(float));
-    auto dB = sparse_test::DeviceBuffer::alloc(8 * 8 * sizeof(float));
-    auto dC = sparse_test::DeviceBuffer::alloc(8 * 8 * sizeof(float));
-    auto dD = sparse_test::DeviceBuffer::alloc(8 * 8 * sizeof(float));
-
-    MatmulRawParams p;
-    float alpha = 1.0f, beta = 0.0f;
-    aclrtStream stream = 0;
-    FillMatmulRawParams(p, handle.get(), plan.get(), &alpha,
-        nullptr, dB.get(), &beta, dC.get(), dD.get(),
-        dWorkspace.get(), &stream, 1);  // B-sparse requires explicit dense A → INVALID_VALUE
-    auto ret = MatmulNpuRaw(p);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
-}
-
-// ============================================================================
 // alg_set_attribute exception-path tests
 // (standalone alg_set CSV TEST_P removed — matmul path covers setAttr roundtrip)
 // ============================================================================
@@ -1675,6 +1750,83 @@ TEST_F(AlgSetAttributeExceptionTest, ConfigMaxIdReadOnly) {
     auto ret = aclsparseLtMatmulAlgSetAttribute(
         ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID, &val, sizeof(int32_t));
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_NOT_SUPPORTED);
+}
+
+// ============================================================================
+// SPLIT_K_BUFFERS set/get 全链（此前全仓零 Set/Get 调用）：
+// 合法域 [0, splitK-1]（splitK 已设置时）；越界 / 负值拒绝；get 回读往返。
+// ============================================================================
+
+// N3-1：合法 set + get 往返（[0, splitK-1] 内，含下界 0 与上界 splitK-1）
+TEST_F(AlgSetAttributeExceptionTest, SplitKBuffersRoundtrip) {
+    AlgTestCtx ctx;
+    // 先设 splitK=2（k=8 的 A 描述符，splitK ∈ [1,8] 合法）
+    int32_t splitK = 2;
+    ASSERT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K,
+        &splitK, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    // 合法域 [0, 1]：上界 splitK-1=1
+    int32_t buffers = 1;
+    EXPECT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &buffers, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    int32_t got = -1;
+    EXPECT_EQ(aclsparseLtMatmulAlgGetAttribute(
+        ctx.handle.get(), ctx.alg.cptr(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &got, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(got, 1);
+    // 下界 0 同样合法（TWO_KERNELS uses max(splitK-1)，0 为显式最小档）
+    buffers = 0;
+    EXPECT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &buffers, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    got = -1;
+    EXPECT_EQ(aclsparseLtMatmulAlgGetAttribute(
+        ctx.handle.get(), ctx.alg.cptr(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &got, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(got, 0);
+    // splitK=4 后合法域扩展到 [0,3]
+    splitK = 4;
+    ASSERT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K,
+        &splitK, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    buffers = 3;
+    EXPECT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &buffers, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    got = -1;
+    EXPECT_EQ(aclsparseLtMatmulAlgGetAttribute(
+        ctx.handle.get(), ctx.alg.cptr(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &got, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(got, 3);
+}
+
+// N3-2：越界（≥ splitK）拒绝（splitK=2 时 buffers=2 → INVALID_VALUE）
+TEST_F(AlgSetAttributeExceptionTest, SplitKBuffersAboveLimitRejected) {
+    AlgTestCtx ctx;
+    int32_t splitK = 2;
+    ASSERT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K,
+        &splitK, sizeof(int32_t)), ACL_SPARSE_STATUS_SUCCESS);
+    int32_t buffers = 2;  // == splitK，越上界
+    EXPECT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &buffers, sizeof(int32_t)), ACL_SPARSE_STATUS_INVALID_VALUE);
+    // 默认 splitK=1 时 [0,0]：buffers=1 同样越界（对照）
+    AlgTestCtx ctx2;
+    int32_t one = 1;
+    EXPECT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx2.handle.get(), &ctx2.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &one, sizeof(int32_t)), ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// N3-3：负值拒绝
+TEST_F(AlgSetAttributeExceptionTest, SplitKBuffersNegativeRejected) {
+    AlgTestCtx ctx;
+    int32_t buffers = -1;
+    EXPECT_EQ(aclsparseLtMatmulAlgSetAttribute(
+        ctx.handle.get(), &ctx.alg.get(), ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+        &buffers, sizeof(int32_t)), ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
 TEST_F(AlgSetAttributeExceptionTest, InvalidAlignmentZero) {

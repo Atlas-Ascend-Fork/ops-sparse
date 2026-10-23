@@ -1,0 +1,145 @@
+case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side,bias_enabled,bias_stride,activation_type,relu_upper_bound,relu_threshold,gelu_scaling,num_batches,batch_stride,search_iterations,check_timing,inplace,mat_a_null,stream_null,alpha_null,beta_null,expect_status,ld_sparse,ld_dense,dense_order,cd_order,ld_cd
+# =============================================================================
+# aclsparseLtMatmulSearch 用例表 v1.2（44 列）
+# 语义变更：alg_config_id/split_k/split_k_mode = 初始 algSelection 预置属性
+# （PlanInit 前经 AlgSetAttribute 设置；搜索可在候选集内改写）。
+# 新增布局 5 列（ld_sparse/ld_dense/dense_order/cd_order/ld_cd，
+# 0/空 = 既有紧凑行为）。
+# 计数：L0 = case 1-6；L1 = case 101-104、106(D 5) / 111-112(S 2) /
+#   120-123(T 4) / 130-138(B 9) / 140-143(NA 4) / 150-153(SP 4) / 160-169(C 10)
+#   / 170-175(E 6) / 180-189(F 10) / 190-191(F11/F12) / 200-205(H 6，dtype 超集)
+#   / 206-207(J 2，ReLU 归零) / 210-217(P 8，R10 全维叠加最高 9 维)
+#   / 218-224(L 组 7，X1 布局) / 225-226(H5 补 2) / 227(N1 合法域 1)，
+#   共 82 行；CSV 共 88 行。合计 131 用例（6 L0 + 82 L1 + 43 TEST_F：
+#   X01~X18 / X19a~X19b / X20~X23 / X31~X35、X37~X50；X19 原空号已由
+#   X19a/X19b（batch 布局溢出：batchStride=2^61 / ld=2^58）占用，
+#   X24~X29/X36 空号不重排；prune 测试侧另有 X19c/X19d 编号，分属
+#   prune_test.cpp，与本表无冲突）。
+# =============================================================================
+# ---- L0 门槛 ----
+1,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,L0-1-FP16-default-preset,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+2,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,L0-2-FP32-default-preset,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+3,128,128,128,BF16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L0,L0-3-BF16-default-preset-beta05,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+4,128,128,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L0,L0-4-INT8-I32-default-preset,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+5,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-5,5,L0,L0-5-INT8-I8-TILE-default-preset,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+6,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L0,L0-6-FP16-two-kernel-window-splitK2,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 D 组：dtype × 路径 × epilogue × batch × 转置 × order ----
+# R2-1：D2 m 520→528（FP16 structured 对齐倍数 16，520%16!=0 域外；528 尾块覆盖意图不变）
+101,256,512,128,FP32,-,sparse×dense,1.0,0.5,true,false,0,1,0,STRIP,0,0,-1,1,L1,D1-FP32-transA-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+102,528,256,336,FP16,-,sparse×dense,0.5,0.5,false,false,0,1,0,STRIP,1,1,-1,1,L1,D2-FP16-tail-shape-vecscale,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+# R2-2：D4 A-sparse→B-sparse（INT8 structured 对齐倍数 32，m=48%32!=0 域外；B 侧 160x64 均 32 倍数，
+#        形态同构 ltmatmul case 327；额外获得 INT8xB-sparse 路径覆盖）
+103,40,1808,160,BF16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,0,0,-1,1,L1,D3-BF16-Bsparse-transAB-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+104,48,160,64,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,D4-INT8-I32-Bsparse-batch3-exact,row,B,0,0,0,0,0,0,3,10240,5,0,0,0,0,0,0,SUCCESS
+# R2-3：D5 (case 105) 删除——dense×dense 域外（A/B 有且仅一个 structured，
+#        MatmulDescriptorInit 层 INVALID_VALUE，Search 不可达）；case_id 105 保留空号不重排；
+#        α=2/β=0.5 标量组合并入 S2（下行 α 1→2）。
+106,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,D6-COL-order-golden-path,col,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 S 组：预置/候选空间与 workspace 语义 ----
+# R2-3：S2 α 1→2（自 D5 并入 α=2/β=0.5 标量组合；splitK=4 两段式窗口仍由 S2 承担）
+111,512,1024,512,FP32,-,sparse×dense,2.0,0.5,false,false,0,4,1,STRIP,0,0,-1,1,L1,S2-FP32-large-shape-two-kernel-splitK4,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+112,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,8,1,STRIP,0,0,-1,1,L1,S3-ws-shrink-reuse-original-buffer,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 T 组：搜索有效性计时（check_timing=1，逐次交错+顺序平衡协议）----
+120,128,4096,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,8,1,STRIP,0,0,-1,1,L1,T1-FP16-Kheavy-splitK8-fullwindow-timing,row,A,0,0,0,0,0,0,1,0,5,1,0,0,0,0,0,SUCCESS
+121,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,T2-FP32-default-fusedonly-timing,row,A,0,0,0,0,0,0,1,0,5,1,0,0,0,0,0,SUCCESS
+122,128,2048,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,8,1,STRIP,0,0,-5,5,L1,T3-INT8-I32-Kheavy-splitK8-timing,row,A,0,0,0,0,0,0,1,0,5,1,0,0,0,0,0,SUCCESS
+123,256,256,256,BF16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,T4-BF16-mid-default-timing,row,A,0,0,0,0,0,0,1,0,5,1,0,0,0,0,0,SUCCESS
+# ---- L1 B 组：行为语义 ----
+130,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,B1-blocking-no-sync-readback,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+131,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,0,2,1,STRIP,0,0,-1,1,L1,B2-inplace-matC-eq-matD,row,A,0,0,0,0,0,0,1,0,5,0,1,0,0,0,0,SUCCESS
+132,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,B3-matA-null-ws-apruned-fallback,row,A,0,0,0,0,0,0,1,0,5,0,0,1,0,0,0,SUCCESS
+133,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,B4-stream0-null-default-stream,row,A,0,0,0,0,0,0,1,0,5,0,0,0,1,0,0,SUCCESS
+134,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,B5-numStreams2-dual-stream-array,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+135,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,B6-beta-null-implies-zero,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,1,SUCCESS
+136,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,B7-alpha-null-implies-one,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,1,0,SUCCESS
+137,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L1,B8-search-iterations-1-boundary,row,A,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,SUCCESS
+138,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,B9-search-iterations-3-nondefault,row,A,0,0,0,0,0,0,1,0,3,0,0,0,0,0,0,SUCCESS
+# ---- L1 NA 组：shape 边界 ----
+140,16,16,16,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,NA1-min-shape-16cube,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+141,24,24,20,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,NA2-all-odd-small-shape,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+142,15744,64,160,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,NA3-high-m-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+143,1024,1024,1024,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,NA4-large-cube-1024,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 C 组：多场景耦合（R3 新增，case 160-169；每条耦合 4~7 维）----
+# 口径提醒：INT8 输出两级分派——纯整数路径（α=1∧β=0∧无 bias/act∧标量）
+# EXACT；FP 域介入（α≠1/β≠0/bias/GELU/向量缩放）MERE atol=1/rtol=0/lim=65（C3/C4）。
+# C7 风险标注：B-sparse×two-stage(splitK>1) 无 ltmatmul 先例，主动探测。
+160,528,336,680,BF16,-,sparse×dense,1.0,0.5,true,true,1,2,1,STRIP,1,1,-1,1,L1,C1-BF16-transAB-3vec-cfg1-splitK2,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+161,336,528,184,BF16,-,sparse×dense,0.75,-0.25,false,true,0,1,0,TILE,0,0,-1,1,L1,C2-BF16-TILE-transB-bias-GeLU,row,A,1,0,2,3.402823466e38,0.0,0.5,1,0,5,0,0,0,0,0,0,SUCCESS
+162,96,160,224,INT8,INT32,sparse×dense,3.0,-2.0,false,true,1,4,1,STRIP,0,0,-5,5,L1,C3-INT8-I32-alpha3-betam2-cfg1-splitK4,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+163,80,224,96,INT8,INT32,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,C4-INT8-I32-Bsparse-batch4-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,4,21504,5,0,0,0,0,0,0,SUCCESS
+164,96,1024,96,INT8,INT8,sparse×dense,1.0,0.0,false,true,1,8,1,TILE,0,0,-127,127,L1,C5-INT8-I8-TILE-sat-cfg1-splitK8-iters3,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,3,0,0,0,0,0,0,SUCCESS
+165,176,528,520,FP16,-,sparse×dense,-0.5,1.5,true,false,0,2,1,STRIP,0,0,-1,1,L1,C6-FP16-transA-negAlpha-bias-ReLU-splitK2,row,A,1,0,1,3.402823466e38,0.5,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+166,520,264,136,FP32,-,sparse×dense,2.5,-1.25,false,true,1,2,1,STRIP,0,0,-1,1,L1,C7-FP32-Bsparse-batch2-cfg1-splitK2-iters7,row,B,0,0,0,3.402823466e38,0.0,1.0,2,137280,7,0,0,0,0,0,0,SUCCESS
+167,56,1808,160,BF16,-,sparse×dense,1.25,0.75,false,false,0,1,0,STRIP,0,0,-1,1,L1,C8-BF16-Bsparse-batch3-bias-GeLU-scale2,row,B,1,0,2,3.402823466e38,0.0,2.0,3,289280,5,0,0,0,0,0,0,SUCCESS
+168,160,96,288,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,2,1,STRIP,0,0,-5,5,L1,C9-INT8-I32-splitK2-iters2-tail,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,2,0,0,0,0,0,0,SUCCESS
+169,176,1056,328,FP16,-,sparse×dense,1.0,0.5,true,true,1,4,1,STRIP,1,1,-1,1,L1,C10-FP16-transAB-3vec-bias-ReLU-ub8-cfg1-splitK4,row,A,1,0,1,8.0,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 E 组：R4 正交补测（case 170-175，自检遗漏收口）----
+# E1/E4 为探测标注用例（INT8×COL×transA=T 双缺失修复、TILE×B-sparse 无先例），
+# 失败按分层归因结构化回传（同 C7 处置预案）。
+170,96,160,224,INT8,INT32,sparse×dense,1.0,0.0,true,true,0,2,1,STRIP,0,0,-5,5,L1,E1-INT8-COL-transTT-splitK2,col,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+171,520,264,136,FP32,-,sparse×dense,1.0,0.5,true,false,0,2,1,STRIP,0,0,-1,1,L1,E2-FP32-COL-transA-bias-ReLU-splitK2,col,A,1,0,1,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+172,40,1808,160,FP32,-,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,1,1,-1,1,L1,E3-FP32-Bsparse-3vec-biasIndep-batch3,row,B,1,40,1,3.402823466e38,0.0,1.0,3,289280,5,0,0,0,0,0,0,SUCCESS
+173,80,224,96,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-5,5,L1,E4-INT8-I8-Bsparse-TILE-probe,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+174,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,1,1,0,STRIP,0,0,-1,1,L1,E5-FP16-Bsparse-cfg1-fused-preset,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+175,160,96,288,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,2,1,STRIP,0,0,-5,5,L1,E6-INT8-I32-twostage-GeLU-splitK2,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 F 组：A-sparse × batch 正交交叉（case 180-189；F5 TILE×batch 为探测标注）----
+180,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,F1-FP16-Asparse-batch3-straight,row,A,0,0,0,3.402823466e38,0.0,1.0,3,16384,5,0,0,0,0,0,0,SUCCESS
+181,176,528,520,FP32,-,sparse×dense,1.0,0.5,true,false,0,2,1,STRIP,0,0,-1,1,L1,F2-FP32-Asparse-transA-bias-ReLU-batch4-splitK2,row,A,1,0,1,3.402823466e38,0.0,1.0,4,274560,5,0,0,0,0,0,0,SUCCESS
+182,96,160,224,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,4,1,STRIP,0,0,-5,5,L1,F3-INT8-I32-Asparse-batch2-splitK4-exact,row,A,0,0,0,3.402823466e38,0.0,1.0,2,35840,5,0,0,0,0,0,0,SUCCESS
+183,96,224,96,INT8,INT32,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,F4-INT8-I32-Asparse-batch3-bias-GeLU-mere,row,A,1,0,2,3.402823466e38,0.0,1.0,3,21504,5,0,0,0,0,0,0,SUCCESS
+184,336,528,184,BF16,-,sparse×dense,1.0,0.5,false,true,0,1,0,TILE,1,1,-1,1,L1,F5-BF16-Asparse-TILE-3vec-biasIndep-batch3,row,A,1,336,1,3.402823466e38,0.0,1.0,3,177408,5,0,0,0,0,0,0,SUCCESS
+185,520,264,136,FP32,-,sparse×dense,1.0,0.5,true,false,0,2,1,STRIP,0,0,-1,1,L1,F6-FP32-Asparse-COL-transA-batch2-splitK2,col,A,0,0,0,3.402823466e38,0.0,1.0,2,137280,5,0,0,0,0,0,0,SUCCESS
+186,96,1024,96,FP16,-,sparse×dense,1.0,0.0,false,false,0,8,1,STRIP,0,0,-1,1,L1,F7-FP16-Asparse-Kheavy-batch4-splitK8-iters3,row,A,0,0,0,3.402823466e38,0.0,1.0,4,98304,3,0,0,0,0,0,0,SUCCESS
+187,528,336,680,BF16,-,sparse×dense,0.75,-0.25,true,true,1,2,1,STRIP,0,0,-1,1,L1,F8-BF16-Asparse-transAB-bias-GeLU-cfg1-batch2,row,A,1,0,2,3.402823466e38,0.0,1.5,2,359040,5,0,0,0,0,0,0,SUCCESS
+188,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,F9-FP16-Asparse-batch2-stride-padding,row,A,0,0,0,3.402823466e38,0.0,1.0,2,32768,5,0,0,0,0,0,0,SUCCESS
+189,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-127,127,L1,F10-INT8-I8-Asparse-TILE-sat-batch2,row,A,0,0,0,3.402823466e38,0.0,1.0,2,16384,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 F 组续：R8 正交补测（case 190-191）----
+190,15744,64,160,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,F11-FP16-Asparse-highM-batch2-scale,row,A,0,0,0,3.402823466e38,0.0,1.0,2,2519040,5,0,0,0,0,0,0,SUCCESS
+191,80,224,96,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-5,5,L1,F12-INT8-I8-Bsparse-TILE-batch2-stride-padding,row,B,0,0,0,3.402823466e38,0.0,1.0,2,24576,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 H 组：G1 dtype 矩阵超集组合（case 200-205，正向 6 条；X20-X23 TEST_F
+#      为同域组合的描述符层接受性锚点——matmulDescriptor 保持库上原样放行）----
+# output_dtype 扩值：I32CD（C=D=INT32 独立 dtype 链）/ FP16 / BF16（INT8 A/B 超集）
+200,128,128,128,INT8,I32CD,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,H1-INT8-CD-i32-superbase,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+201,128,128,128,INT8,FP16,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,H2-INT8-CD-fp16-super,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+202,128,128,128,INT8,BF16,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,H3-INT8-CD-bf16-super-probe,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+203,128,128,128,INT8,INT32,sparse×dense,1.0,0.5,false,true,0,2,1,STRIP,0,0,-5,5,L1,H4-INT8-Ci8-Di32-mixed-splitK2,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+204,96,160,224,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-5,5,L1,H5-INT8-CD-i8-tile-batch2,row,A,0,0,0,3.402823466e38,0.0,1.0,2,35840,5,0,0,0,0,0,0,SUCCESS
+205,96,160,224,INT8,FP16,sparse×dense,1.0,0.5,false,true,0,1,0,TILE,0,0,-5,5,L1,H6-INT8-CD-fp16-tile-transB,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 J 组：G2 ReLU 归零语义区分性（case 206-207，golden 按归零语义）----
+206,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,J1-relu-thr05-ub8-zeroing,row,A,0,0,1,8.0,0.5,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+207,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,J2-relu-negthr1-zeroing,row,A,0,0,1,3.402823466e38,-1.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 P 组：R10 全维叠加（case 210-217，最高 9 维；P1 为用户点名组合）----
+210,40,1808,160,BF16,-,sparse×dense,1.0,0.5,true,true,0,1,0,TILE,0,1,-1,1,L1,P1-Bsp-TILE-transAB-BF16-batch3-bvec-bias-ReLU,row,B,1,0,1,3.402823466e38,0.5,1.0,3,289280,5,0,0,0,0,0,0,SUCCESS
+211,528,336,680,FP16,-,sparse×dense,1.0,0.5,true,true,1,2,1,TILE,1,1,-1,1,L1,P2-Asp-TILE-transAB-FP16-batch2-abvec-bias-GeLU-cfg1-sk2,row,A,1,0,2,3.402823466e38,0.0,1.0,2,359040,5,0,0,0,0,0,0,SUCCESS
+212,56,1808,160,FP16,-,sparse×dense,1.0,0.5,false,true,0,1,0,TILE,1,0,-1,1,L1,P3-Bsp-TILE-transB-FP16-batch2-avec-bias-ReLU,row,B,1,0,1,3.402823466e38,0.0,1.0,2,289280,5,0,0,0,0,0,0,SUCCESS
+213,80,224,96,INT8,BF16,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,P4-INT8-CDBF16-Bsp-transB-batch2-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,2,21504,5,0,0,0,0,0,0,SUCCESS
+214,96,160,224,INT8,FP16,sparse×dense,1.0,0.0,false,true,0,2,1,TILE,1,0,-5,5,L1,P5-INT8-CDFP16-Asp-avec-bias-ReLU-sk2,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS
+215,40,1808,160,FP32,-,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,1,-1,1,L1,P6-Bsp-FP32-batch2-bvec-bias-ReLU-zeroing,row,B,1,0,1,8.0,0.5,1.0,2,289280,5,0,0,0,0,0,0,SUCCESS
+216,96,224,96,INT8,I32CD,sparse×dense,1.0,0.5,false,true,1,1,0,TILE,0,0,-5,5,L1,P7-INT8-CDI32-Asp-TILE-transB-batch3-bias-GeLU-cfg1,row,A,1,0,2,3.402823466e38,0.0,1.0,3,21504,5,0,0,0,0,0,0,SUCCESS
+217,520,264,136,FP32,-,sparse×dense,1.0,0.5,true,false,0,2,1,STRIP,0,0,-1,1,L1,P8-Asp-COL-transA-bias-GeLU-batch2-sk2,col,A,1,0,2,3.402823466e38,0.0,1.0,2,137280,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 SP 组：特殊值（α/β 语义类 / INT8 饱和）----
+150,128,128,128,FP32,-,sparse×dense,0.0,1.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,SP1-alpha0-beta1-D-eq-C,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+151,128,128,128,FP32,-,sparse×dense,-1.0,-0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,SP2-negative-scaling-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+152,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,SP3-ReLU-ub0-all-zero-output,row,A,1,0,1,0,0.0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+153,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,2,1,TILE,0,0,-127,127,L1,SP4-INT8-fullscale-saturation-exact,row,A,0,0,0,0,0,0,1,0,5,0,0,0,0,0,0,SUCCESS
+# ---- L1 L 组（X1 布局接入）：ld padding / COL 真布局 / B 侧 ld 直读 / dense-A COL ----
+# 【已收口】case224（L8 dense-A COL）：收尾根因裁决 = 测试侧 PrepareBSparseChainContext
+# 的 aPhysSize 缺 order 感知（COL 下 dA 截断，后 64 列物理数据丢失 → 越界读）——
+# 算子侧无缺陷（判别 probe 七形态全 PASS 旁证）。测试侧一行修复
+#（aPhysSize 对齐 bPhysSize 同范式）后转绿，golden/期望值零变化。
+# 布局列语义：ld_sparse=structured 侧 ld；ld_dense=dense 侧 ld；dense_order=dense 侧
+# order；cd_order/ld_cd=C/D order/ld（C/D 同 order 同 ld）。0/空 = 既有紧凑行为。
+218,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L1-FP16-ld192-pad-ABCD-row,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS,192,192,row,row,192
+219,520,264,136,FP32,-,sparse×dense,1.0,0.5,true,false,0,2,1,STRIP,0,0,-1,1,L1,L3-FP32-COL-A-ld272-bias-ReLU,col,A,1,0,1,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS,272,0,row,row,0
+220,96,160,80,BF16,-,sparse×dense,1.0,0.5,false,true,0,1,0,TILE,0,0,-1,1,L1,L4-BF16-Bsp-COL-TILE-transB-ld96,col,B,1,0,2,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS,96,0,row,row,0
+221,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L5-FP16-ld192-batch3-bias-GeLU,row,A,1,0,2,3.402823466e38,0.0,1.0,3,32768,5,0,0,0,0,0,0,SUCCESS,192,192,row,row,192
+222,128,128,128,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,1,1,-1,1,L1,L6-FP32-CDCOL-ld136-abvec-bias-GeLU-batch2,row,A,1,0,2,3.402823466e38,0.0,1.0,2,17408,5,0,0,0,0,0,0,SUCCESS,0,0,row,col,136
+223,520,264,136,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,L7-FP32-B-ld272-ld-direct-read-timing,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,1,0,0,0,0,0,SUCCESS,0,272,row,row,0
+224,96,160,80,FP16,-,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-1,1,L1,L8-FP16-Bsp-denseA-COL-ld112,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,0,SUCCESS,0,112,col,row,0
+# ---- L1 H 组补齐（H5）：B 侧 INT8 C/D 超集残留 cell（FP16 / I32CD）----
+225,80,224,96,INT8,FP16,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,H5a-INT8-CDFP16-Bsp-transB-batch2-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,2,21504,5,0,0,0,0,0,0,SUCCESS,0,0,row,row,0
+226,80,224,96,INT8,I32CD,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,H5b-INT8-CDI32-Bsp-transB-batch2-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,2,21504,5,0,0,0,0,0,0,SUCCESS,0,0,row,row,0
+# ---- N1 合法域正向：α-vec=1 ∧ β-vec=0 ∧ β=nullptr → SUCCESS
+#      （NVIDIA 契约 "beta can be NULL only if ALPHA_VECTOR_SCALING without
+#        BETA_VECTOR_SCALING"——golden 按 β=0.0）----
+227,128,128,128,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,1,0,-1,1,L1,N1L-avec-betanull-legal-domain,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,5,0,0,0,0,0,1,SUCCESS,0,0,row,row,0

@@ -1,4 +1,4 @@
-case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side,bias_enabled,bias_stride,activation_type,relu_upper_bound,relu_threshold,gelu_scaling,num_batches,batch_stride
+case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side,bias_enabled,bias_stride,activation_type,relu_upper_bound,relu_threshold,gelu_scaling,num_batches,batch_stride,ld_sparse,ld_dense,dense_order,cd_order,ld_cd
 1,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-01-A-sparse-FP16-fused,row,A
 2,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-02-A-sparse-FP32-fused,row,A
 3,256,128,256,FP16,-,sparse×dense,1.0,0.0,true,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-03-A-sparse-FP16-transA,row,A
@@ -104,3 +104,31 @@ case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config
 505,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,F1-505-GELU_SCALING-implies-GELU-FP32,row,A,1,0,3,3.402823466e38,0.0,0.5,1,0
 # F1-506: FP16, 128³, GELU_SCALING=2.0, bias=1
 506,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,F1-506-GELU_SCALING-implies-GELU-FP16,row,A,1,0,3,3.402823466e38,0.0,2.0,1,0
+# ===== L 组镜像 + H4 超集镜像 =====
+# 布局列语义同 matmulSearch（ld_sparse/ld_dense/dense_order/cd_order/ld_cd；0/空=紧凑）
+# L1 镜像：FP16 128³ 全 padded ROW（A/B/C/D ld=192，pad 64 跳过 + 数值正确；β=0.5 激活 C 读）
+600,128,128,128,FP16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L1m-FP16-ld192-pad-ABCD-row,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,192,192,row,row,192
+# L7 镜像：FP32 B dense ld=272（>n=136）——cube GM 布局直通行距（ldB 直读）路径
+601,520,264,136,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,L7m-FP32-B-ld272-ld-direct-read,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,272,row,row,0
+# H4 镜像（P4/P5/P7 参数镜像，C/D 独立 dtype 链 RunMatmulNpuInt8CD）：INT8×C/D=BF16/FP16/I32CD
+602,80,224,96,INT8,BF16,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,H4a-INT8-CDBF16-Bsp-transB-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0
+603,96,160,224,INT8,FP16,sparse×dense,1.0,0.0,false,true,0,2,1,TILE,1,0,-5,5,L1,H4b-INT8-CDFP16-Asp-TILE-avec-bias-ReLU-sk2,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0
+604,96,224,96,INT8,I32CD,sparse×dense,1.0,0.5,false,true,1,1,0,TILE,0,0,-5,5,L1,H4c-INT8-CDI32-Asp-TILE-transB-bias-GeLU-cfg1,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0
+# ===== H6 全正交 + 边界非对齐（四重正交格填格：B-sparse × TILE × batch × splitK2 × 布局维度参与）=====
+# 形状踩合法边界（INT8：dense 侧 16 倍数非 32 / structured 侧 32 倍数非 64）：
+#   H6a: m=48(dense16), k=96(struc32), n=96(struc32); ldDense=112(16非32, COL≥rows96); batchStride=9232(16非32, ≥B span9216)
+#   H6b: m=80(dense16), k=96(struc32), n=160(struc32); ldSparse=160(32非64, COL≥rows96); ldCd=88(8非16, COL≥rows80); batchStride=25616(16非32, ≥B span25536)
+# H6a（trans 侧）：INT8×C/D=FP16，B-sparse transAB(T,T)×batch2×TILE×dense-A COL+ld112×splitK2×bias×GeLU
+605,48,96,96,INT8,FP16,sparse×dense,1.0,0.5,true,true,0,2,1,TILE,0,0,-5,5,L1,H6a-INT8-CDFP16-Bsp-TILE-transTT-denseAcol-ld112-batch2-sk2-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,2,9232,0,112,col,row,0
+# H6b（non-trans 侧）：INT8×C/D=BF16，B-sparse transNN×batch3×TILE×B-COL+ld160×C/D-COL+ld88×splitK2×bias×ReLU
+606,80,96,160,INT8,BF16,sparse×dense,1.0,0.5,false,false,0,2,1,TILE,0,0,-5,5,L1,H6b-INT8-CDBF16-Bsp-TILE-transNN-Bcol-ld160-CDCOL-ld88-batch3-sk2-bias-ReLU,col,B,1,0,1,3.402823466e38,0.0,1.0,3,25616,160,0,row,col,88
+# ===== B dense COL × ldDense 非紧凑（A-sparse 链 bPhysSize 的 order 分支）=====
+# 矩形两方向：k>n（bPhysRows>bPhysCols，host 上传长度虚增 → 越界读 host）与
+# k<n（bPhysRows<bPhysCols，设备输入截断）——COL 布局下 B 物理 span =
+# physCols*ld（元素 (i,j) 位于 i + j*ld）。
+#   L8a: k=160>n=96, ldDense=176(≥k, 8 倍数)：正确 span 96*176=16896
+#   L8b: k=96<n=160, ldDense=112(≥k, 8 倍数)：正确 span 160*112=17920
+# L8a（k>n 方向）：FP32 A-sparse × B dense COL+ld176 × β=0.5
+607,64,160,96,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L8a-FP32-Asp-Bcol-ld176-kgt-n,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,176,col,row,0
+# L8b（k<n 方向）：FP32 A-sparse × B dense COL+ld112 × β=0.5
+608,64,96,160,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L8b-FP32-Asp-Bcol-ld112-kltn,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,112,col,row,0

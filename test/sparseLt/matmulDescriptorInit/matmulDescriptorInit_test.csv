@@ -53,6 +53,12 @@ L1-39,L1,dense,INVALID_VALUE,0,16,16,16,16,FP32,INVALID,,,,,,,,,,,,,,,,,,,,,,,
 L1-40,L1,matmul,INVALID_VALUE,0,32,32,32,32,INT8,COL,50_PERCENT,32,32,32,32,INT8,COL,,32,32,32,32,INT8,COL,32,32,32,32,INT8,COL,CONJ,N,32I
 # ---- 补充用例（覆盖 Dense/Structured 独立函数校验分支 + Matmul 短路/枚举分支）----
 WB-D-ld0,L1,dense,INVALID_VALUE,0,16,16,0,16,FP32,COL,,,,,,,,,,,,,,,,,,,,,,,
+# WB-D/S-ldInt32Overflow：ld > INT32_MAX 显式拒绝——
+# 下游消费点（tiling ldA/ldB/ldC/ldD、prune td.ld）均为 int32 字段，
+# 超限 ld 静默截断为垃圾行距。ld=2^31+16（对齐倍数 4 与 COL ld>=rows
+# 均通过，仅超上界）→ INVALID_VALUE。
+WB-D-ldInt32Overflow,L1,dense,INVALID_VALUE,0,16,16,2147483664,16,FP32,COL,,,,,,,,,,,,,,,,,,,,,,,
+WB-S-ldInt32Overflow,L1,structured,INVALID_VALUE,0,16,16,2147483664,16,FP32,COL,50_PERCENT,,,,,,,,,,,,,,,,,,,,,,
 WB-S-rows0,L1,structured,INVALID_VALUE,0,0,16,16,16,FP32,COL,50_PERCENT,,,,,,,,,,,,,,,,,,,,,,
 WB-S-ld0,L1,structured,INVALID_VALUE,0,16,16,0,16,FP32,COL,50_PERCENT,,,,,,,,,,,,,,,,,,,,,,
 WB-S-dtype,L1,structured,NOT_SUPPORTED,0,16,16,16,16,INVALID,COL,50_PERCENT,,,,,,,,,,,,,,,,,,,,,,

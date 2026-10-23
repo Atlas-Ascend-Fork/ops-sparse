@@ -76,7 +76,7 @@ aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
 |----------|--------|---------|------|
 | `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` | int32_t | 0 / 1 | 算法配置 ID，影响 cube tiling（baseM/baseN/baseK）。需在 PlanInit 前设置 |
 | `ACLSPARSELT_MATMUL_SPLIT_K` | int32_t | [1, K] | splitK 切分因子。需在 PlanInit 前设置 |
-| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | int32_t | > 0 | 搜索迭代次数（默认 5），当前仅存储不参与执行 |
+| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | int32_t | > 0 | 搜索迭代次数（默认 5），由 `aclsparseLtMatmulSearch` 搜索入口活读消费 |
 | `ACLSPARSELT_MATMUL_SPLIT_K_MODE` | int32_t | 0 / 1 | splitK 模式（ONE_KERNEL / TWO_KERNELS），参与 effectiveSplitK 计算：ONE_KERNEL 时 effectiveSplitK=1（融合路径），TWO_KERNELS 时 effectiveSplitK=splitK（两段式路径） |
 | `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` | int32_t | [0, splitK-1] | splitK 缓冲区数，当前仅存储不参与执行 |
 | `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` | — | 只读 | 不可设置，返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED` |

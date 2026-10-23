@@ -23,7 +23,7 @@
 |----------|--------|------|
 | `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` | int32_t | 当前算法配置 ID（0 或 1），影响 cube tiling（baseM/baseN/baseK） |
 | `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` | int32_t | 算法配置 ID 上限（返回 2，即 algConfigId 0 和 1 共 2 种配置）。只读属性，不可通过 SetAttribute 设置 |
-| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | int32_t | 搜索迭代次数（默认 5），当前仅存储不参与执行 |
+| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | int32_t | 搜索迭代次数（默认 5），由 `aclsparseLtMatmulSearch` 搜索入口活读消费 |
 | `ACLSPARSELT_MATMUL_SPLIT_K` | int32_t | splitK 切分因子，取值范围 [1, K] |
 | `ACLSPARSELT_MATMUL_SPLIT_K_MODE` | int32_t | splitK 模式（0=ONE_KERNEL 融合单 kernel，1=TWO_KERNELS matmul+epilogue 两 kernel） |
 | `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` | int32_t | splitK 缓冲区数，取值范围 [0, splitK-1]，当前仅存储不参与执行 |

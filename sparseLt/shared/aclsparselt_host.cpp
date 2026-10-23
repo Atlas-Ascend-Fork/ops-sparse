@@ -13,14 +13,12 @@
 /*!
  * \file aclsparselt_host.cpp
  * \brief sparseLt shared host-side API implementation.
- *
  * Implements the host-only APIs consumed by the alg_set_attribute /
  * alg_get_attribute / matmul / prune host TUs: GetWorkspaceSize,
  * DescSetAttribute, DescGetAttribute, Version, Property. The host-only
  * helpers (dtype_from_acl / align_up / CubeTiling / WsLayout /
  * push_tiling_to_device / fill_tiling_dims ... live in
  * shared/aclsparselt_internal.h as inline host-only functions).
- *
  * aclsparseLtMatmul (the kernel-launching entry) lives in
  * sparseLt/matmul/arch35/matmul_host.cpp.
  */
@@ -47,15 +45,20 @@
 // ============================================================================
 
 static aclsparseStatus_t SetAlphaVectorScaling(aclsparseLtMatmulDescriptor* md,
-                                                const void* data, size_t dataSize)
+                                                 const void* data, size_t dataSize)
 {
     if (dataSize != sizeof(int)) {
         OP_LOGE(kSparseLtLogTag, "ALPHA_VECTOR_SCALING: size mismatch, got %zu", dataSize);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     bool alphaVec = (*static_cast<const int*>(data) != 0);
-    // betaVectorScaling must be preserved: read current beta flag, re-encode both.
-    bool betaVec = decode_beta_scaling(md);
+    // 关闭 ALPHA_VECTOR_SCALING 时联动关闭
+    // BETA_VECTOR_SCALING：消除"α 标量 + β 向量"的混合态——NVIDIA 契约
+    // 仅定义 "BETA implies ALPHA" 单向语义（开 β 隐含开 α），关闭行为未
+    // 文档化；该混合态属未定义域，显式联动关闭以消除（此前"先开 β 再
+    // 显式关 α"可构造该态，全仓既有用例零依赖该组合——grep 实证）。
+    // 开启 α 不影响 β（维持既有语义）。
+    bool betaVec = alphaVec && decode_beta_scaling(md);
     encode_scaling_flags(md, alphaVec, betaVec);
     return ACL_SPARSE_STATUS_SUCCESS;
 }

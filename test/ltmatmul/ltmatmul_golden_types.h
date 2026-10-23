@@ -374,10 +374,10 @@ inline std::vector<float> GenScalingVector(int32_t m, uint32_t seed)
 //   - ReLU: D[i][j] = min(upperBound, max(threshold, D[i][j]))
 //   - GeLU: D[i][j] = gelu_scaling · x · sigmoid(√(8/π) · (x + 0.044715·x³))
 // All epilogue math runs in FP32 (even for FP16/BF16/INT8 outputs), per the
-// requirement doc §1 math definition. INT8 path rounds bias to INT32 first.
+// cuSPARSELt math definition. INT8 path rounds bias to INT32 first.
 // =============================================================================
 
-// Activation type enum (mirrors requirement doc §2.3.1).
+// Activation type enum (mirrors the aclsparseLt epilogue encoding).
 enum EpilogueActivationType {
     EPILOGUE_ACT_NONE = 0,
     EPILOGUE_ACT_RELU = 1,
@@ -412,15 +412,16 @@ inline void ApplyActivationFp32(std::vector<float>& Df,
     if (actType == EPILOGUE_ACT_NONE) { return; }
     const size_t mn = static_cast<size_t>(m) * static_cast<size_t>(n);
     if (actType == EPILOGUE_ACT_RELU) {
+        // G2 归零语义（与 kernel Select(x<=thr, 0, min(x, ub)) 一致）：
+        // v <= thr → 0（clamp-to-zero，非 clamp-to-threshold）；thr < v <= ub → v；v > ub → ub。
+        // 注意 <= 边界（v == thr 时归零）。
         for (size_t i = 0; i < mn; ++i) {
             float v = Df[i];
-            if (v < reluThr) { v = reluThr; }
-            if (v > reluUb) { v = reluUb; }
-            Df[i] = v;
+            Df[i] = (v <= reluThr) ? 0.0f : std::min(v, reluUb);
         }
     } else if (actType == EPILOGUE_ACT_GELU) {
         // GeLU (tanh approximation): 0.5·x·(1+tanh(√(2/π)·(x+0.044715·x³)))
-        // Requirement doc §1 uses sigmoid form: gelu_scaling · x · sigmoid(√(8/π)·(x+0.044715·x³))
+        // sigmoid form: gelu_scaling · x · sigmoid(√(8/π)·(x+0.044715·x³))
         // sigmoid(t) = 1/(1+e^{-t}); √(8/π) ≈ 1.5957691216057308f
         constexpr float kSqrt8OverPi = 1.5957691216057308f;
         const size_t total = mn;

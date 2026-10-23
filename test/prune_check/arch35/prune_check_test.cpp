@@ -1123,7 +1123,7 @@ TEST_F(PruneCheckBatchTest, MultiBatchBSparseFp32ColScanSecondBatchViolation) {
 }
 
 // =============================================================================
-// padding ld 用例（检视意见 193726682：ld > 物理行长的正向路径此前零覆盖）：
+// padding ld 用例（ld > 物理行长的正向路径此前零覆盖）：
 // kernel CopyIn 的 srcStride=(ld−validCols)×elem（prune_check_kernel.cpp
 // CopyIn 数据搬运参数）是 padding 能力的唯一消费点 —— ld > 物理行长时源行
 // 步长跨过 padding 区，padding 数据不进入 UB / 不参与判定（README「ld 大于

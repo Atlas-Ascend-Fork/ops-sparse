@@ -192,6 +192,17 @@ struct AlgSetAttrDtypeTrait<int8_t> {
     }
 };
 
+template <>
+struct AlgSetAttrDtypeTrait<int32_t> {
+    static constexpr bool kIsFp16 = false;
+    static float toFp32(int32_t v) { return static_cast<float>(v); }
+    static int32_t fromFp32(float v) {
+        // round-half-away-from-zero（对齐 kernel INT32 输出舍入模式）
+        return (v >= 0.0f) ? static_cast<int32_t>(v + 0.5f)
+                           : static_cast<int32_t>(v - 0.5f);
+    }
+};
+
 // -----------------------------------------------------------------------------
 // Shared test data generation utilities.
 // -----------------------------------------------------------------------------

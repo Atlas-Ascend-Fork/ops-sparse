@@ -21,7 +21,7 @@
 // DeviceBuffer（test/frame/descriptor_manager.h）。
 // 执行协议：非批量链 1 次 warm-up + R 轮 EventGuard 计时
 //（PRUNE_CHECK_PERF_ROUNDS，默认 5）；批量链为单次调用语义（无计时）。
-// padding ld 扩展（检视意见 193726682）：SparseSideSpecOf 增加可选 ldOverride
+// padding ld 扩展：SparseSideSpecOf 增加可选 ldOverride
 // 参数（缺省 0 = 自动推导不变），>0 时校验合法性（≥物理行长、32B/elem 对齐）
 // 并采用；执行链（PruneCheckNpu/BSparse）透传 —— 设备缓冲按 ld 分配行距，
 // host 侧数据准备（PrepareSparseSideData）在 padding 区写入非零垃圾。
@@ -76,7 +76,7 @@ struct SparseSidePhysicalSpec {
     bool needTranspose = false;  // T+ROW：上传前需逻辑 (m,k) -> 物理 (k,m) 转置
 };
 
-// ld 覆盖说明（padding ld 用例，检视意见 193726682）：ldOverride > 0 时采用
+// ld 覆盖说明（padding ld 用例）：ldOverride > 0 时采用
 // 自定义物理行步长（padding 布局：ld > 物理行长），合法性校验与描述符层
 // 同口径 —— ldOverride ≥ 物理行长（三分支自动推导的 s.ld 均等于物理行长，
 // 覆盖校验等价 IsLdValid 的 ROW 序 ld≥cols / COL 序 ld≥rows 约束）且为
@@ -153,7 +153,7 @@ inline T PruneCheckPaddingGarbage()
 // 物理数据准备（T+ROW 转置；其余原样），与 prune 家族布局语义一致。
 // padding ld（spec.ld > 物理行长）扩展：数据区按行散布（T+ROW 先转置），
 // padding 区 [物理行长, ld) 填非零垃圾（PruneCheckPaddingGarbage）——
-// 设备缓冲按 ld 行距分配，host 侧数据准备同步写入垃圾（检视意见 193726682）。
+// 设备缓冲按 ld 行距分配，host 侧数据准备同步写入垃圾。
 // 紧致布局（ld == 物理行长，既有全部用例）行为不变。
 template <typename T>
 inline std::vector<T> PrepareSparseSideData(const std::vector<T>& hLogical,

@@ -18,6 +18,7 @@
 #
 # Source layout (this directory = test/ltmatmul/):
 #   arch35/ltmatmul_test.cpp          (matmul CSV + TEST_F + alg_set exception)
+#   arch35/ltmatmul_test_neg.cpp      (WB_L2_42~47 白盒负向系，主文件 NBNC 拆分)
 #   arch35/ltmatmul_test.csv          (matmul CSV cases)
 #   arch35/ltmatmul_perf_test.cpp     (perf benchmark)
 #   ltmatmul_golden.h / ltmatmul_golden_types.h / ltmatmul_golden_int8.h
@@ -72,6 +73,12 @@ endif()
 
 add_executable(${_target} ${_test_src} ${CMAKE_SOURCE_DIR}/test/frame/test_main.cpp)
 target_compile_features(${_target} PRIVATE cxx_std_17)
+
+# WB_L2 负向系（codecheck7 拆分：主文件 NBNC 超 2000）——同 target 多源。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_neg.cpp")
+    target_sources(${_target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_neg.cpp)
+endif()
 
 set_target_properties(${_target} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/test/ltmatmul)

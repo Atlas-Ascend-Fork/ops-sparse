@@ -22,7 +22,7 @@
   其中 A_pruned 是经 `aclsparseLtSpMMAPrune` 剪枝后的稠密存储矩阵（被置零元素以 0 表示）。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加 → activation（ReLU/GeLU，可选）→ 类型转换写出。alpha/beta 支持标量（Host float）或逐行向量缩放（Device float[M]，启用 `ALPHA_VECTOR_SCALING`/`BETA_VECTOR_SCALING`）。bias 为长度 = m 的逐行广播向量（dtype 与 C 相同，INT8 路径为 FP32）。activation 支持 ReLU（`min(upperBound, max(threshold, D))`）与 GeLU（`gelu_scaling * x * sigmoid(sqrt(8/π) * (x + 0.044715 * x³))`），二者互斥。支持 batch 批量计算（`NUM_BATCHES` + `BATCH_STRIDE`）。该算子对标 cuSPARSELt 中的 `cusparseLtMatmul`，采用描述符（Descriptor）+ 算法选择（AlgSelection）+ 执行计划（Plan）的分段式调用模型，通过描述符属性扩展实现 epilogue 功能，不新增计算接口。
 - **目标平台**：<term>Ascend 950PR/Ascend 950DT</term>（arch35 / DAV_3510）。
 - **编程模型**：ascendc Cube（Mmad/Fixpipe）矩阵乘硬件单元执行核心 GEMM，Vector 单元执行 epilogue（alpha·acc + beta·C + bias + activation + 类型转换）。splitK=1 时采用 AIC+AIV 融合单 kernel 路径（L0C→UB→GM）；splitK>1 时采用两段式路径（Cube 写 temp → epilogue 归约写 D）。bias 与 activation 在 `beta·C` 之后、类型转换之前于 FP32 域执行。算子异步启动，内部不执行 stream 同步。
-- **支持 dtype**：FP32 / FP16 / BF16 / INT8（v2 扩展 BF16/INT8）。INT8 路径使用 `computeType = ACL_SPARSE_COMPUTE_32I`（int32 累加），支持 INT8/INT32 双输出。
+- **支持 dtype**：FP32 / FP16 / BF16 / INT8（v2 扩展 BF16/INT8）。INT8 路径使用 `computeType = ACL_SPARSE_COMPUTE_32I`（int32 累加），C/D 支持 INT8/INT32/FP16/BF16 组合（详见"约束说明"数据类型一致性与"INT8 双输出"章节）。
 - **支持路径**：sparse×dense（2:4 结构化稀疏 × 稠密）+ dense×dense（稠密 × 稠密，v2 新增）。dense×dense 路径跳过剪枝前置，matA 须显式传入。
 
 ### 数学原理
@@ -202,11 +202,11 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
 | matD | 输入 | const aclsparseLtMatDescriptor_t* | 稠密矩阵 D 描述符（输出），Host 内存 |
 | computeType | 输入 | aclsparseComputeType_t | 计算精度类型，独立于存储 dtype。`ACL_SPARSE_COMPUTE_32F` 对应 FP32/FP16/BF16 输入（FP32 累加）；`ACL_SPARSE_COMPUTE_32I` 对应 INT8 输入（int32 累加）。`ACL_SPARSE_COMPUTE_16F` 当前不支持，Host 内存 |
 
-> computeType 与存储 dtype 解耦：`COMPUTE_32F` 要求 A/B 为 FP32/FP16/BF16（L0C 以 float 累加）；`COMPUTE_32I` 要求 A/B 为 INT8（L0C 以 int32_t 累加）。INT8 路径下 matC 须为 INT8，matD 可为 INT8 或 INT32（双输出，详见下方"INT8 双输出"章节）。
+> computeType 与存储 dtype 解耦：`COMPUTE_32F` 要求 A/B 为 FP32/FP16/BF16（L0C 以 float 累加）；`COMPUTE_32I` 要求 A/B 为 INT8（L0C 以 int32_t 累加）。INT8 路径下 C/D 可为 INT8/INT32/FP16/BF16 的支持组合（详见下方"约束说明"与"INT8 双输出"章节）。
 
 ### Matmul 描述符属性设置 / 查询
 
-Matmul 描述符属性用于配置 epilogue 链的向量缩放、bias 与 activation。须在 `aclsparseLtMatmulPlanInit` 之前设置（PlanInit 读取属性计算 tiling）。PlanInit 之后修改属性不会生效（需重新初始化计划）。
+Matmul 描述符属性用于配置 epilogue 链的向量缩放、bias 与 activation。上述属性在执行期（`aclsparseLtMatmul` / `aclsparseLtMatmulSearch` 每次执行时）从描述符读取，`aclsparseLtMatmulPlanInit` 之后修改对后续执行生效（宽容时序，无需重新初始化计划）。
 
 #### aclsparseLtMatmulDescSetAttribute
 
@@ -357,7 +357,7 @@ aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
 |----------|--------|---------|------|
 | ACLSPARSELT_MATMUL_ALG_CONFIG_ID | int32_t | 0 / 1 | 算法配置 ID，影响 cube tiling（baseM/baseN/baseK）。需在 PlanInit 前设置 |
 | ACLSPARSELT_MATMUL_SPLIT_K | int32_t | [1, K] | splitK 切分因子。需在 PlanInit 前设置 |
-| ACLSPARSELT_MATMUL_SEARCH_ITERATIONS | int32_t | > 0 | 搜索迭代次数（默认 5），当前仅存储不参与执行 |
+| ACLSPARSELT_MATMUL_SEARCH_ITERATIONS | int32_t | > 0 | 搜索迭代次数（默认 5），由 aclsparseLtMatmulSearch 搜索入口活读消费 |
 | ACLSPARSELT_MATMUL_SPLIT_K_MODE | int32_t | 0 / 1 | splitK 模式（ONE_KERNEL / TWO_KERNELS），参与 effectiveSplitK 计算：ONE_KERNEL 时 effectiveSplitK=1（融合路径），TWO_KERNELS 时 effectiveSplitK=splitK（两段式路径） |
 | ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS | int32_t | [0, splitK-1] | splitK 缓冲区数，当前仅存储不参与执行 |
 | ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID | — | 只读 | 不可设置，返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED` |
@@ -503,9 +503,9 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(aclsparseLtMatDescriptor_t* ma
 
 ## 约束说明
 
-- **数据类型一致性**：
-  - FP32/FP16/BF16 路径：matA/matB/matC/matD 的值类型须一致，否则 PlanInit 返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-  - INT8 路径（`computeType = ACL_SPARSE_COMPUTE_32I`）：matA/matB 须为 INT8；matC 须为 INT8；matD 可为 INT8 或 INT32（C/D 类型不要求一致，D 支持双输出）。
+- **数据类型一致性**（执行层校验，违反返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）：
+  - FP32/FP16/BF16 路径：matC/matD 的值类型须与 matA/matB 一致。
+  - INT8 路径（`computeType = ACL_SPARSE_COMPUTE_32I`）：matA/matB 须为 INT8；(matC, matD) 支持组合为 (INT8,INT8) / (INT8,INT32) / (INT32,INT32) / (FP16,FP16) / (BF16,BF16)（C/D 同 dtype 或 C=INT8→D=INT32）。
   - 不支持的类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。FP8 不支持。
 - **computeType 与 dtype 匹配**：`ACL_SPARSE_COMPUTE_32F` 要求 A/B 为 FP32/FP16/BF16；`ACL_SPARSE_COMPUTE_32I` 要求 A/B 为 INT8。不匹配返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。`ACL_SPARSE_COMPUTE_16F` 当前不支持。
 - **计算路径（sparse×dense / dense×dense）**：
@@ -523,7 +523,7 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(aclsparseLtMatDescriptor_t* ma
 - **matA 回退路径**：matA 为 nullptr 时回退使用 workspace 的 aPruned 区（仅 sparse×dense 且 A-sparse 路径），调用方须自行保证该区域已通过 SpMMAPrune 填充有效数据。dense×dense 路径与 B-sparse 路径 matA 不可为 nullptr。推荐显式传入 SpMMAPrune 的 d_out 作为 matA。
 - **销毁顺序**：描述符之间存在原始指针依赖（无引用计数），销毁不级联失效。须按 `plan → algSelection → matmulDesc → mat` 逆序销毁，否则产生悬垂指针。handle 在所有描述符销毁后销毁。
 - **异步执行**：Matmul 异步启动，内部不执行 `aclrtSynchronizeStream`；调用方如需读取 matD 结果，须自行同步 stream。
-- **属性设置时机**：`aclsparseLtMatmulAlgSetAttribute` 须在 `aclsparseLtMatmulPlanInit` 之前调用，PlanInit 读取 algConfigId 与 splitK 计算 tiling。PlanInit 之后修改属性不会生效（需重新初始化计划）。同理，bias/activation（`aclsparseLtMatmulDescSetAttribute`）与 batch（`aclsparseLtMatDescSetAttribute`）属性也须在 PlanInit 之前设置。
+- **属性设置时机**：`aclsparseLtMatmulAlgSetAttribute` 的三元组属性（algConfigId / splitK / splitKMode）须在 `aclsparseLtMatmulPlanInit` 之前调用，PlanInit 读取它们计算 tiling，之后修改不生效（需重新初始化计划）。描述符属性——向量缩放 / bias / activation（`aclsparseLtMatmulDescSetAttribute`）与 batch（`aclsparseLtMatDescSetAttribute`）——在执行期从描述符读取，PlanInit 之后修改对后续执行生效。
 - **bias 约束**：
   - bias 通过 `ACLSPARSELT_MATMUL_BIAS_POINTER` 设置 Device 指针，dtype 与 C 矩阵相同（FP32 路径 bias 为 FP32，FP16 路径 bias 为 FP16，BF16 路径 bias 为 BF16），INT8 路径 bias 为 FP32（cuSPARSELt 规定），长度 = m，须 16 字节对齐。bias 加载后 Cast 到 FP32 域累加。
   - `ACLSPARSELT_MATMUL_BIAS_STRIDE` 为 batch 间 bias 步长（元素数），0=所有 batch 共用同一 bias（默认）。非 0 时各 batch 按 biasStride 偏移使用各自的 bias 向量。
@@ -549,7 +549,7 @@ INT8 输入路径（`computeType = ACL_SPARSE_COMPUTE_32I`，A/B 为 INT8）支�
 - **INT8 输出**（`matD.valueType = ACL_INT8`）：epilogue 将 int32 累加结果饱和截断到 `[-128, 127]` 后以 int8 写出。使用 `Mins`/`Maxs` 钳位 + `SpltCastFp32ToInt8`（`float→half→int8` 两步 Vector Cast，DAV-3510 不支持直接 `float→int8_t` Cast，也不支持 `CAST_SATURATE`）。
 - **INT32 输出**（`matD.valueType = ACL_INT32`）：epilogue 将 int32 累加结果直接写出（无 Cast、无饱和截断），保留完整累加精度。alpha=1+beta=0 快速路径使用 Vector `Add<int32_t>` 累加（splitK>1 归约）+ 直接 int32 UB→GM 输出，完全 bypass float 中间转换。
 
-C 矩阵（累加项）在 INT8 路径下须为 INT8（`matC.valueType = ACL_INT8`）。kernel 通过 `GlobalTensor<int8_t>` 读取 C，不支持 C 为 INT32（与 cuSPARSELt `COMPUTE_32I` 语义不完全对齐：cuSPARSELt 允许 C/D 各自为 INT8 或 INT32，但本实现中 C 必须与输入 dtype 一致）。INT8 路径支持 beta≠0（C 以 int8_t 读取后 Cast 到 float 参与 `beta*C` 累加）。
+C 矩阵（累加项）在 INT8 路径下的 dtype 与 matD 联动：支持 C=D=INT8、C=INT8/D=INT32、C=D=INT32、C=D=FP16、C=D=BF16 五种组合（与 cuSPARSELt `COMPUTE_32I` dtype 表对齐）。C=INT8 时 kernel 通过 `GlobalTensor<int8_t>` 读取 C；C=INT32/FP16/BF16 时按对应 CType 贯通分支读取（`int8_ci32`/`int8_cf16`/`int8_cbf16`）。INT8 路径支持 beta≠0（C 读取后 Cast 到 float 参与 `beta*C` 累加）。
 
 ### 已知限制
 
@@ -862,7 +862,7 @@ int aclsparseLtMatmulBiasActBatchTest()
         &matA, &matB, &matC, &matD, ACL_SPARSE_COMPUTE_32F);
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("MatmulDescriptorInit failed: %d\n", ret); return ret);
 
-    // 6. 设置 bias + activation 属性（须在 PlanInit 之前）
+    // 6. 设置 bias + activation 属性（执行期读取，PlanInit 前后设置均生效）
     //    bias: Device 指针 + batch stride
     ret = aclsparseLtMatmulDescSetAttribute(&handle, &matmulDesc, ACLSPARSELT_MATMUL_BIAS_POINTER,
                                             &dBias, sizeof(void*));

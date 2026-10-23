@@ -22,7 +22,7 @@
 namespace sparse_test {
 
 // =============================================================================
-// CSV-driven test parameter for aclsparseLtMatmul (v2: 4 dtype × 2 path).
+// CSV-driven test parameter for aclsparseLtMatmul (4 dtype × 2 path).
 //
 // CSV columns (16 columns, v2):
 //   case_id, m, k, n, dtype, output_dtype, matrix_type,
@@ -74,6 +74,13 @@ struct MatmulParam : public SparseTestParamBase {
     int32_t numBatches = 1;                // >=1; 1=single batch
     int64_t batchStride = 0;               // matrix batch stride (elems), 0=single batch
 
+    // ----- ld/order 布局列（默认 0/row = 既有紧凑行为）-----
+    int64_t ldSparse = 0;                  // structured 侧 ld（A-sparse 的 A / B-sparse 的 B）
+    int64_t ldDense = 0;                   // dense 侧 ld（A-sparse 的 B / B-sparse 的 A）
+    std::string denseOrder;                // dense 侧 order: row/col（空 = row）
+    std::string cdOrder;                   // C/D order: row/col（空 = row）
+    int64_t ldCd = 0;                      // C/D ld（ROW ≥ n / COL ≥ m；0 = 紧凑）
+
     // Convenience accessors
     bool isFp32() const { return dtype == "FP32"; }
     bool isFp16() const { return dtype == "FP16"; }
@@ -98,6 +105,15 @@ struct MatmulParam : public SparseTestParamBase {
     bool hasEpilogue() const { return hasBias() || hasActivation(); }
     bool hasBatch() const { return numBatches > 1; }
     bool biasStrideShared() const { return biasStride == 0; }
+    // 布局便捷访问（ltmatmul_npu_chain.h MatmulLayoutOpts 由 test.cpp 组装）
+    bool isDenseColOrder() const { return denseOrder == "col"; }
+    bool isCdColOrder() const { return cdOrder == "col"; }
+    bool hasCdLayout() const { return ldCd > 0 || isCdColOrder(); }
+    bool hasLayoutOverride() const
+    {
+        return ldSparse > 0 || ldDense > 0 || ldCd > 0 ||
+               isDenseColOrder() || isCdColOrder();
+    }
 
     // fillEpilogueFields: parse epilogue CSV columns.
     void fillEpilogueFields(const csv_map& row) {
@@ -159,6 +175,12 @@ struct MatmulParam : public SparseTestParamBase {
         order           = parseString(row, "order");
         sparse_side     = parseString(row, "sparse_side");
         fillEpilogueFields(row);
+        // 布局列（缺列/0/空 = 既有紧凑默认，向后兼容）
+        ldSparse        = static_cast<int64_t>(parseInt(row, "ld_sparse"));
+        ldDense         = static_cast<int64_t>(parseInt(row, "ld_dense"));
+        denseOrder      = parseString(row, "dense_order");
+        cdOrder         = parseString(row, "cd_order");
+        ldCd            = static_cast<int64_t>(parseInt(row, "ld_cd"));
         applyFieldDefaults();
     }
 

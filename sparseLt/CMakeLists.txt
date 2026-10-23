@@ -73,33 +73,91 @@ if(NOT SPARSELT_KERNEL_SRCS)
                    "skipping sparseLt library")
 endif()
 
-# OP_LIST path filter (same idea as sparse/CMakeLists.txt: keep sources whose path
-# contains /${op}/). Reuses ENABLE_SPARSELT: when the build is filtered to non-Lt
-# ops (e.g. --ops=scatter → -DOP_LIST=scatter), no path under sparseLt/ matches,
-# so clear sources and skip the Lt library. Decouples single sparse-op builds from
-# compiling the full sparseLt tree.
-if(OP_LIST AND ENABLE_SPARSELT)
-    set(_filtered_host "")
-    set(_filtered_kernel "")
-    foreach(src ${SPARSELT_HOST_SRCS})
-        foreach(op ${OP_LIST})
+# OP_LIST filter (same idea as sparse/CMakeLists.txt: detect whether any
+# requested op belongs to the sparseLt tree). Reuses ENABLE_SPARSELT: when the
+# build is filtered to non-Lt ops (e.g. --ops=scatter → -DOP_LIST=scatter),
+# nothing under sparseLt/ is requested, so clear sources and skip the Lt
+# library. Decouples single sparse-op builds from compiling the full sparseLt
+# tree.
+#
+# Unlike sparse/, per-name source filtering is NOT viable on the Lt tree:
+# (a) test dirs are not named after source dirs (test/ltmatmul → sparseLt/
+#     matmul, test/sparseLt/matmulSearch → sparseLt/matmul_search, ...);
+# (b) Lt operators are interdependent (matmul_search calls aclsparseLtMatmul,
+#     matmul_plan depends on matmul_descriptor, everything uses common/shared).
+# Filtering by name would yield an incomplete library that fails to link.
+#
+# "Requested a Lt op" = ANY of:
+#   1. /${op}/ matches a source path under sparseLt/ — covers source-dir-style
+#      names (matmul, matmul_search, prune, prune_check, spmma_compress, ...);
+#   2. <op> is an Lt TEST leaf: test/<op>/CMakeLists.txt (ltmatmul, prune, ...)
+#      or test/sparseLt/<op>/CMakeLists.txt (matmulSearch, ...) exists and
+#      links the Lt library (its CMakeLists.txt references OPS_SPARSELT).
+#      This is REQUIRED because test leaf names never match source paths
+#      (matmulSearch ≠ matmul_search, ltmatmul ≠ matmul, ...). Without it,
+#      build.sh --ops=sparseLt (group dir expanded to test leaf names:
+#      matmulDescriptorInit,matmulPlanInit,matmulSearch) would silently skip
+#      the Lt library and keep linking the STALE build_out so — a false
+#      verification hazard. New Lt tests are picked up automatically.
+# Policy: if ANY op in OP_LIST is Lt-related, build the full tree (Lt operators
+# are interdependent); only skip the library when nothing matches.
+if(OP_LIST)
+    set(_lt_requested FALSE)
+    set(_lt_match_why "")
+    foreach(op ${OP_LIST})
+        # (1) source-path match
+        foreach(src ${SPARSELT_HOST_SRCS} ${SPARSELT_KERNEL_SRCS})
             if(src MATCHES "/${op}/")
-                list(APPEND _filtered_host ${src})
+                set(_lt_requested TRUE)
+                set(_lt_match_why "source path /${op}/")
                 break()
             endif()
         endforeach()
+        # (2) Lt test-leaf match
+        if(NOT _lt_requested)
+            foreach(_t_cml
+                    "${CMAKE_SOURCE_DIR}/test/${op}/CMakeLists.txt"
+                    "${CMAKE_SOURCE_DIR}/test/sparseLt/${op}/CMakeLists.txt")
+                if(EXISTS "${_t_cml}")
+                    file(READ "${_t_cml}" _t_cml_content)
+                    if(_t_cml_content MATCHES "OPS_SPARSELT")
+                        string(REPLACE "${CMAKE_SOURCE_DIR}/" "" _t_cml_rel "${_t_cml}")
+                        set(_lt_requested TRUE)
+                        set(_lt_match_why "Lt test leaf ${_t_cml_rel}")
+                        break()
+                    endif()
+                endif()
+            endforeach()
+        endif()
+        if(_lt_requested)
+            break()
+        endif()
     endforeach()
-    foreach(src ${SPARSELT_KERNEL_SRCS})
-        foreach(op ${OP_LIST})
-            if(src MATCHES "/${op}/")
-                list(APPEND _filtered_kernel ${src})
-                break()
-            endif()
-        endforeach()
-    endforeach()
-    set(SPARSELT_HOST_SRCS ${_filtered_host})
-    set(SPARSELT_KERNEL_SRCS ${_filtered_kernel})
-    if(NOT SPARSELT_HOST_SRCS AND NOT SPARSELT_KERNEL_SRCS)
+
+    if(_lt_requested)
+        if(ENABLE_SPARSELT)
+            message(STATUS "[sparseLt] OP_LIST=${OP_LIST} matched sparseLt (${_lt_match_why}); "
+                           "building full sparseLt tree (Lt operators are interdependent)")
+        else()
+            # Anti-false-verification guard: Lt ops were explicitly requested,
+            # but the library cannot be built in this environment (see the
+            # devkit-version / kernel-source checks above). Warn LOUDLY instead
+            # of silently skipping: a skipped build keeps the stale
+            # build_out/lib64/libops_sparseLt.so in place, and anything run
+            # against it would verify OLD code, not the requested one.
+            message(WARNING
+                "[sparseLt] ===========================================================\n"
+                "[sparseLt] Lt ops requested via OP_LIST (${OP_LIST}; matched: ${_lt_match_why})\n"
+                "[sparseLt] but the sparseLt library is DISABLED in this environment\n"
+                "[sparseLt] (asc-devkit=${ASC_DEVKIT_MAJOR}.${ASC_DEVKIT_MINOR}, SOC=${SOC_VERSION},\n"
+                "[sparseLt] arch=${SOC_ARCH_DIRS}). The library is SKIPPED: build_out keeps\n"
+                "[sparseLt] the PREVIOUS libops_sparseLt.so and all Lt tests will be skipped.\n"
+                "[sparseLt] Results run against the stale library are NOT a verification.\n"
+                "[sparseLt] ===========================================================")
+        endif()
+    else()
+        set(SPARSELT_HOST_SRCS "")
+        set(SPARSELT_KERNEL_SRCS "")
         set(ENABLE_SPARSELT FALSE)
         message(STATUS "[sparseLt] OP_LIST=${OP_LIST} matches no path under sparseLt/, "
                        "ENABLE_SPARSELT=FALSE")
@@ -132,18 +190,25 @@ set(ENABLE_SPARSELT ${ENABLE_SPARSELT} PARENT_SCOPE)
 # called here directly. Use cmake_language(DEFER DIRECTORY) to schedule the call
 # at the end of the root directory processing, by which time the target exists.
 # This uses the CANN-provided tensor_api (no ops-tensor dependency).
+#
+# DEFER scope pitfall (verified experimentally): CALL arguments are evaluated
+# when the deferred call RUNS (root-directory scope), not when it is recorded
+# here. Directory-local variables such as _tensor_api_base are out of scope
+# there and expand to EMPTY — this silently turned the include flags into
+# "-I/include -I" and broke every tensor_api include ("tensor_api/tensor.h
+# file not found"). Only root-scope-visible variables (ASCEND_CANN_PACKAGE_PATH,
+# CMAKE_SYSTEM_PROCESSOR, OPS_SPARSELT) may be referenced in the CALL arguments;
+# spell out the tensor_api paths inline instead of using a local variable.
 if(ENABLE_SPARSELT AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.19")
-    set(_tensor_api_base
-        "${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api")
     cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR}
         CALL target_include_directories ${OPS_SPARSELT} PRIVATE
-            ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/impl/c_api
-            ${_tensor_api_base}
-            ${_tensor_api_base}/include
+            "${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/impl/c_api"
+            "${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api"
+            "${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api/include"
         )
     cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR}
         CALL target_compile_options ${OPS_SPARSELT} PRIVATE
-            $<$<COMPILE_LANGUAGE:ASC>:-I${_tensor_api_base}/include>
-            $<$<COMPILE_LANGUAGE:ASC>:-I${_tensor_api_base}>
+            $<$<COMPILE_LANGUAGE:ASC>:-I${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api/include>
+            $<$<COMPILE_LANGUAGE:ASC>:-I${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api>
         )
 endif()

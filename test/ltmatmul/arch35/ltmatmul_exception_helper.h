@@ -21,6 +21,9 @@
 // Contents:
 //   - MatmulRawParams: raw matmul call params with injectable invalid values
 //   - MatmulNpuRaw: direct aclsparseLtMatmul wrapper for exception tests
+//   - SparseLtMatmulCtxBase: shared RAII guard/stream/buffer skeleton +
+//     common descriptor construction for negative-test matmul contexts
+//     (MatmulExceptionCtx here; dtype-pair variant in ltmatmul_test_neg.cpp)
 //   - MatmulExceptionCtx: RAII context for building a valid 8x8 plan
 // =============================================================================
 
@@ -61,11 +64,43 @@ inline aclsparseStatus_t MatmulNpuRaw(const MatmulRawParams& p)
 }
 
 // -----------------------------------------------------------------------------
-// Helper: build a valid plan for exception tests (8x8 FP32 descriptors).
+// Helper: fill the common MatmulRawParams fields for exception tests.
+// Individual tests override specific fields after calling this.
+// (Moved from ltmatmul_test.cpp — shared by ltmatmul_test_neg.cpp.)
 // -----------------------------------------------------------------------------
-struct MatmulExceptionCtx {
+inline void FillMatmulRawParams(MatmulRawParams& p,
+    aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulPlan_t plan,
+    const void* alpha, const void* matA, const void* matB,
+    const void* beta, const void* matC, void* matD,
+    void* workspace, aclrtStream* streams, int32_t numStreams)
+{
+    p.handle = handle;
+    p.plan = plan;
+    p.alpha = alpha;
+    p.matA = matA;
+    p.matB = matB;
+    p.beta = beta;
+    p.matC = matC;
+    p.matD = matD;
+    p.workspace = workspace;
+    p.streams = streams;
+    p.numStreams = numStreams;
+}
+
+// -----------------------------------------------------------------------------
+// SparseLtMatmulCtxBase: shared RAII skeleton for negative-test matmul
+// contexts — full guard chain (handle → A/B/C/D descriptors → matmulDesc →
+// algSel → plan; A structured 50% + B/C/D dense ROW, alignment 16) plus
+// stream / device buffers / workspaceSize. MatmulExceptionCtx (8x8 FP32
+// baseline, this file) and MatmulDtypePairCtx (128³ dtype-pair matrix,
+// ltmatmul_test_neg.cpp) derive from it; per-scenario buffer / workspace
+// provisioning stays in the derived ctor bodies. Base dtor releases the
+// stream before guards unwind (same sequence as the former per-struct
+// member layout: dtor body first, then members in reverse order).
+// -----------------------------------------------------------------------------
+struct SparseLtMatmulCtxBase {
     sparse_test::SparseLtHandleGuard handle;
-    sparse_test::SparseLtMatDescGuard matA;
+    sparse_test::SparseLtMatDescGuard matA;  // A structured（A-sparse 50%）
     sparse_test::SparseLtDnMatDescGuard matB;
     sparse_test::SparseLtDnMatDescGuard matC;
     sparse_test::SparseLtDnMatDescGuard matD;
@@ -81,26 +116,48 @@ struct MatmulExceptionCtx {
     sparse_test::DeviceBuffer dWorkspace;
     size_t workspaceSize = 0;
 
-    MatmulExceptionCtx(int32_t m = 8, int32_t k = 8, int32_t n = 8,
-                       aclDataType dtype = ACL_FLOAT,
-                       bool isDense = false)
-        : handle(),
-          matA(handle.get(), k, m, m, 16, dtype,
-               ACL_SPARSE_ORDER_ROW,
-                ACL_SPARSE_LT_SPARSITY_50_PERCENT),
-          matB(handle.get(), k, n, n, 16, dtype, ACL_SPARSE_ORDER_ROW),
-          matC(handle.get(), m, n, n, 16, dtype, ACL_SPARSE_ORDER_ROW),
-          matD(handle.get(), m, n, n, 16, dtype, ACL_SPARSE_ORDER_ROW),
-          matmulDesc(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
-                     matA.get(), matB.get(), matC.get(), matD.get(),
-                     ACL_SPARSE_COMPUTE_32F),
+    // 公共构造段：A/B/C/D 描述符 + matmulDesc + algSel + plan。A/B 共享
+    // abDtype，C/D 独立 dtype（dtype 配对负向注入用）；opA 恒为 N，opB /
+    // computeType 由场景注入（INT8 路径 ROW/ROW 须 (N, T)）。
+    SparseLtMatmulCtxBase(int32_t m, int32_t k, int32_t n,
+                          aclDataType abDtype, aclDataType cDtype, aclDataType dDtype,
+                          aclsparseOperation_t opB, aclsparseComputeType_t computeType)
+        : matA(handle.get(), k, m, m, 16, abDtype, ACL_SPARSE_ORDER_ROW,
+               ACL_SPARSE_LT_SPARSITY_50_PERCENT),
+          matB(handle.get(), k, n, n, 16, abDtype, ACL_SPARSE_ORDER_ROW),
+          matC(handle.get(), m, n, n, 16, cDtype, ACL_SPARSE_ORDER_ROW),
+          matD(handle.get(), m, n, n, 16, dDtype, ACL_SPARSE_ORDER_ROW),
+          matmulDesc(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, opB,
+                     matA.get(), matB.get(), matC.get(), matD.get(), computeType),
           algSel(handle.get(), matmulDesc.get(), ACL_SPARSE_LT_MATMUL_ALG_DEFAULT),
           plan(handle.get(), matmulDesc.get(), algSel.get())
     {
-        aclError streamRet = aclrtCreateStream(&stream);
-        if (streamRet != ACL_SUCCESS) {
-            throw std::runtime_error("MatmulExceptionCtx: aclrtCreateStream failed");
+    }
+
+    // 公共 ctor 前奏：创建 stream（errMsg 保留原 per-ctx 前缀文案）。
+    void CreateStream(const char* errMsg)
+    {
+        if (aclrtCreateStream(&stream) != ACL_SUCCESS) {
+            throw std::runtime_error(errMsg);
         }
+    }
+
+    ~SparseLtMatmulCtxBase() {
+        if (stream) { aclrtDestroyStream(stream); }
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Helper: build a valid plan for exception tests (8x8 FP32 descriptors).
+// -----------------------------------------------------------------------------
+struct MatmulExceptionCtx : SparseLtMatmulCtxBase {
+    MatmulExceptionCtx(int32_t m = 8, int32_t k = 8, int32_t n = 8,
+                       aclDataType dtype = ACL_FLOAT,
+                       bool isDense = false)
+        : SparseLtMatmulCtxBase(m, k, n, dtype, dtype, dtype,
+                                ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_COMPUTE_32F)
+    {
+        CreateStream("MatmulExceptionCtx: aclrtCreateStream failed");
         const size_t mk = static_cast<size_t>(m) * k;
         const size_t kn = static_cast<size_t>(k) * n;
         const size_t mn = static_cast<size_t>(m) * n;
@@ -118,10 +175,6 @@ struct MatmulExceptionCtx {
         if (workspaceSize > 0) {
             dWorkspace = sparse_test::DeviceBuffer::alloc(workspaceSize);
         }
-    }
-
-    ~MatmulExceptionCtx() {
-        if (stream) { aclrtDestroyStream(stream); }
     }
 };
 

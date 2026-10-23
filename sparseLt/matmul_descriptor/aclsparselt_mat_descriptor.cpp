@@ -21,6 +21,7 @@
 
 #include "aclsparselt_mat_descriptor_internal.h"
 
+#include <cstdint>
 #include <new>
 
 namespace
@@ -165,8 +166,8 @@ inline aclsparseStatus_t ValidateMatDescCommonParams(const aclsparseLtHandle_t* 
  * @param outDesc 输出参数，成功时指向新分配的描述符。
  */
 inline aclsparseStatus_t AllocateAndValidateMatDesc(int64_t rows, int64_t cols, int64_t ld, aclDataType valueType,
-                                                    aclsparseOrder_t order, bool isStructured,
-                                                    aclsparseLtMatDescriptor*& outDesc)
+                                                     aclsparseOrder_t order, bool isStructured,
+                                                     aclsparseLtMatDescriptor*& outDesc)
 {
     int64_t alignMultiple = GetAlignMultiple(valueType, isStructured);
     if (alignMultiple == 0 || (rows % alignMultiple) != 0 || (cols % alignMultiple) != 0 || (ld % alignMultiple) != 0)
@@ -175,6 +176,14 @@ inline aclsparseStatus_t AllocateAndValidateMatDesc(int64_t rows, int64_t cols, 
     }
     // ld 约束：COL 序 ld >= rows，ROW 序 ld >= cols（order 已校验为 ROW/COL）
     if (!IsLdValid(order, ld, rows, cols))
+    {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    // ld 上界：ld 为 int64 参数，但下游消费点（tiling 的 ldA/ldB/ldC/ldD、
+    // prune 的 td.ld）均为 int32 字段——超 INT32_MAX 的 ld 经静默截断变为
+    // 垃圾行距（kernel 按错误行距访问，静默数据损坏）。描述符层显式拒绝
+    // （与 prune_check 侧既有 INT32_MAX 复检同口径），使全部收窄点安全。
+    if (ld > INT32_MAX)
     {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }

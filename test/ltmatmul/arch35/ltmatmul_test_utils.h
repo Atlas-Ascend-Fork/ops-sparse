@@ -30,6 +30,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -40,6 +42,8 @@
 #include "descriptor_manager.h"
 #include "aclsparselt_internal.h"  // fill_tiling_dims, compute_ws_layout, ToInternal
 #include "transpose_utils.h"  // shared TransposeToRowMajor
+#include "layout_utils.h"      // shared ld/order 布局基建（frame 共享层）
+#include "event_guard.h"      // shared EventGuard（prune/ltmatmul 计时共用）
 
 #include "../ltmatmul_golden.h"    // for bf16_bits_t, golden types
 
@@ -241,25 +245,8 @@ private:
     aclsparseLtMatmulPlan_t plan_ = nullptr;
 };
 
-class EventGuard {
-public:
-    EventGuard() {
-        if (aclrtCreateEvent(&ev_) != ACL_SUCCESS) {
-            throw std::runtime_error("aclrtCreateEvent failed");
-        }
-    }
-    ~EventGuard() { if (ev_) aclrtDestroyEvent(ev_); }
-    EventGuard(const EventGuard&) = delete;
-    EventGuard& operator=(const EventGuard&) = delete;
-    void record(aclrtStream stream) { aclrtRecordEvent(ev_, stream); }
-    static float elapsedMs(const EventGuard& start, const EventGuard& stop) {
-        float ms = 0.0f;
-        aclrtEventElapsedTime(&ms, start.ev_, stop.ev_);
-        return ms;
-    }
-private:
-    aclrtEvent ev_ = nullptr;
-};
+// EventGuard 已提取至 test/frame/event_guard.h（prune / ltmatmul /
+// matmulSearch 计时共用，消除重复定义；经上方 include 引入）。
 
 // -----------------------------------------------------------------------------
 // SparseLtMatmulChainParams / SparseLtMatmulChainCtx (from alg_set_attribute).
@@ -393,6 +380,122 @@ inline std::vector<T> PreparePhysicalB(const std::vector<T>& hB,
         std::copy(transposed.begin(), transposed.end(), result.begin() + off);
     }
     return result;
+}
+
+// ld/order 布局基建已提取至 test/frame/layout_utils.h
+// （PackPhysicalPadded / UnpackPhysicalToLogical / MatmulLayoutOpts / CdLdOf /
+//  CdSpanElems / PackBatchStridedPhysical / ExtractCdLogicalBatch）。
+
+// ComputeErrorMetrics: golden 与 NPU 输出（float 域）的交叉核对统计
+// maxAbsErr / maxRelErr（ltmatmul_test.cpp 与 matmulSearch_test.cpp 共用，
+// matmulSearch 侧经 include 链复用同一实体）。
+inline void ComputeErrorMetrics(const std::vector<float>& goldenF,
+                                const std::vector<float>& npuF,
+                                double& maxAbsErr, double& maxRelErr)
+{
+    maxAbsErr = 0.0;
+    maxRelErr = 0.0;
+    for (size_t i = 0; i < goldenF.size() && i < npuF.size(); ++i) {
+        double diff = std::fabs(static_cast<double>(goldenF[i]) - static_cast<double>(npuF[i]));
+        if (diff > maxAbsErr) { maxAbsErr = diff; }
+        double denom = std::fabs(static_cast<double>(goldenF[i]));
+        if (denom > 1e-12) {
+            double rel = diff / denom;
+            if (rel > maxRelErr) { maxRelErr = rel; }
+        }
+    }
+}
+
+// InitChainCtxBase: 链 ctx 基础字段（batch 属性 + 布局 + C/D span）赋值——
+// A-sparse（PrepareMatmulChainContext）与 B-sparse（PrepareBSparseChainContext）
+// 两个链设置的共享段（模板 CtxT 覆盖 MatmulChainCtx / MatmulBSparseCtx）。
+template <typename CtxT>
+inline void InitChainCtxBase(CtxT& ctx, int32_t num_batches, int64_t batch_stride,
+    const MatmulLayoutOpts& opts, int32_t m, int32_t n)
+{
+    ctx.numBatches = num_batches;
+    ctx.batchStride = batch_stride;
+    ctx.layout = opts;
+    ctx.cdSpan = CdSpanElems(m, n, opts);
+}
+
+// [Int8CD 共享段] 离散小整数 C 数据生成（[-5,5] 域经 CDT 存储，
+// FP16/BF16 精确可表）——ltmatmul PrepareInt8CDCaseInputs 与 matmulSearch
+// PrepareInt8CDSearchInputs 共用。
+template <typename CDT>
+inline void GenInt8CDInputC(int32_t m, int32_t n, std::vector<CDT>& hC)
+{
+    std::vector<float> hCf(static_cast<size_t>(m) * n);
+    for (size_t i = 0; i < hCf.size(); ++i) {
+        hCf[i] = static_cast<float>((static_cast<int64_t>(i * 7 + 3) % 11) - 5);
+    }
+    hC.resize(hCf.size());
+    TruncateToOutput<CDT>(hCf, hC, hCf.size());
+}
+
+// GenInt8CDInputC 的 batch-strided 版（Int8CD 链 batch 透传）：
+// 每 batch 生成一份确定性离散小整数 pattern（batch 偏移区分数据），
+// 按 batchStride 铺设（段间 padding 置零）；num_batches<=1 退化为单 batch 版。
+template <typename CDT>
+inline void GenInt8CDInputCBatch(int32_t m, int32_t n, int32_t numBatches,
+    int64_t batchStride, std::vector<CDT>& hC)
+{
+    if (numBatches <= 1) {
+        GenInt8CDInputC<CDT>(m, n, hC);
+        return;
+    }
+    const size_t mn = static_cast<size_t>(m) * n;
+    const size_t total = static_cast<size_t>(numBatches) * static_cast<size_t>(batchStride);
+    hC.assign(total, CDT{0});
+    std::vector<float> hCf(mn);
+    std::vector<CDT> hCb;
+    for (int32_t b = 0; b < numBatches; ++b) {
+        for (size_t i = 0; i < mn; ++i) {
+            hCf[i] = static_cast<float>((static_cast<int64_t>(i * 7 + 3 + b) % 11) - 5);
+        }
+        TruncateToOutput<CDT>(hCf, hCb, mn);
+        std::copy(hCb.begin(), hCb.end(),
+                  hC.begin() + static_cast<size_t>(b) * static_cast<size_t>(batchStride));
+    }
+}
+
+// [Int8CD 共享段] golden 三重循环核心：acc = Σ A_pruned·B（A-sparse）/
+// Σ A·B_pruned（B-sparse；int32 精确累加）→ D[i,j] = α[i]·acc + β[i]·C[i,j]
+// （C 经 CDT 提升；α/β 向量或标量由 useVec 分派）——ltmatmul
+// ComputeInt8CDCaseGolden 与 matmulSearch ComputeSearchGoldenInt8CD 共用。
+// pruned 传参：A-sparse 传 A_pruned
+// 前 m*k 元素；B-sparse 传 B_pruned 全量（(k,n) 行主序，剪枝已转置完成）。
+// epilogue（bias/act）与输出量化（cast<CDT>）由调用方按各自参数编排。
+template <typename CDT>
+inline std::vector<float> ComputeInt8CDGoldenCore(int32_t m, int32_t k, int32_t n,
+    bool isSparseA, bool useVec, float alphaScal, float betaScal,
+    const std::vector<float>& alphaVec, const std::vector<float>& betaVec,
+    const std::vector<int8_t>& hA, const std::vector<int8_t>& hB,
+    const std::vector<int8_t>& pruned, const std::vector<CDT>& hC)
+{
+    std::vector<float> Df(static_cast<size_t>(m) * n);
+    for (int32_t i = 0; i < m; ++i) {
+        const float aV = useVec ? alphaVec[static_cast<size_t>(i)] : alphaScal;
+        const float bV = useVec ? betaVec[static_cast<size_t>(i)] : betaScal;
+        for (int32_t j = 0; j < n; ++j) {
+            int32_t acc = 0;
+            if (isSparseA) {
+                for (int32_t kk = 0; kk < k; ++kk) {
+                    acc += static_cast<int32_t>(pruned[static_cast<size_t>(i) * k + kk])
+                         * static_cast<int32_t>(hB[static_cast<size_t>(kk) * n + j]);
+                }
+            } else {
+                for (int32_t kk = 0; kk < k; ++kk) {
+                    acc += static_cast<int32_t>(hA[static_cast<size_t>(i) * k + kk])
+                         * static_cast<int32_t>(pruned[static_cast<size_t>(kk) * n + j]);
+                }
+            }
+            const std::vector<CDT> cOne{hC[static_cast<size_t>(i) * n + j]};
+            const float cVal = MatmulToFloat(cOne)[0];
+            Df[static_cast<size_t>(i) * n + j] = aV * static_cast<float>(acc) + bV * cVal;
+        }
+    }
+    return Df;
 }
 
 }  // namespace sparse_test

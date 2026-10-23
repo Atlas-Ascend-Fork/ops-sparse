@@ -1,4 +1,4 @@
-case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,range_high,level
+case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,range_high,level,num_batches,batch_stride,ld
 1,128,128,float32,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L0
 2,256,256,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L0
 3,512,256,float32,1,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1
@@ -56,3 +56,17 @@ case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,
 94,128,128,bfloat16,0,1,STRIP,NON_TRANSPOSE,ROW,B,-1,1,L0
 95,128,128,bfloat16,0,1,TILE,NON_TRANSPOSE,ROW,A,-1,1,L0
 96,32,32,int8,0,1,TILE,TRANSPOSE,COL,A,-128,127,L0
+# P-BA（正向 batch 直接用例：单次全量调用 + 逐 batch golden 比对）
+58,128,128,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,3,16384
+59,128,128,int8,0,1,TILE,NON_TRANSPOSE,ROW,A,-5,5,L1,2,16384
+60,128,128,float32,0,1,STRIP,TRANSPOSE,ROW,B,-1,1,L1,2,32768
+# P-BA-COLNT（正向补例）：COL+NT × batch × m<k 紧凑布局。
+# kernel AlongCol 路径按行主序 (m,k) 行距 ld 寻址，单 batch 跨度
+# (m-1)*ld+k = 31*64+64 = 2048 = m*k（紧凑）——修复前 V1 按列主序跨度
+# (k-1)*ld+m = 4064 误拒该 batchStride=2048 的紧凑合法布局。
+99,32,64,float16,0,1,STRIP,NON_TRANSPOSE,COL,A,-1,1,L1,2,2048
+# ===== 2.2C-U5：L9 ld padded 输入 + H2 TRANSPOSE×COL×B 8 格补满 =====
+# L9: A structured ld=192 > k=128（FP16）——prune 以 row*ld 读 padded 矩阵，输出恒紧凑
+97,128,128,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,1,0,192
+# H2: op×order×side 8 格补满（TRANSPOSE/COL/B 此前零覆盖）
+98,160,96,float16,0,1,STRIP,TRANSPOSE,COL,B,-1,1,L0,1,0,0

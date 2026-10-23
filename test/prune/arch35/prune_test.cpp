@@ -13,9 +13,7 @@
 /**
  * @file prune_test.cpp
  * @brief GTest + CSV-driven test for aclsparseLtSpMMAPrune (prune-only).
- *
  * Formula: A_pruned = Prune_2:4(A)
- *
  * Test structure:
  *   - TEST_P (PruneTest) : parameterized success-path tests from CSV
  *       1. host data generation (range-bounded random, FP32 -> T)
@@ -25,10 +23,8 @@
  *       5. Element-wise verification (prune is deterministic -> exact match
  *          in FP32 domain via MIXED_TOLERANCE, which for exact-equal inputs
  *          trivially passes)
- *
  * Per-case NPU elapsed time (SpMMAPrune, synchronised) is collected via
  * aclrtEvent and reported for performance profiling.
- *
  * Entry point is shared via test/frame/test_main.cpp; this file MUST NOT
  * define main().
  */
@@ -122,6 +118,30 @@ inline void ReportPrunePerf(const PruneParam& p,
 // B-sparse: B is (m,k) = (logical k, logical n)). p.op is opA (A-sparse) or
 // opB (B-sparse). The prune golden formula is symmetric in (m, k, trans, order),
 // so the same SpMMAPruneGolden call covers both sides.
+// batch 用例输出验证（自 RunOneCase 步骤 6 的 batch 分支拆出，控制函数
+// NBNC——codecheck 超大函数整改）：NPU 单次全量输出（nb×stride 布局）逐
+// batch 切片与单 batch golden 参考逐位一致（batch 正向基线——验证输出
+// batch 布局推进；相同输入铺设下，写漏/写错 batch 位置即与参考不一致）。
+template <typename T>
+void VerifyPruneBatchSlices(const PruneParam& p, const std::vector<T>& hNpuPruned,
+                            const std::vector<T>& hGoldenPruned)
+{
+    const int32_t nb = p.num_batches;
+    const int64_t bs = p.batch_stride;
+    for (int32_t b = 0; b < nb; ++b) {
+        const size_t off = static_cast<size_t>(b) * static_cast<size_t>(bs);
+        const size_t span = hGoldenPruned.size();
+        ASSERT_GE(hNpuPruned.size(), off + span)
+            << p.caseId() << " batch " << b << " output region out of range";
+        std::vector<T> npuB(hNpuPruned.begin() + off,
+                            hNpuPruned.begin() + off + span);
+        std::vector<float> npuF = PruneToFloat(npuB);
+        std::vector<float> goldenF = PruneToFloat(hGoldenPruned);
+        VerifyPruneMixedTolerance(npuF, goldenF, NpuDtypeTrait<T>::kAclDtype,
+                                  p.caseId() + "/b" + std::to_string(b));
+    }
+}
+
 template <typename T>
 void RunOneCase(const PruneParam& p, aclrtStream stream) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -147,9 +167,9 @@ void RunOneCase(const PruneParam& p, aclrtStream stream) {
         : ACLSPARSELT_PRUNE_SPMMA_STRIP;
     auto npu = p.isSparseA()
         ? PruneNpu<T>(stream, hInput, hNpuPruned, p.m, p.k, p.alg_config_id, p.split_k,
-                       op, order, pruneAlg)
+                       op, order, pruneAlg, p.num_batches, p.batch_stride, p.ld)
         : PruneNpuBSparse<T>(stream, hInput, hNpuPruned, p.m, p.k, p.alg_config_id, p.split_k,
-                              op, order, pruneAlg);
+                             op, order, pruneAlg, p.num_batches, p.batch_stride);
     const auto t3 = std::chrono::steady_clock::now();
 
     // 4. Assert the prune API returned SUCCESS.
@@ -167,6 +187,18 @@ void RunOneCase(const PruneParam& p, aclrtStream stream) {
     // 6. Verification in FP32 domain (last — shared helper).
     // Prune is deterministic: the NPU pruned matrix should match the CPU
     // golden pruned matrix exactly (same elements zeroed, same values kept).
+    // padded 输入（ld>min）时 wrapper 回读 padded span 全量；prune 输出恒
+    // 紧凑 (m,k) 行主序——比对取前 mk 个有效元素。
+    if (p.ld > 0 && !p.hasBatch()) {
+        const size_t mk = static_cast<size_t>(p.m) * p.k;
+        ASSERT_GE(hNpuPruned.size(), mk)
+            << p.caseId() << " padded output shorter than compact span";
+        hNpuPruned.resize(mk);
+    }
+    if (p.hasBatch()) {
+        VerifyPruneBatchSlices(p, hNpuPruned, hGoldenPruned);
+        return;
+    }
     std::vector<float> npuF = PruneToFloat(hNpuPruned);
     std::vector<float> goldenF = PruneToFloat(hGoldenPruned);
     VerifyPruneMixedTolerance(npuF, goldenF, NpuDtypeTrait<T>::kAclDtype, p.caseId());
@@ -225,26 +257,22 @@ class PruneExceptionTest : public PruneTestFixture {
 // Helper to create a valid matmul descriptor for prune tests is unnecessary —
 // each test builds its own descriptors via RAII guards for clarity.
 
-// Shared descriptor chain for prune exception tests PE4/PE5/PE6.
-// These three tests all create the same handle + dA + dAPruned + matA + matB +
-// matC + matD + matmulDesc, differing only in the SpMMAPrune call parameters.
-// Extracted into PruneTestCtx to eliminate the triplicated descriptor creation
-// chain. Members are initialized in declaration order so each guard's
-// constructor parameters (which reference earlier members) are valid.
-struct PruneTestCtx {
+// Shared descriptor group for prune exception tests (PE3/PE10/PE11/PE12 and
+// PruneTestCtx): handle + matA(structured 128³) + matB/matC/matD(dense 128³).
+// Two-phase: batch attributes (NUM_BATCHES/BATCH_STRIDE on matA, consistency
+// check requires them set before MatmulDescriptorInit) are injected by the
+// caller between construction and InitMatmulDescr(), so ASSERT semantics stay
+// in the test body. Extracted from the duplicated creation chains in the
+// PE3/PE10/PE11/PE12 test bodies (codecheck duplicate-code cleanup).
+struct PruneExcDescrs {
     SparseLtHandleGuard handle;
-    sparse_test::DeviceBuffer dA;
-    sparse_test::DeviceBuffer dAPruned;
     MatDescrGuard matA;
     MatDescrGuard matB;
     MatDescrGuard matC;
     MatDescrGuard matD;
     MatmulDescrGuard md;
 
-    PruneTestCtx()
-        : handle(),
-          dA(sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(float))),
-          dAPruned(sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(float)))
+    PruneExcDescrs()
     {
         matA.initStructured(handle.ptr(), 128, 128, 128, 16, ACL_FLOAT,
                             ACL_SPARSE_ORDER_ROW, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
@@ -254,11 +282,73 @@ struct PruneTestCtx {
                        ACL_SPARSE_ORDER_ROW);
         matD.initDense(handle.ptr(), 128, 128, 128, 16, ACL_FLOAT,
                        ACL_SPARSE_ORDER_ROW);
+    }
+
+    void InitMatmulDescr()
+    {
         md.init(handle.ptr(), ACL_SPARSE_OP_NON_TRANSPOSE,
                 ACL_SPARSE_OP_NON_TRANSPOSE,
                 matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), ACL_SPARSE_COMPUTE_32F);
     }
 };
+
+// Shared descriptor chain for prune exception tests PE4/PE5/PE6.
+// PruneExcDescrs + 128³ dA/dAPruned buffers; these three tests all create the
+// same handle + dA + dAPruned + matA + matB + matC + matD + matmulDesc,
+// differing only in the SpMMAPrune call parameters. Members are initialized
+// in declaration order so each guard's constructor parameters (which reference
+// earlier members) are valid.
+struct PruneTestCtx : PruneExcDescrs {
+    sparse_test::DeviceBuffer dA;
+    sparse_test::DeviceBuffer dAPruned;
+
+    PruneTestCtx()
+        : PruneExcDescrs(),
+          dA(sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(float))),
+          dAPruned(sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(float)))
+    {
+        InitMatmulDescr();
+    }
+};
+
+// PE10/PE11/PE12/PE13 共用 batch 布局违规用例构造（nb/stride 参数化）后建
+// matmulDescr 并触发 prune，期望 INVALID_VALUE——batch 布局违规在 prune 校验
+// 层（validate_prune_batch V1/V2/V3）拦截；bufBytes 为占位缓冲字节数（溢出
+// 用例用最小占位，不实际触达读写）。自四用例的重复注入/建链段提取
+// （codecheck duplicate-code cleanup）。
+// NUM_BATCHES 须对 A/B/C/D 四 mat 同设：
+// ValidateBatchConsistency（MatmulDescriptorInit 层）要求四 mat 的 numBatches
+// 一致，此前仅对 matA 单侧注入会在 desc init 即被拒（md=null），
+// SpMMAPrune 收到 null 描述符返回 INVALID_VALUE——用例碰巧通过但从未触达
+// prune 的 V1/V2/V3 校验路径。BATCH_STRIDE 仅对 structured matA 注入
+// （prune 校验对象；setter 对任意 int64 放行，含 2^61）；B/C/D 保持默认
+// stride=0（dense 侧布局不在 prune 校验范围，desc init 层对 C/D 的 batch
+// 跨度检查在 stride=0 时放行）。
+static void RunBatchLayoutViolationCase(aclrtStream stream, int32_t nb,
+    int64_t stride, size_t bufBytes)
+{
+    PruneExcDescrs d;
+    for (aclsparseLtMatDescriptor_t* mat :
+         {d.matA.ptr(), d.matB.ptr(), d.matC.ptr(), d.matD.ptr()}) {
+        ASSERT_EQ(aclsparseLtMatDescSetAttribute(d.handle.ptr(), mat,
+            ACLSPARSELT_MAT_NUM_BATCHES, &nb, sizeof(int32_t)),
+            ACL_SPARSE_STATUS_SUCCESS);
+    }
+    ASSERT_EQ(aclsparseLtMatDescSetAttribute(d.handle.ptr(), d.matA.ptr(),
+        ACLSPARSELT_MAT_BATCH_STRIDE, &stride, sizeof(int64_t)),
+        ACL_SPARSE_STATUS_SUCCESS);
+    d.InitMatmulDescr();
+    // 构造有效性护栏：描述符链必须建立成功，否则违规被 desc init 层提前
+    // 拦截（如 batch 一致性不满足），prune 的 V1/V2/V3 从未被触达，用例
+    // 将退化为对 null 描述符碰巧返回 INVALID_VALUE。
+    ASSERT_NE(d.md.get(), nullptr);
+    sparse_test::DeviceBuffer dA = sparse_test::DeviceBuffer::alloc(bufBytes);
+    sparse_test::DeviceBuffer dOut = sparse_test::DeviceBuffer::alloc(bufBytes);
+    auto ret = aclsparseLtSpMMAPrune(
+        d.handle.ptr(), matmulDescCptr(d.md), dA.get(), dOut.get(),
+        ACLSPARSELT_PRUNE_SPMMA_STRIP, stream);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
 
 // PE1: null handle -> expected non-SUCCESS.
 TEST_F(PruneExceptionTest, NullHandle) {
@@ -277,30 +367,111 @@ TEST_F(PruneExceptionTest, NullDescriptor) {
     EXPECT_NE(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
+// PE10/X19a: numBatches>1 且 batchStride < span（V1 违规）-> INVALID_VALUE。
+// span（FP32 ROW 128×128，ld=128）= 127*128+128 = 16384；取 stride=8192 < span。
+// 构造（四 mat 同 nb=3，见 RunBatchLayoutViolationCase）穿过 desc init 层
+// 一致性校验，违规由 prune V1（batchStride < span）拦截。
+TEST_F(PruneExceptionTest, BatchStrideSmallerThanSpan) {
+    RunBatchLayoutViolationCase(stream_, 3, 8192,
+        static_cast<size_t>(3) * 8192 * sizeof(float));
+}
+
+// PE11/X19b: numBatches>1 且 batchStride*elemSize 非 16B 倍数（V2 违规）->
+// INVALID_VALUE。FP32 elemSize=4，stride=16386（≥span 但 16386*4 % 16 != 0，
+// 等价于修复后无乘法判断 16386 % 4 != 0）。构造穿过 desc init 层，违规由
+// prune V2（16B 对齐）拦截。
+TEST_F(PruneExceptionTest, BatchStrideNot16ByteAligned) {
+    RunBatchLayoutViolationCase(stream_, 3, 16386,
+        static_cast<size_t>(3) * 16386 * sizeof(float));
+}
+
+// PE12/X19c: numBatches×batchStride×elemSize 溢出 int64（V3 违规）->
+// INVALID_VALUE。构造 nb=2^20、stride=2^43：单 stride 字节数
+// stride*elemSize=2^45 不溢出（与 X19d 的区分点），但
+// (nb-1)*stride+span 后 ×elemSize ≈ 2^65 溢出，触发 V3 checked_mul_add
+// 拦截（不实际分配内存——校验层在校验通过后才读取缓冲，违规在校验层
+// 拦截；DeviceBuffer 用最小占位，prune 不会执行到 kernel）。构造穿过
+// desc init 层（C/D 未设 stride，其 batch 跨度检查放行）。
+TEST_F(PruneExceptionTest, BatchLayoutOverflowInt64) {
+    RunBatchLayoutViolationCase(stream_, 1 << 20, 1LL << 43, 64);
+}
+
+// PE13/X19d: numBatches=2 且稀疏 A batchStride*elemSize 乘法本身溢出 int64
+// （V2 乘法溢出顺序）-> INVALID_VALUE。FP32 128×128（elemSize=4）下
+// stride=1LL<<61 使修复前的 V2 对齐检查先计算 batchStride*elemSize = 2^63
+// > INT64_MAX（有符号乘法溢出，先于 V3 的 checked_mul_add 执行，无法保证
+// 按预期返回 INVALID_VALUE）。修复后
+// （prune_host.cpp V2 无乘法取模判断）：V1 放行（stride ≥ span=16384）、
+// V2 放行（2^61 % 4 == 0）、V3 checked_mul_add 兜底拦截
+// （totalElems=2^61+span，×4 溢出）-> 稳定 INVALID_VALUE。与 X19c 的区分：
+// X19c（nb=2^20、stride=2^43）的单 stride 字节数 stride*elemSize=2^45 不
+// 溢出，仅构造 (nb-1)*stride+span 后 ×elemSize 溢出来触发 V3；本条专覆盖
+// 「V2 乘法溢出先于受检查乘法执行」的检查顺序缺口（修复后该输入的预期
+// 行为由 V3 兜底保证）。构造为四 mat 同设 numBatches=2（穿过
+// ValidateBatchConsistency，此前仅 matA 单侧注入的构造在 desc init 即被
+// 拒、从未触达 prune 校验——构造缺陷修正）+ 仅稀疏 A 设
+// batchStride=1LL<<61。最小占位缓冲（V3 在 resolve_prune_buffers 之前
+// 拦截，不触达 kernel）。
+TEST_F(PruneExceptionTest, BatchStrideByteMulOverflowInt64) {
+    RunBatchLayoutViolationCase(stream_, 2, 1LL << 61, 64);
+}
+
+// PE14（负向补例）：COL+NT × batch × m>k 的 V1 低估拦截。
+// kernel AlongCol 路径（pruneAlongRow=0、sparseTrans=0）按行主序 (m,k)
+// 行距 ld 寻址（SpltPruneLoadRowBlock），单 batch 实际跨度 (m-1)*ld+k =
+// 255*256+64 = 65344；修复前 V1 按列主序跨度 (k-1)*ld+m = 63*256+256 =
+// 16384 低估——batchStride=20000（≥16384、%8==0 对齐通过）曾放行，
+// kernel 按 batch 推进时读入下一 batch 区域 + 末批越界。修复后 V1 按
+// kernel 路径推导 span=65344 > 20000 → INVALID_VALUE（校验层修复，
+// kernel 行为不变；不触达 kernel，占位缓冲安全）。
+// 构造：matA structured (256,64) COL ld=256 FP16（COL 序 ld ≥ rows=256、
+// 16 倍数对齐全过）；四 mat 同设 numBatches=2 穿过一致性校验，仅 matA
+// 注入 batchStride=20000（B/C/D 保持 stride=0 放行）。
+TEST_F(PruneExceptionTest, ColNTBatchSpanUnderestimateRejected) {
+    SparseLtHandleGuard handle;
+    MatDescrGuard matA;
+    matA.initStructured(handle.ptr(), 256, 64, 256, 16, ACL_FLOAT16,
+                        ACL_SPARSE_ORDER_COL, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
+    // md_k = matA->cols = 64：matB dense (64,128)，matC/matD dense (256,128)。
+    MatDescrGuard matB;
+    matB.initDense(handle.ptr(), 64, 128, 128, 16, ACL_FLOAT16, ACL_SPARSE_ORDER_ROW);
+    MatDescrGuard matC;
+    matC.initDense(handle.ptr(), 256, 128, 128, 16, ACL_FLOAT16, ACL_SPARSE_ORDER_ROW);
+    MatDescrGuard matD;
+    matD.initDense(handle.ptr(), 256, 128, 128, 16, ACL_FLOAT16, ACL_SPARSE_ORDER_ROW);
+    const int32_t nb = 2;
+    for (aclsparseLtMatDescriptor_t* mat :
+         {matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr()}) {
+        ASSERT_EQ(aclsparseLtMatDescSetAttribute(handle.ptr(), mat,
+            ACLSPARSELT_MAT_NUM_BATCHES, &nb, sizeof(int32_t)),
+            ACL_SPARSE_STATUS_SUCCESS);
+    }
+    const int64_t stride = 20000;  // ≥ 旧 V1 span(16384)、%8==0、< 新 span(65344)
+    ASSERT_EQ(aclsparseLtMatDescSetAttribute(handle.ptr(), matA.ptr(),
+        ACLSPARSELT_MAT_BATCH_STRIDE, &stride, sizeof(int64_t)),
+        ACL_SPARSE_STATUS_SUCCESS);
+    MatmulDescrGuard md;
+    md.init(handle.ptr(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+            matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), ACL_SPARSE_COMPUTE_32F);
+    ASSERT_NE(md.get(), nullptr);
+    // 占位缓冲（V1 在 resolve_prune_buffers 之前拦截，不触达 kernel）。
+    sparse_test::DeviceBuffer dA =
+        sparse_test::DeviceBuffer::alloc(2 * 20000 * sizeof(uint16_t));
+    sparse_test::DeviceBuffer dOut =
+        sparse_test::DeviceBuffer::alloc(2 * 20000 * sizeof(uint16_t));
+    auto ret = aclsparseLtSpMMAPrune(
+        handle.ptr(), matmulDescCptr(md), dA.get(), dOut.get(),
+        ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
 // PE3: null d_in -> expected non-SUCCESS (descriptors no longer bind values,
 // so d_in must be passed explicitly to SpMMAPrune).
 TEST_F(PruneExceptionTest, NullDinAndMatAValues) {
-    SparseLtHandleGuard handle;
-    // Create descriptor (values are no longer bound at init time).
-    MatDescrGuard matA;
-    matA.initStructured(handle.ptr(), 128, 128, 128, 16, ACL_FLOAT,
-                        ACL_SPARSE_ORDER_ROW, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
-    MatDescrGuard matB;
-    matB.initDense(handle.ptr(), 128, 128, 128, 16, ACL_FLOAT,
-                   ACL_SPARSE_ORDER_ROW);
-    MatDescrGuard matC;
-    matC.initDense(handle.ptr(), 128, 128, 128, 16, ACL_FLOAT,
-                   ACL_SPARSE_ORDER_ROW);
-    MatDescrGuard matD;
-    matD.initDense(handle.ptr(), 128, 128, 128, 16, ACL_FLOAT,
-                   ACL_SPARSE_ORDER_ROW);
-    MatmulDescrGuard md;
-    md.init(handle.ptr(), ACL_SPARSE_OP_NON_TRANSPOSE,
-            ACL_SPARSE_OP_NON_TRANSPOSE,
-            matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), ACL_SPARSE_COMPUTE_32F);
-    sparse_test::DeviceBuffer dAPruned = sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(float));
+    PruneTestCtx ctx;
     auto ret = aclsparseLtSpMMAPrune(
-        handle.ptr(), matmulDescCptr(md), nullptr, dAPruned.get(), ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
+        ctx.handle.ptr(), matmulDescCptr(ctx.md), nullptr, ctx.dAPruned.get(),
+        ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
     EXPECT_NE(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
@@ -361,14 +532,12 @@ TEST_F(PruneExceptionTest, TileNullHandle) {
 // every row keeps exactly KEEP nonzeros AND every column keeps exactly KEEP
 // nonzeros. STRIP pruning only enforces the per-row constraint (KEEP nonzeros
 // per group of TS within each row); the column distribution is unconstrained.
-//
 // This test verifies the core value proposition of TILE mode — the 2D
 // structural sparsity that enables hardware-aware structured matmul:
 //   1. TILE output: each 4×4 tile has exactly 2 nonzeros per row and per column.
 //   2. STRIP output: each row group of 4 has exactly 2 nonzeros (row constraint
 //      satisfied), but the per-column count within a 4×4 tile is NOT required
 //      to be 2 (column constraint not enforced).
-//
 // This is a CPU-only property test (no NPU execution needed).
 // =============================================================================
 
@@ -500,4 +669,65 @@ TEST_F(PrunePropertyTest, TileStructuralSparsity) {
               << "[Property] STRIP: column constraint violated in " << stripColViolations
               << " of " << (m / safeTs) * (k / safeTs) << " tiles (expected: violations likely"
               << " since STRIP has no column constraint).\n";
+}
+
+// =============================================================================
+// prune in-place（d_in == d_out）正/负两向（此前全仓零覆盖）：
+//   N5-1 STRIP ROW 非转置 in-place → SUCCESS 且数值 == out-of-place golden
+//        （README L105/L119 声明的 in-place 支持路径）
+//   N5-2 TRANSPOSE ROW in-place → NOT_SUPPORTED（prune_host.cpp L346-347 显式
+//        拒绝分支——转置路径输出布局与输入重叠不可安全 in-place）
+// =============================================================================
+
+// 共用：STRIP/N-T/ROW 描述符链（128³ FP32）+ dA 数据
+struct PruneInPlaceCtx : PruneExcDescrs {
+    sparse_test::DeviceBuffer dA;
+    explicit PruneInPlaceCtx(aclsparseOperation_t opA)
+    {
+        // opA=TRANSPOSE 时 matA 物理 (k,m)：重建描述符组（基类为 N 布局）
+        if (opA == ACL_SPARSE_OP_TRANSPOSE) {
+            md.init(handle.ptr(), opA, ACL_SPARSE_OP_NON_TRANSPOSE,
+                    matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), ACL_SPARSE_COMPUTE_32F);
+        } else {
+            InitMatmulDescr();
+        }
+        const size_t mk = 128 * 128;
+        dA = sparse_test::DeviceBuffer::copyFrom(
+            std::vector<float>(mk, 1.0f).data(), mk * sizeof(float));
+    }
+};
+
+// N5-1：STRIP × NON_TRANSPOSE × ROW in-place → SUCCESS + 数值正确
+TEST_F(PruneExceptionTest, InPlaceStripRowNumerical) {
+    PruneInPlaceCtx ctx(ACL_SPARSE_OP_NON_TRANSPOSE);
+    const size_t mk = 128 * 128;
+    sparse_test::DeviceBuffer dShared = sparse_test::DeviceBuffer::alloc(mk * sizeof(float));
+    // 预置输入数据到共享缓冲（in-place：d_in == d_out）
+    std::vector<float> hIn(mk, 1.0f);
+    ASSERT_EQ(aclrtMemcpy(dShared.get(), mk * sizeof(float), hIn.data(), mk * sizeof(float),
+                          ACL_MEMCPY_HOST_TO_DEVICE), ACL_SUCCESS);
+    auto ret = aclsparseLtSpMMAPrune(
+        ctx.handle.ptr(), matmulDescCptr(ctx.md), dShared.get(), dShared.get(),
+        ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_SUCCESS);
+    // golden：out-of-place 参考对同一输入（全 1.0 → 每组 4 取前 2 → 1,1,0,0 模式）
+    std::vector<float> hOut(mk);
+    ASSERT_EQ(aclrtMemcpy(hOut.data(), mk * sizeof(float), dShared.get(), mk * sizeof(float),
+                          ACL_MEMCPY_DEVICE_TO_HOST), ACL_SUCCESS);
+    std::vector<float> golden;
+    SpMMAPruneGolden<float>(hIn, golden, 128, 128, 0, 1,
+                            /*transA=*/false, /*isRowOrder=*/true, "STRIP");
+    VerifyPruneMixedTolerance(hOut, golden, ACL_FLOAT, "N5-1-inplace-strip-row");
+}
+
+// N5-2：TRANSPOSE × ROW in-place → NOT_SUPPORTED（显式拒绝分支）
+TEST_F(PruneExceptionTest, InPlaceTransposeRowRejected) {
+    PruneInPlaceCtx ctx(ACL_SPARSE_OP_TRANSPOSE);
+    const size_t mk = 128 * 128;
+    sparse_test::DeviceBuffer dShared = sparse_test::DeviceBuffer::alloc(mk * sizeof(float));
+    auto ret = aclsparseLtSpMMAPrune(
+        ctx.handle.ptr(), matmulDescCptr(ctx.md), dShared.get(), dShared.get(),
+        ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_NOT_SUPPORTED);
 }

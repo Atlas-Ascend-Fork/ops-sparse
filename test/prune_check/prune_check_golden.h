@@ -242,7 +242,7 @@ int PruneCheckGolden(const std::vector<T>& A, int32_t m, int32_t k,
 // 矩阵后复用单 batch 判定（位级判零语义不变）。物理布局与 SparseSideSpecOf
 // 一致：仅 T+ROW 为转置 (k, m) 行主序（ld 步长），其余组合物理即逻辑 (m, k)
 // 行主序；ld 为物理行步长。
-// ld padding 语义（与 kernel srcStride 消费点对齐，检视意见 193726682）：
+// ld padding 语义（与 kernel srcStride 消费点对齐）：
 // 提取仅取数据区 [0, 物理行长)（非转置 j∈[0,k)、转置 i∈[0,m)），padding 区
 // [物理行长, ld) 不进入分组判定 —— padding ld 用例（PruneCheckPaddingLdTest）
 // 以「逻辑 golden == 物理 ld golden」双口径交叉断言固化该语义；垃圾填充由

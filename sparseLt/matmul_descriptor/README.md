@@ -11,7 +11,7 @@ D = Activation(α · op(A) · op(B) + β · C + bias)
 公式中，A、B 为输入矩阵，C 为累加矩阵，D 为输出矩阵；op() 表示对矩阵施加的转置或非转置操作；α、β 为系数，bias 为偏置，Activation 为可选的激活函数（ReLU/GeLU）。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加 → activation → 类型转换写出。
 
 > **bias / activation / batch 传递方式**：bias、activation 与 batch 不是通过执行接口 `aclsparseLtMatmul` 的函数参数传递的，而是通过描述符属性设置接口预先配置到描述符中，执行时从描述符读取——这与 cuSPARSELt 的设计完全一致（`cusparseLtMatmul()` 函数签名同样不含 bias 参数）。具体而言：
-> - **bias 与 activation**：通过 `aclsparseLtMatmulDescSetAttribute` 设置到 matmul 描述符，须在 `aclsparseLtMatmulPlanInit` 之前完成。可设置的 matmul 描述符属性见下表。
+> - **bias 与 activation**：通过 `aclsparseLtMatmulDescSetAttribute` 设置到 matmul 描述符，在执行期从描述符读取，`aclsparseLtMatmulPlanInit` 之后修改对后续执行生效。可设置的 matmul 描述符属性见下表。
 > - **batch**：通过 `aclsparseLtMatDescSetAttribute` 设置到 A/B/C/D 各 mat 描述符，须在 `aclsparseLtMatmulDescriptorInit` 之前完成。
 >
 > **matmul 描述符属性（epilogue 链配置）**：

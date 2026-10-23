@@ -15,12 +15,10 @@
  * \brief sparseLt shared internal header: TilingData struct + constants
  *        (shared CXX/ASC), host-only helper functions (CXX only), and
  *        host-only descriptor internal structs (CXX only).
- *
  * Included by both host.cpp (CXX) and kernel.cpp (ASC). The TilingData struct,
  * constants and splt_load_tiling above the __CCE_AICORE__ guard are compiled by
  * both; the host-only helpers and descriptor structs below the guard are skipped
  * by the ASC compiler (host-only, pull in acl/acl.h + cann_ops_sparse*.h).
- *
  * Merged from the former single-folder header + the anonymous-namespace
  * helpers in the former host.cpp + splt_load_tiling from the former kernel.cpp so the
  * old single-folder layout can be split into shared/matmul/prune/alg_set_attr
@@ -42,7 +40,7 @@
 #define SPLT_DTYPE_INVALID (-1)
 #define SPLT_DTYPE_FP32 0
 #define SPLT_DTYPE_FP16 1
-// v2: BF16 / INT8 input dtypes; INT32 only used for outDataType field
+// BF16 / INT8 input dtypes; INT32 only used for outDataType field
 // (INT8 input -> INT32 output path), never appears in dataType field.
 #define SPLT_DTYPE_BF16 2
 #define SPLT_DTYPE_INT8 3
@@ -66,7 +64,7 @@
 
 // Hardware constants (DAV-3510).
 #define SPLT_CORE_NUM 32
-// L0C cube edge is always 16 on DAV-3510 (see tensor-api-reference §1.4).
+// L0C cube edge is always 16 on DAV-3510.
 #define SPLT_L0C_C0 16
 // L0A/L0B buffer size (64KB each on DAV-3510). Used for L0 double-buffer offset.
 #define SPLT_L0A_SIZE (64 * 1024)
@@ -113,7 +111,7 @@ typedef struct AclsparseltTilingData {
     int32_t baseM;
     int32_t baseN;
     int32_t baseK;
-    // [REFACTOR-KLOOP] K-dimension L1 tile size for the outer kL1 loop.
+    // K-dimension L1 tile size for the outer kL1 loop.
     // The K-loop is split into two layers: outer kL1 (GM→L1, kL1Size chunk)
     // and inner kL0 (L1→L0, baseK chunk). kL1Size = 512/sizeof(T) aligned to
     // baseK (256 for FP16, 128 for FP32). L1 capacity constraint:
@@ -126,7 +124,7 @@ typedef struct AclsparseltTilingData {
     int32_t algConfigId;    // 0 / 1
     // data type (SPLT_DTYPE_*)
     int32_t dataType;
-    // v2: output dtype (SPLT_DTYPE_*), drives INT8 epilogue dispatch.
+    // output dtype (SPLT_DTYPE_*), drives INT8 epilogue dispatch.
     //   FP32/FP16/BF16: outDataType == dataType.
     //   INT8: outDataType == SPLT_DTYPE_INT8(3) or SPLT_DTYPE_INT32(4).
     int32_t outDataType;
@@ -180,6 +178,35 @@ typedef struct AclsparseltTilingData {
     // 32B/elemSize so that alignedChunkM == chunkM (exact UB row stride).
     // 0 = not set (non-trans paths or default); kernel treats 0 as "use m".
     int32_t  chunkM;
+    // C 矩阵的实际 dtype（SPLT_DTYPE_*）。epilogue 读取 C 时按此类型
+    // 实例化（CType 模板贯通）：A/B 为 INT8 时 C 可为 INT8/INT32/FP16/BF16
+    // （描述符合法性矩阵的超集行），非 INT8 时 C 与 A/B 同型（恒等于
+    // dataType 字段）。默认 0（SPLT_DTYPE_FP32）——仅当 dataType != 0 且
+    // cDataType 与 dataType 不同时才有意义；host 侧 fill_tiling_dims
+    // 恒填充，kernel 侧经分派 switch 消费。
+    int32_t  cDataType;
+    // —— X1 布局接入字段（追加在末尾，向后兼容）——
+    // C/D 的物理 leading dimension（元素单位）与 order。kernel 侧 C 读 /
+    // D 写经 SpltCdOffset 统一寻址：ROW 序行步长 = ld（ld == n 时与旧
+    // row*n + col 寻址逐位等价，零回归锚点）；COL 序为转置视图寻址
+    // （元素 (i,j) 位于 i + j*ld）。C/D order 一致由 MatmulDescriptorInit
+    // 的 ValidateCDConsistency 保证。
+    int32_t  ldC;           // C 物理 ld（COL 时为列主序 ld）
+    int32_t  ldD;           // D 物理 ld
+    int32_t  cOrderIsCol;   // C/D order == ACL_SPARSE_ORDER_COL ? 1 : 0
+    // —— cube GM 布局直通 ld（ld padding 直读接入）——
+    // cube A/B 输入的物理行距（元素单位），直通 GM 布局 NDExt/DNExt 的
+    // 行距参数（NDExt 第二参数 / DNExt 第一参数），MTE2 搬运按行距跳过
+    // 行尾 padding，dense 侧带 ld 的输入无需任何预处理：
+    //   ldA：A-sparse 恒 k（A_pruned 为 prune 紧凑输出）；B-sparse 为
+    //        dense A 的物理 ld（COL 时即物理转置视图的行步长）。
+    //   ldB：B-sparse 恒 n（B_pruned 紧凑）；A-sparse 为 dense B 的物理 ld。
+    // 紧凑场景（ld == 物理列数）与既有紧凑布局参数逐位一致（零回归锚点）。
+    // ld 为 int64 描述符字段，此处收窄为 int32——描述符层
+    // （Dense/StructuredDescriptorInit）已显式拒绝 ld > INT32_MAX，收窄无
+    // 截断（与 ldC/ldD 同口径）。
+    int32_t  ldA;
+    int32_t  ldB;
 } AclsparseltTilingData;
 
 
@@ -189,12 +216,20 @@ typedef struct AclsparseltTilingData {
 // Reads the TilingData POD struct from GM workspace[tilingOff] into a local
 // copy. Marked __aicore__ inline so it is only usable from kernel code; the
 // host compiler (CXX) skips this section via the __CCE_AICORE__ guard below.
+// 逐字段拷贝拆为两段（原单函数 nbnc 51 > 50）：
+//   splt_load_tiling_core_fields          —— 维度 / cube tiling / splitK /
+//                                            dtype / 算法与布局标志 + X1
+//                                            布局接入字段（chunkM/cDataType/
+//                                            ldC/ldD/cOrderIsCol/ldA/ldB）
+//   splt_load_tiling_scalar_batch_fields  —— 标量缩放 / 核数 / workspace
+//                                            偏移 / bias+activation / batch
+//                                            字段
+// 各字段为独立 POD 字段拷贝、无顺序依赖。
 // ============================================================================
 #ifdef __CCE_AICORE__
-__aicore__ inline AclsparseltTilingData splt_load_tiling(GM_ADDR tilingGm)
+__aicore__ inline void splt_load_tiling_core_fields(
+    const __gm__ AclsparseltTilingData* gmTd, AclsparseltTilingData& td)
 {
-    __gm__ AclsparseltTilingData* gmTd = reinterpret_cast<__gm__ AclsparseltTilingData*>(tilingGm);
-    AclsparseltTilingData td;
     td.m = gmTd->m;
     td.n = gmTd->n;
     td.k = gmTd->k;
@@ -207,11 +242,25 @@ __aicore__ inline AclsparseltTilingData splt_load_tiling(GM_ADDR tilingGm)
     td.kSegLen = gmTd->kSegLen;
     td.algConfigId = gmTd->algConfigId;
     td.dataType = gmTd->dataType;
-    td.outDataType = gmTd->outDataType;  // v2: load output dtype for epilogue dispatch
+    td.outDataType = gmTd->outDataType;  // output dtype for epilogue dispatch
     td.pruneAlongRow = gmTd->pruneAlongRow;
     td.pruneAlg = gmTd->pruneAlg;
     td.sparseTrans = gmTd->sparseTrans;
     td.transB = gmTd->transB;
+    td.chunkM = gmTd->chunkM;
+    td.cDataType = gmTd->cDataType;
+    // X1 布局接入字段
+    td.ldC = gmTd->ldC;
+    td.ldD = gmTd->ldD;
+    td.cOrderIsCol = gmTd->cOrderIsCol;
+    // cube GM 布局直通 ld
+    td.ldA = gmTd->ldA;
+    td.ldB = gmTd->ldB;
+}
+
+__aicore__ inline void splt_load_tiling_scalar_batch_fields(
+    const __gm__ AclsparseltTilingData* gmTd, AclsparseltTilingData& td)
+{
     td.alpha = gmTd->alpha;
     td.beta = gmTd->beta;
     td.alphaVectorScaling = gmTd->alphaVectorScaling;
@@ -237,7 +286,14 @@ __aicore__ inline AclsparseltTilingData splt_load_tiling(GM_ADDR tilingGm)
     td.batchStrideB = gmTd->batchStrideB;
     td.batchStrideC = gmTd->batchStrideC;
     td.batchStrideD = gmTd->batchStrideD;
-    td.chunkM = gmTd->chunkM;
+}
+
+__aicore__ inline AclsparseltTilingData splt_load_tiling(GM_ADDR tilingGm)
+{
+    __gm__ AclsparseltTilingData* gmTd = reinterpret_cast<__gm__ AclsparseltTilingData*>(tilingGm);
+    AclsparseltTilingData td;
+    splt_load_tiling_core_fields(gmTd, td);
+    splt_load_tiling_scalar_batch_fields(gmTd, td);
     return td;
 }
 #endif // __CCE_AICORE__
@@ -315,6 +371,25 @@ inline int32_t md_n(const aclsparseLtMatmulDescriptor* md) {
                          : static_cast<int32_t>(md->matB->cols);
 }
 
+// 16-byte alignment predicate for all matmul data pointers, shared by
+// aclsparseLtMatmul / aclsparseLtMatmulSearch validation (each host keeps its
+// own error-logging wrapper; nullptr matrices are skipped — matA=nullptr has
+// its own A-sparse fallback validation in MatmulSearch). Condition order
+// (workspace → matA → matB → matC → matD) matches the former inline lambdas.
+inline bool splt_data_ptrs_aligned16(const void* workspace, const void* matA,
+                                     const void* matB, const void* matC,
+                                     const void* matD)
+{
+    auto aligned16 = [](const void* p) -> bool {
+        return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
+    };
+    return aligned16(workspace) &&
+           (matA == nullptr || aligned16(matA)) &&
+           (matB == nullptr || aligned16(matB)) &&
+           (matC == nullptr || aligned16(matC)) &&
+           (matD == nullptr || aligned16(matD));
+}
+
 // ============================================================================
 // Vector scaling flag encoding into matD->alignment high bits.
 //
@@ -377,7 +452,7 @@ inline int32_t dtype_from_acl(aclDataType t)
 {
     if (t == ACL_FLOAT) { return SPLT_DTYPE_FP32; }
     if (t == ACL_FLOAT16) { return SPLT_DTYPE_FP16; }
-    // v2: BF16 / INT8 input dtypes; INT32 only used for matD output type (INT8 path).
+    // BF16 / INT8 input dtypes; INT32 only used for matD output type (INT8 path).
     if (t == ACL_BF16) { return SPLT_DTYPE_BF16; }
     if (t == ACL_INT8) { return SPLT_DTYPE_INT8; }
     if (t == ACL_INT32) { return SPLT_DTYPE_INT32; }
@@ -392,7 +467,19 @@ inline int64_t align_up(int64_t v, int64_t a)
     return ((v + a - 1) / a) * a;
 }
 
-// Resolve cube tiling (baseM, baseN, baseK) from dtype + algConfigId (design §6.2).
+// checked_mul_add — int64 非负乘加溢出检查（a/b/c 均非负）。溢出返回
+// false，否则写入 result = a*b + c。prune/matmul host 的 batch 布局
+// V1/V3 校验共用（span / totalBytes 受检查计算）。
+inline bool checked_mul_add(int64_t a, int64_t b, int64_t c, int64_t& result)
+{
+    if (b != 0 && a > (INT64_MAX - c) / b) {
+        return false;
+    }
+    result = a * b + c;
+    return true;
+}
+
+// Resolve cube tiling (baseM, baseN, baseK) from dtype + algConfigId.
 struct CubeTiling { int32_t baseM; int32_t baseN; int32_t baseK; };
 inline CubeTiling resolve_cube_tiling(int32_t dataType, int32_t algConfigId)
 {
@@ -403,12 +490,12 @@ inline CubeTiling resolve_cube_tiling(int32_t dataType, int32_t algConfigId)
         // ltmatmul test suite (algConfigId 0/1 × all dtype paths).
         return {64, 64, 64};
     }
-    // v2: BF16 reuses FP16 tiling (sizeof=2, C0=16).
+    // BF16 reuses FP16 tiling (sizeof=2, C0=16).
     if (dataType == SPLT_DTYPE_BF16) {
         if (algConfigId == 1) { return {64, 256, 32}; }
         return {128, 128, 64};
     }
-    // v2: INT8 tiling (C0=32, sizeof=1; L1 usage verified in design §5.4).
+    // INT8 tiling (C0=32, sizeof=1; L1 usage verified).
     if (dataType == SPLT_DTYPE_INT8) {
         if (algConfigId == 1) { return {64, 256, 32}; }
         return {128, 128, 64};
@@ -433,7 +520,7 @@ uint32_t get_cube_core_num();
 // platform API is unavailable.
 uint64_t get_ub_size();
 
-// Compute workspace byte offsets (design §5.4).
+// Compute workspace byte offsets.
 struct WsLayout {
     int64_t tilingOff;
     int64_t aPrunedOff;
@@ -444,7 +531,7 @@ struct WsLayout {
 inline WsLayout compute_ws_layout(int32_t m, int32_t n, int32_t k, int32_t splitK,
                                   int32_t dataType, int32_t numBatches)
 {
-    // v2: four-branch elemSize (FP32=4, INT8=1, INT32=4, FP16/BF16=2).
+    // four-branch elemSize (FP32=4, INT8=1, INT32=4, FP16/BF16=2).
     const int64_t elemSize =
         (dataType == SPLT_DTYPE_FP32) ? SPLT_FP32_BYTES :
         (dataType == SPLT_DTYPE_INT8) ? SPLT_INT8_BYTES :
@@ -499,237 +586,16 @@ inline aclsparseStatus_t push_tiling_to_device(void* workspace, int64_t tilingOf
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-inline void fill_cube_tiling_dims(AclsparseltTilingData& td,
-                                  const aclsparseLtMatmulAlgSelection* asel,
-                                  const CubeTiling& ct, int32_t dt)
-{
-    const auto* md = asel->matmulDescr;
-    td.m = md_m(md);
-    td.n = md_n(md);
-    td.k = md_k(md);
-    // matmul path: A_pruned is stored contiguously (ld == k).
-    // Prune path sets td.ld = matA->ld separately in prune_host.cpp.
-    td.ld = md_k(md);
-    td.baseM = ct.baseM;
-    td.baseN = ct.baseN;
-    td.baseK = ct.baseK;
-    // [REFACTOR-KLOOP] kL1Size: SPLT_KL1_BUDGET_BYTES/elemSize, aligned up to baseK.
-    // v2: four-branch elemSize (FP32=4, INT8=1, FP16/BF16=2).
-    const int32_t elemSize =
-        (dt == SPLT_DTYPE_FP32) ? SPLT_FP32_BYTES :
-        (dt == SPLT_DTYPE_INT8) ? SPLT_INT8_BYTES : SPLT_HALF_BYTES;  // FP16/BF16
-    int32_t kL1Sz = SPLT_KL1_BUDGET_BYTES / elemSize;
-    kL1Sz = ((kL1Sz + ct.baseK - 1) / ct.baseK) * ct.baseK;
-    td.kL1Size = kL1Sz;
-}
-
-// splitK / splitKMode are passed in (queried via AlgGetAttribute by the
-// caller fill_tiling_dims) rather than read from asel directly, so that the
-// tiling path consumes alg attributes exclusively through the public API.
-inline void fill_splitk_tiling_dims(AclsparseltTilingData& td,
-                                     const aclsparseLtMatmulAlgSelection* asel,
-                                     const CubeTiling& ct,
-                                     int32_t splitK, int32_t splitKMode)
-{
-    const auto* md = asel->matmulDescr;
-    const int32_t k = md_k(md);
-    // [SPLIT_K_MODE] ONE_KERNEL absorbs splitK as 1 (fused GEMM+reduction);
-    // TWO_KERNELS preserves user splitK (matmul+epilogue two-kernel path).
-    const int32_t effectiveSplitK =
-        (splitKMode == ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL) ? 1 : splitK;
-    // Warn when ONE_KERNEL mode silently ignores splitK > 1.
-    if (splitKMode == ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL && splitK > 1) {
-        OP_LOGI(kSparseLtLogTag, "Tiling: splitKMode=ONE_KERNEL, splitK=%d ignored (effectiveSplitK=1)",
-                splitK);
-    }
-    td.splitK = effectiveSplitK;
-    // kSegLen = ceil(k / effectiveSplitK), aligned up to baseK for cube efficiency.
-    // kernel clamps to td.k at segment tail.
-    int32_t kSeg = (k + effectiveSplitK - 1) / effectiveSplitK;
-    kSeg = ((kSeg + ct.baseK - 1) / ct.baseK) * ct.baseK;
-    if (effectiveSplitK == 1 && kSeg > k) { kSeg = k; }
-    td.kSegLen = kSeg;
-}
-
-inline void fill_sparse_tiling_dims(AclsparseltTilingData& td,
-                                     const aclsparseLtMatmulDescriptor* md)
-{
-    const bool hasStructuredSparsity = md_hasStructuredSparsity(md);
-    const bool isSparseA = md_isSparseA(md);
-    const bool transA = md_transA(md);
-    const bool transB = md_transB(md);
-    // pruneAlongRow: dispatch by isSparseA to use the sparse
-    // matrix's order/trans. v2: dense×dense sets pruneAlongRow=0.
-    if (!hasStructuredSparsity) {
-        td.pruneAlongRow = 0;
-    } else {
-        const bool isRowOrder = (isSparseA ? md->matA->order : md->matB->order)
-                                == ACL_SPARSE_ORDER_ROW;
-        td.pruneAlongRow = ((isSparseA ? transA : transB) != isRowOrder) ? 1 : 0;
-    }
-    td.sparseTrans = transA ? 1 : 0;
-    // A-sparse: prune transposes A, matmul must not.
-    // B-sparse: A is dense (not pruned), matmul must handle transA via sparseTrans.
-    if (hasStructuredSparsity && isSparseA) {
-        td.sparseTrans = 0;
-    }
-    // B-sparse: prune always outputs B_pruned in (k, n) row-major layout
-    // (TransRowOrder path transposes during prune; AlongRow/AlongCol paths
-    // read B in (k,n) and output (k,n) unchanged). The matmul must treat
-    // B_pruned as NDExt(k, n) — no additional transpose.
-    if (hasStructuredSparsity && !isSparseA) {
-        td.transB = 0;
-    } else {
-        td.transB = transB ? 1 : 0;
-    }
-}
-
-// Fill tiling dimension fields (shared by PlanInit).
-// Derived fields are computed from md (matmulDescr) at call time, not cached in asel.
-//
-// algConfigId/splitK/splitKMode are queried via AlgGetAttribute API;
-// other fields (m/n/k/transA etc.) are derived from md.
-//
-// The AlgGetAttribute calls are extracted into query_alg_attributes()
-// [codecheck: oversized function].
-
-struct AlgAttrValues {
-    int32_t algConfigId = 0;
-    int32_t splitK = 1;
-    int32_t splitKMode = 0;
-};
-
-// Query algConfigId / splitK / splitKMode via the public AlgGetAttribute API.
-// On failure, fall back to safe defaults and log the error.
-inline AlgAttrValues query_alg_attributes(aclsparseLtConstHandle_t handle,
-                                          const aclsparseLtMatmulAlgSelection* asel)
-{
-    AlgAttrValues v;
-    aclsparseLtConstMatmulAlgSelection_t algSelForApi = asel;
-    aclsparseStatus_t st = aclsparseLtMatmulAlgGetAttribute(
-        handle, &algSelForApi, ACLSPARSELT_MATMUL_ALG_CONFIG_ID,
-        &v.algConfigId, sizeof(int32_t));
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        OP_LOGE(kSparseLtLogTag, "fill_tiling_dims: get algConfigId failed (%d), using default 0",
-                static_cast<int32_t>(st));
-        v.algConfigId = 0;
-    }
-    st = aclsparseLtMatmulAlgGetAttribute(
-        handle, &algSelForApi, ACLSPARSELT_MATMUL_SPLIT_K,
-        &v.splitK, sizeof(int32_t));
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        OP_LOGE(kSparseLtLogTag, "fill_tiling_dims: get splitK failed (%d), using default 1",
-                static_cast<int32_t>(st));
-        v.splitK = 1;
-    }
-    st = aclsparseLtMatmulAlgGetAttribute(
-        handle, &algSelForApi, ACLSPARSELT_MATMUL_SPLIT_K_MODE,
-        &v.splitKMode, sizeof(int32_t));
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        OP_LOGE(kSparseLtLogTag, "fill_tiling_dims: get splitKMode failed (%d), using default 0",
-                static_cast<int32_t>(st));
-        v.splitKMode = 0;
-    }
-    return v;
-}
-
-/**
- * @brief 填充 bias + activation 默认值到 tiling data。
- * prepare_matmul_pointers 会用 descriptor 实际值覆盖这些默认值。
- */
-inline void fill_bias_activation_defaults(AclsparseltTilingData& td)
-{
-    td.biasDevPtr = 0;           // 默认无 bias
-    td.biasStride = 0;
-    td.activationType = 0;      // 默认无 activation
-    td.reluUpperBound = FLT_MAX;
-    td.reluThreshold = 0.0f;
-    td.geluScaling = 1.0f;
-    td.biasChunkMode = 0;       // 默认全量加载（下方根据 UB 预算计算降级标志）
-}
-
-/**
- * @brief 计算 biasChunkMode 降级标志。
- *
- * 三向量全量加载 + tile buffer 超 UB 时降级为 per-chunk。
- * 仅融合路径（splitK==1）需要降级（非融合路径 CHUNK=256 固定小 buffer，不超限）。
- */
-inline void compute_bias_chunk_mode(AclsparseltTilingData& td,
-                                     const aclsparseLtMatmulDescriptor* md,
-                                     int32_t dt, const CubeTiling& ct, int32_t m)
-{
-    const bool biasEnabled = (md->biasPointer != nullptr);
-    const bool needVecScale = (td.alphaVectorScaling == 1 || td.betaVectorScaling == 1);
-    if (biasEnabled && needVecScale && td.splitK == 1) {
-        const uint64_t ubSize = get_ub_size();
-        const uint64_t maxTileBytes =
-            2 * static_cast<uint64_t>(ct.baseM) * static_cast<uint64_t>(ct.baseN) * sizeof(float)
-            + 2048;  // accBuf + dFp32Buf + small bufs
-        // biasVecBuf (FP32) + biasLoadBuf (FP16/BF16 only, not FP32/INT8)
-        const bool needBiasLoadBuf = (dt != SPLT_DTYPE_FP32 && dt != SPLT_DTYPE_INT8);
-        const uint64_t vecBytes =
-            (td.alphaVectorScaling ? static_cast<uint64_t>(m) * 4 : 0) +
-            (td.betaVectorScaling ? static_cast<uint64_t>(m) * 4 : 0) +
-            (biasEnabled ? static_cast<uint64_t>(m) * 4 : 0) +
-            (biasEnabled && needBiasLoadBuf
-                ? static_cast<uint64_t>(m) * static_cast<uint64_t>(SPLT_HALF_BYTES)
-                : 0);
-        if (vecBytes + maxTileBytes > ubSize) {
-            td.biasChunkMode = 1;
-        }
-    }
-}
-
-inline void fill_tiling_dims(AclsparseltTilingData& td,
-                             aclsparseLtConstHandle_t handle,
-                             const aclsparseLtMatmulDescriptor* md,
-                             const aclsparseLtMatmulAlgSelection* asel,
-                             const WsLayout& wsl, int32_t coreNum)
-{
-    const int32_t dt = dtype_from_acl(md->matA->valueType);
-    const AlgAttrValues v = query_alg_attributes(handle, asel);
-    const CubeTiling ct = resolve_cube_tiling(dt, v.algConfigId);
-    fill_cube_tiling_dims(td, asel, ct, dt);
-    fill_splitk_tiling_dims(td, asel, ct, v.splitK, v.splitKMode);
-    td.algConfigId = v.algConfigId;
-    td.dataType = dt;
-    // v2: outDataType derived from matD->valueType (INT8 path: INT8 or INT32).
-    td.outDataType = dtype_from_acl(md->matD->valueType);
-    fill_sparse_tiling_dims(td, md);
-    td.alpha = 1.0f;
-    td.beta = 0.0f;
-    td.alphaVectorScaling = decode_alpha_scaling(md) ? 1 : 0;
-    td.betaVectorScaling = decode_beta_scaling(md) ? 1 : 0;
-    td.alphaDevPtr = 0;
-    td.betaDevPtr = 0;
-    td.coreNum = static_cast<int32_t>(coreNum);
-    const int32_t m = md_m(md);
-    const int32_t n = md_n(md);
-    // 从 mat descriptor 读取 batch 配置（SetAttribute 在 PlanInit 之前调用）
-    const int32_t numBatches = (md->matA != nullptr && md->matA->numBatches > 0) ? md->matA->numBatches : 1;
-    td.numBatches = numBatches;
-    td.batchStrideA = (md->matA != nullptr) ? md->matA->batchStride : 0;
-    td.batchStrideB = (md->matB != nullptr) ? md->matB->batchStride : 0;
-    td.batchStrideC = (md->matC != nullptr) ? md->matC->batchStride : 0;
-    td.batchStrideD = (md->matD != nullptr) ? md->matD->batchStride : 0;
-    const int64_t totalMNTiles = static_cast<int64_t>((m + ct.baseM - 1) / ct.baseM) *
-                                  static_cast<int64_t>((n + ct.baseN - 1) / ct.baseN);
-    // usedCoreNum 基于 per-batch tile 数（不含 numBatches）。
-    // batch 循环在 kernel 内部，每个 block 处理所有 batch 的同一组 tile。
-    // 此前 totalTiles 乘以 numBatches 导致 usedCoreNum 被放大，多余 block 在
-    // 每 batch 的 tile 循环中空转（rawBlockId >= totalTiles 直接 continue）。
-    // 改为 per-batch tile 数后，核数与 kernel 侧 totalTiles 一致，无空转。
-    const int64_t perBatchTotalTiles = totalMNTiles * static_cast<int64_t>(td.splitK);
-    td.usedCoreNum = (perBatchTotalTiles < static_cast<int64_t>(coreNum))
-                         ? static_cast<int32_t>(perBatchTotalTiles)
-                         : static_cast<int32_t>(coreNum);
-    if (td.usedCoreNum <= 0) { td.usedCoreNum = 1; }
-    td.tilingOffset = wsl.tilingOff;
-    td.aPrunedOffset = wsl.aPrunedOff;
-    td.tempResultOffset = wsl.tempOff;
-    fill_bias_activation_defaults(td);
-    compute_bias_chunk_mode(td, md, dt, ct, m);
-}
+// ============================================================================
+// 超大头文件整改：tiling 填充链（fill_tiling_dims 族 +
+// query_alg_attributes + compute_bias_chunk_mode）拆至同目录
+// aclsparselt_tiling_fill.h（按主题分头；拆分后另有 4 处语义变更，
+// 清单见 tiling_fill.h 头注释）。
+// 此处转发 include：既有引用点（include 本头的全部 TU）零改动、
+// 零编译破坏；两头的 include guard 解开相互引用（本头先展开完毕，
+// tiling_fill.h 再引用本头时空展开）。
+// ============================================================================
+#include "aclsparselt_tiling_fill.h"
 
 #endif // __CCE_AICORE__
 

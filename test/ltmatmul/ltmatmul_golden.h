@@ -14,7 +14,7 @@
 #define TEST_MATMUL_GOLDEN_H_
 
 // =============================================================================
-// CPU Golden reference for aclsparseLtMatmul (v2: 4 dtype × 2 path).
+// CPU Golden reference for aclsparseLtMatmul (4 dtype × 2 path).
 //
 // Paths:
 //   sparse×dense: D = α·op(A_pruned)·op(B) + β·C  (with 2:4 prune front-end)
@@ -30,6 +30,8 @@
 //   - matmul_golden_int8.h:  INT8-specific golden functions
 // And provides FP32/FP16/BF16 golden entry points (with/without vector scaling).
 // =============================================================================
+
+#include <algorithm>
 
 #include "ltmatmul_golden_types.h"  // bf16_bits_t, conversions, prune helpers, CPU golden steps
 #include "ltmatmul_golden_int8.h"   // INT8 golden entries
@@ -177,7 +179,7 @@ inline void LtMatmulDenseGoldenRunVec(
 // Epilogue golden entries: D = Activation(alpha·op(A_pruned)·op(B) + beta·C + bias)
 //
 // New functions extend the existing scalar/vector entries with bias + activation
-// post-processing (Step 5 + Step 6, per requirement doc §2.1.1). All epilogue
+// post-processing (Step 5 + Step 6). All epilogue
 // math runs in FP32; bias is per-row broadcast; activation is ReLU/GeLU.
 //
 // When biasVec is empty and actType==0, these reduce to the existing entries
@@ -279,7 +281,7 @@ inline void LtMatmulDenseGoldenRunWithEpilogueVec(
 // biasStride>0 → bias pointer advances by biasStride per batch.
 //
 // batchStride is the element stride for A/B/C/D matrices (same stride for all
-// four, per requirement doc §2.3.2 BATCH_STRIDE set per-matrix in MatDesc;
+// four. BATCH_STRIDE set per-matrix in MatDesc;
 // golden assumes caller passes contiguous data with batchStride spacing).
 // -----------------------------------------------------------------------------
 template <typename T>
