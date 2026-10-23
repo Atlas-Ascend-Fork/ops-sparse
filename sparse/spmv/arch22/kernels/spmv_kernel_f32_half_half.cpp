@@ -12,6 +12,3 @@
 
 #include "spmv_kernel.h"
 DEFINE_SPMV_KERNEL(float, half, half)
-
-#include "spmv_trans_finalize.h"
-DEFINE_SPMV_TRANS_FINALIZE(half)

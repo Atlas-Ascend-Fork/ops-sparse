@@ -23,13 +23,14 @@
 #include "spmv.h"
 #include "spmv_cube_tiling.h"
 #include "spmv_tiling_data.h"
+#include "spmv_ub_budget.h"
 
 // -------------------------------------------------------------------
 // 前向声明：AscendC 内核启动分发器（定义在 kernels/spmv_kernel.cpp）
 // -------------------------------------------------------------------
 extern "C" void spmv_kernel_do(
     GM_ADDR csrRowPtr, GM_ADDR csrColInd, GM_ADDR csrVal,
-    GM_ADDR xVec, GM_ADDR yVec, SpmvTilingData tiling,
+    GM_ADDR xVec, GM_ADDR yVec, GM_ADDR ws, SpmvTilingData tiling,
     const void *alpha, const void *beta,
     int32_t cType, int32_t vType, int32_t oType,
     bool trans, int32_t algType, uint32_t numBlocks,
@@ -60,12 +61,75 @@ namespace {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
+    // complex64 标量的 host 侧副本：配合 ReadSpmvScalar 做 DEVICE 模式 D2H，
+    // 二进制布局与 aclsparseComplex / 交错 float2 一致（re 前 im 后）
+    struct SpmvScalarC64 {
+        float re;
+        float im;
+    };
+
+    // 按指针模式读取全部 alpha/beta 标量：DEVICE 模式下先同步 handle stream
+    // 再 D2H，HOST 模式直接取值；c64 走 8 字节副本。readY 判定与 kernel 分发
+    // 统一使用本函数读出的 host 侧值，不再触碰调用方指针。
+    aclsparseStatus_t ReadSpmvAllScalars(aclsparseContext *h, aclrtStream stream,
+                                         aclDataType computeType,
+                                         const void *alpha, const void *beta,
+                                         float &alphaFloat, float &betaFloat,
+                                         int32_t &alphaInt, int32_t &betaInt,
+                                         SpmvScalarC64 &alphaC64, SpmvScalarC64 &betaC64)
+    {
+        // Device scalars can be written by work already queued on the handle
+        // stream. aclrtMemcpy(D2H) does not wait for that work, so establish
+        // the stream dependency before reading alpha/beta on the host.
+        if (h->pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
+            aclError syncRet = aclrtSynchronizeStream(stream);
+            CHECK_RET(syncRet == ACL_SUCCESS,
+                      LOG_PRINT("[ERROR] aclsparseSpMV: synchronizing handle stream before scalar read failed, ret=%d\n",
+                                syncRet);
+                      return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+        }
+
+        aclsparseStatus_t scalarStatus = ACL_SPARSE_STATUS_SUCCESS;
+        if (computeType == ACL_FLOAT) {
+            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaFloat, "alpha");
+            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaFloat, "beta");
+        } else if (computeType == ACL_INT32) {
+            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaInt, "alpha");
+            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaInt, "beta");
+        }
+        CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+
+        // complex64：标量同样按指针模式读取（DEVICE 模式下经 ReadSpmvScalar
+        // 各 8 字节 D2H），readY 判定与 kernel 分发统一使用 host 侧副本，
+        // 不再触碰调用方指针。
+        if (computeType == ACL_COMPLEX64) {
+            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaC64, "alpha");
+            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaC64, "beta");
+            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
+        }
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    /**
+     * @brief 任务书 §2.1 声明的 dtype 组合表：
+     *   INT32 计算：INT8->INT32（另保留仓内已有 INT32->INT32）
+     *   FP32 计算：INT8->FP32、FP16/BF16->FP32、FP16->FP16、BF16->BF16、FP32->FP32
+     *   complex64 计算：complex64->complex64、FP32->complex64
+     */
     bool IsSupportedSpmvDtypeCombo(aclDataType computeType,
                                    aclDataType valType,
                                    aclDataType outType)
     {
         if (computeType == ACL_INT32) {
-            return valType == ACL_INT32 && outType == ACL_INT32;
+            return (valType == ACL_INT8 || valType == ACL_INT32) && outType == ACL_INT32;
+        }
+        if (computeType == ACL_COMPLEX64) {
+            if (valType == ACL_COMPLEX64)
+                return outType == ACL_COMPLEX64;
+            return valType == ACL_FLOAT && outType == ACL_COMPLEX64;
         }
         if (computeType != ACL_FLOAT) {
             return false;
@@ -79,15 +143,15 @@ namespace {
         if (valType == ACL_BF16) {
             return outType == ACL_BF16 || outType == ACL_FLOAT;
         }
-        return valType == ACL_INT32 && outType == ACL_FLOAT;
+        return (valType == ACL_INT8 || valType == ACL_INT32) && outType == ACL_FLOAT;
     }
 
     /**
      * @brief 获取 UB 容量下允许的最大单行长（非零元个数）
      */
     template <typename T>
-    uint32_t ComputeMaxRowLength(bool transpose) {
-        const uint64_t kYLocalBytes = transpose ? 128 * 32 : 32;
+    uint32_t ComputeMaxRowLength() {
+        constexpr uint64_t kYLocalBytes = 32;
         constexpr uint64_t kSystemReserved = 4 * 1024;
         constexpr uint64_t kBufferCount = 5;
         constexpr uint64_t kAlignBytes = 32;
@@ -110,7 +174,7 @@ namespace {
             + sizeof(float)  // workReduce
             + sizeof(float); // floatTmp
 
-        const uint64_t kFixed = kYLocalBytes + kSystemReserved + kAlignSlack;
+        constexpr uint64_t kFixed = kYLocalBytes + kSystemReserved + kAlignSlack;
 
         if (ubSize <= kFixed) {
             return 0;
@@ -158,6 +222,68 @@ namespace {
         return maxLen;
     }
 
+    /**
+     * @brief 矩阵描述符校验：format / indexBase / 索引类型
+     */
+    aclsparseStatus_t ValidateSpmvMatrixDescr(const struct aclsparseSpMatDescr *matInner)
+    {
+        CHECK_RET(matInner->format == ACL_SPARSE_FORMAT_CSR,
+                  LOG_PRINT("[ERROR] SpMV: unsupported matrix format %d\n", matInner->format);
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
+
+        CHECK_RET(matInner->baseType == ACL_SPARSE_INDEX_BASE_ZERO ||
+                      matInner->baseType == ACL_SPARSE_INDEX_BASE_ONE,
+                  LOG_PRINT("[ERROR] SpMV: unsupported index base %d\n", matInner->baseType);
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
+
+        aclsparseStatus_t idxSt =
+            AclsparseValidateSupportedCsrIndexTypes(matInner->ptrType, matInner->IdxType);
+        CHECK_RET(idxSt == ACL_SPARSE_STATUS_SUCCESS,
+                  LOG_PRINT("[ERROR] SpMV: unsupported index type ptr=%d idx=%d "
+                            "(only ACL_SPARSE_INDEX_32I)\n",
+                            matInner->ptrType, matInner->IdxType);
+                  return idxSt);
+
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    /**
+     * @brief 转置需要的累加 workspace 字节数：
+     * - f32 计算（f32/f16/bf16 输出）：double-single 确定性方案，groups 个
+     *   hi 平面 + groups 个 lo 平面，groups = min(AIV 核数, max(rows,1))，
+     *   平面行 stride 按 32B 对齐，大小 groups*roundUp(cols,8)*8；
+     * - complex64 输出：同理按交错 float2，大小 groups*roundUp(2*cols,8)*8；
+     * 其余情形（int32 整数原子加）为 0。
+     */
+    size_t SpmvWorkspaceSize(aclsparseOperation_t opA, aclsparseConstSpMatDescr_t matA,
+                             aclsparseDnVecDescr_t vecY, aclDataType computeType)
+    {
+        if (opA != ACL_SPARSE_OP_TRANSPOSE) {
+            return 0;
+        }
+        auto outType = ToVecInner(vecY)->valueType;
+        size_t cols = static_cast<size_t>(ToMatInner(matA)->cols);
+        bool dsF32 = (computeType == ACL_FLOAT) &&
+                     (outType == ACL_FLOAT || outType == ACL_FLOAT16 || outType == ACL_BF16);
+        bool dsC64 = (outType == ACL_COMPLEX64 && computeType == ACL_COMPLEX64);
+        if (!dsF32 && !dsC64) {
+            return 0;
+        }
+        uint32_t coreNum = 1;
+        auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
+        if (ascendcPlatform != nullptr && ascendcPlatform->GetCoreNumAiv() > 0) {
+            coreNum = ascendcPlatform->GetCoreNumAiv();
+        }
+        size_t rows = static_cast<size_t>(ToMatInner(matA)->rows);
+        size_t groups = coreNum;
+        if (rows > 0 && rows < groups) {
+            groups = rows;
+        }
+        size_t laneFloats = dsC64 ? 2 * cols : cols;
+        size_t stride = (laneFloats + 7) / 8 * 8;
+        return groups * stride * 2 * sizeof(float);
+    }
+
     /// aclsparseSpMV / aclsparseSpMVGetBufferSize 共同解析出的参数。
     struct SpmvArgs {
         aclsparseContext *handle;
@@ -198,12 +324,15 @@ namespace {
         CHECK_RET(vecY != nullptr,
                   LOG_PRINT("[ERROR] SpMV: vecY is nullptr\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
-        CHECK_RET(alg == ACL_SPARSE_SPMV_ALG_DEFAULT || alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE,
-                  LOG_PRINT("[ERROR] SpMV: only ACL_SPARSE_SPMV_ALG_DEFAULT and "
-                            "ACL_SPARSE_SPMV_CSR_ALG_CUBE are supported currently, got alg=%d\n", alg);
+        CHECK_RET(alg == ACL_SPARSE_SPMV_ALG_DEFAULT ||
+                      alg == ACL_SPARSE_SPMV_CSR_ALG1 ||
+                      alg == ACL_SPARSE_SPMV_CSR_ALG2 ||
+                      alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE,
+                  LOG_PRINT("[ERROR] SpMV: unsupported alg=%d\n", alg);
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
 
-        CHECK_RET(computeType == ACL_FLOAT || computeType == ACL_INT32,
+        CHECK_RET(computeType == ACL_FLOAT || computeType == ACL_INT32 ||
+                      computeType == ACL_COMPLEX64,
                   LOG_PRINT("[ERROR] SpMV: unsupported computeType %d\n", computeType);
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
 
@@ -212,22 +341,8 @@ namespace {
         auto *xInner = ToVecInner(vecX);
         auto *yInner = ToVecInner(vecY);
 
-        CHECK_RET(matInner->format == ACL_SPARSE_FORMAT_CSR,
-                  LOG_PRINT("[ERROR] SpMV: unsupported matrix format %d\n", matInner->format);
-                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
-
-        CHECK_RET(matInner->baseType == ACL_SPARSE_INDEX_BASE_ZERO,
-                  LOG_PRINT("[ERROR] SpMV: 1-based index base not supported\n");
-                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
-        {
-            aclsparseStatus_t idxSt =
-                AclsparseValidateSupportedCsrIndexTypes(matInner->ptrType, matInner->IdxType);
-            CHECK_RET(idxSt == ACL_SPARSE_STATUS_SUCCESS,
-                      LOG_PRINT("[ERROR] SpMV: unsupported index type ptr=%d idx=%d "
-                                "(only ACL_SPARSE_INDEX_32I)\n",
-                                matInner->ptrType, matInner->IdxType);
-                      return idxSt);
-        }
+        aclsparseStatus_t descrSt = ValidateSpmvMatrixDescr(matInner);
+        CHECK_RET(descrSt == ACL_SPARSE_STATUS_SUCCESS, return descrSt);
 
         CHECK_RET(opA == ACL_SPARSE_OP_NON_TRANSPOSE || opA == ACL_SPARSE_OP_TRANSPOSE,
                   LOG_PRINT("[ERROR] SpMV: opA conjugate not supported yet\n");
@@ -253,6 +368,10 @@ namespace {
             CHECK_RET(opA == ACL_SPARSE_OP_NON_TRANSPOSE,
                       LOG_PRINT("[ERROR] SpMV: ACL_SPARSE_SPMV_CSR_ALG_CUBE requires "
                                 "ACL_SPARSE_OP_NON_TRANSPOSE\n");
+                      return ACL_SPARSE_STATUS_NOT_SUPPORTED);
+            CHECK_RET(matInner->baseType == ACL_SPARSE_INDEX_BASE_ZERO,
+                      LOG_PRINT("[ERROR] SpMV: ACL_SPARSE_SPMV_CSR_ALG_CUBE requires "
+                                "ACL_SPARSE_INDEX_BASE_ZERO\n");
                       return ACL_SPARSE_STATUS_NOT_SUPPORTED);
             CHECK_RET(computeType == ACL_FLOAT && outType == ACL_FLOAT &&
                           (valType == ACL_FLOAT || valType == ACL_FLOAT16),
@@ -312,7 +431,7 @@ namespace {
     }
 
     /**
-     * @brief 选择 cube 版 SpMV 使用的 workspace。
+     * @brief 选择 SpMV 使用的 workspace。
      *
      * 优先使用调用方通过 externalBuffer 传入的显存（大小由
      * aclsparseSpMVGetBufferSize 给出，调用方自行保证）；externalBuffer 为空时
@@ -360,7 +479,7 @@ extern "C" {
                                                  aclDataType computeType,
                                                  aclsparseSpMVAlg_t alg,
                                                  size_t *bufferSize) {
-        // workspace 大小只取决于 (nnz, 值类型, 算法)，与 alpha / beta 取值无关。
+        // workspace 大小只取决于 (opA, 维度, 值类型, 算法)，与 alpha / beta 取值无关。
         (void)alpha;
         (void)beta;
 
@@ -369,30 +488,58 @@ extern "C" {
             ValidateSpmvArgs(handle, opA, matA, vecX, vecY, computeType, alg, &args);
         CHECK_RET(st == ACL_SPARSE_STATUS_SUCCESS, return st);
 
-
         CHECK_RET(bufferSize != nullptr,
                   LOG_PRINT("[ERROR] aclsparseSpMVGetBufferSize: bufferSize is nullptr\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
         *bufferSize = 0;
 
-        // Narrow transpose outputs accumulate in FP32 workspace and round only once.
-        if (!args.useCube) {
-            if (opA == ACL_SPARSE_OP_TRANSPOSE && computeType == ACL_FLOAT &&
-                args.outType != ACL_FLOAT) {
-                *bufferSize = static_cast<size_t>(args.mat->cols) * sizeof(float);
+        // cube 版需要 gather 乘积区 + 块内推测扫描结果区；退化输入会回退到
+        // 向量版 kernel，同样不需要 cube workspace。
+        if (args.useCube) {
+            spmv_cube::CubeWorkspaceLayout layout{};
+            if (GetCubeWorkspaceLayout(*args.mat, args.valType, &layout)) {
+                *bufferSize = layout.totalBytes;
             }
             return ACL_SPARSE_STATUS_SUCCESS;
         }
 
-        // cube 版需要 gather 乘积区 + 块内推测扫描结果区；退化输入会回退到
-        // 向量版 kernel，同样不需要 workspace。
-        spmv_cube::CubeWorkspaceLayout layout{};
-        if (GetCubeWorkspaceLayout(*args.mat, args.valType, &layout)) {
-            *bufferSize = layout.totalBytes;
-        }
+        // 向量版：转置 + f32 计算（f32/f16/bf16 输出）及转置 + c64 输出需要
+        // double-single 平面 workspace，其余情形为 0
+        *bufferSize = SpmvWorkspaceSize(opA, matA, vecY, computeType);
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
+    aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle,
+                                              aclsparseOperation_t opA,
+                                              const void *alpha,
+                                              aclsparseConstSpMatDescr_t matA,
+                                              aclsparseConstDnVecDescr_t vecX,
+                                              const void *beta,
+                                              aclsparseDnVecDescr_t vecY,
+                                              aclDataType computeType,
+                                              aclsparseSpMVAlg_t alg,
+                                              void *externalBuffer) {
+        (void)externalBuffer; // arch22 预处理为校验 + host 侧探测（CUBE 最长行探测经调用流 D2H 回读并缓存）
+        CHECK_RET(alpha != nullptr && beta != nullptr,
+                  LOG_PRINT("[ERROR] aclsparseSpMVPreprocess: alpha/beta is nullptr\n");
+                  return ACL_SPARSE_STATUS_INVALID_VALUE);
+        SpmvArgs args{};
+        aclsparseStatus_t st = ValidateSpmvArgs(handle, opA, matA, vecX, vecY, computeType, alg, &args);
+        CHECK_RET(st == ACL_SPARSE_STATUS_SUCCESS, return st);
+
+        // cube 算法的最长行探测（整段 rowPtr D2H + 流同步）属于 setup 阶段动作，
+        // 在这里执行一次并缓存到描述符，aclsparseSpMV 每次调用直接复用。
+        if (args.useCube && !args.mat->spmvCubeMaxRowLengthValid && args.mat->rows > 0) {
+            aclrtStream stream = args.handle->stream;
+            CHECK_RET(stream != nullptr,
+                      LOG_PRINT("[ERROR] aclsparseSpMVPreprocess: stream is nullptr, please call aclsparseSetStream first\n");
+                      return ACL_SPARSE_STATUS_INVALID_VALUE);
+            args.mat->spmvCubeMaxRowLength =
+                ComputeMaxRowLengthFromDevice(args.mat->ptrs, args.mat->rows, stream);
+            args.mat->spmvCubeMaxRowLengthValid = true;
+        }
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
     aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle,
                                     aclsparseOperation_t opA,
                                     const void *alpha,
@@ -424,7 +571,8 @@ extern "C" {
         const aclDataType outType = args.outType;
 
         // ==================== Alpha / Beta ====================
-        // alpha/beta 类型必须与 computeType 一致（任务书要求），调用方负责保证
+        // alpha/beta 类型必须与 computeType 一致（任务书要求），调用方负责保证。
+        // complex64 按交错 float2 读取，指针原样传给 kernel 分发器。
         CHECK_RET(alpha != nullptr,
                   LOG_PRINT("[ERROR] aclsparseSpMV: alpha is nullptr\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
@@ -432,35 +580,22 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: beta is nullptr\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
 
-        // Device scalars can be written by work already queued on the handle
-        // stream. aclrtMemcpy(D2H) does not wait for that work, so establish
-        // the stream dependency before reading alpha/beta on the host.
+        // ==================== Stream ====================
         aclrtStream stream = h->stream;
         CHECK_RET(stream != nullptr,
                   LOG_PRINT("[ERROR] aclsparseSpMV: stream is nullptr, please call aclsparseSetStream first\n");
                   return ACL_SPARSE_STATUS_INVALID_VALUE);
-        if (h->pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
-            aclError syncRet = aclrtSynchronizeStream(stream);
-            CHECK_RET(syncRet == ACL_SUCCESS,
-                      LOG_PRINT("[ERROR] aclsparseSpMV: synchronizing handle stream before scalar read failed, ret=%d\n",
-                                syncRet);
-                      return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-        }
 
         float alphaFloat = 1.0f;
         float betaFloat = 0.0f;
         int32_t alphaInt = 1;
         int32_t betaInt = 0;
-        aclsparseStatus_t scalarStatus = ACL_SPARSE_STATUS_SUCCESS;
-        if (computeType == ACL_FLOAT) {
-            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaFloat, "alpha");
-            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
-            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaFloat, "beta");
-        } else {
-            scalarStatus = ReadSpmvScalar(alpha, h->pointerMode, alphaInt, "alpha");
-            CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
-            scalarStatus = ReadSpmvScalar(beta, h->pointerMode, betaInt, "beta");
-        }
+        SpmvScalarC64 alphaC64{1.0f, 0.0f};
+        SpmvScalarC64 betaC64{0.0f, 0.0f};
+        aclsparseStatus_t scalarStatus =
+            ReadSpmvAllScalars(h, stream, computeType, alpha, beta,
+                               alphaFloat, betaFloat, alphaInt, betaInt,
+                               alphaC64, betaC64);
         CHECK_RET(scalarStatus == ACL_SPARSE_STATUS_SUCCESS, return scalarStatus);
 
         // ==================== 平台参数 ====================
@@ -473,6 +608,14 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: GetCoreNumAiv returned 0\n");
                   return ACL_SPARSE_STATUS_INTERNAL_ERROR);
 
+        // GEN-4.2：kernel UB 预算与硬件实际 UB 容量关联校验（arch22 192KB 内）
+        uint64_t ubBytes = 0;
+        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubBytes);
+        CHECK_RET(ubBytes >= SPMV_UB_BUDGET_BYTES,
+                  LOG_PRINT("[ERROR] aclsparseSpMV: kernel UB budget %u exceeds device UB capacity %llu\n",
+                            SPMV_UB_BUDGET_BYTES, static_cast<unsigned long long>(ubBytes));
+                  return ACL_SPARSE_STATUS_INTERNAL_ERROR);
+
         // ==================== 提取矩阵参数 ====================
         uint64_t rows = matInner->rows;
         uint64_t cols = matInner->cols;
@@ -482,15 +625,15 @@ extern "C" {
         void *csrColIndDevice = matInner->idxs;
         void *csrValDevice = matInner->values;
 
-        // ==================== cube 版 tiling / workspace ====================
+        // ==================== 算法分发：cube 版 tiling / workspace ====================
         // tiling 全部在 host 侧算好，随 launch 按值传给 kernel；workspace 优先取
         // 调用方的 externalBuffer（大小见 aclsparseSpMVGetBufferSize），未提供时
-        // 回退到句柄上的 workspace（aclsparseGetEffectiveWorkspace）。因此整个
-        // 派发过程只往 stream 上排任务，不做任何同步，保持 aclsparseSpMV 异步语义。
+        // 回退到句柄上的 workspace（aclsparseGetEffectiveWorkspace）。
         int32_t algType = SPMV_ALG_VECTOR;
         tcuscan::SpMVCubeTiling cubeTiling{};
         uint32_t cubeBlocks = 0;
         void *cubeWorkspace = nullptr;
+        void *vectorWorkspace = externalBuffer;
 
         if (args.useCube) {
             spmv_cube::CubeWorkspaceLayout layout{};
@@ -515,6 +658,25 @@ extern "C" {
                               return ACL_SPARSE_STATUS_EXECUTION_FAILED);
                 }
 
+                // cube 版按 nnz 切分，段求和要求每个块内至少包含一个段结尾，
+                // 依赖最长行不超过 UB 容量上界（见 MakeCubeTiling 的说明）。
+                // 最长行优先复用 Preprocess 写入描述符的探测缓存；缓存无效
+                // （裸调 SpMV 不走 Preprocess）时维持就地探测并顺手写回。
+                if (!matInner->spmvCubeMaxRowLengthValid) {
+                    matInner->spmvCubeMaxRowLength =
+                        ComputeMaxRowLengthFromDevice(csrRowPtrDevice, rows, stream);
+                    matInner->spmvCubeMaxRowLengthValid = true;
+                }
+                uint32_t maxRowLength = matInner->spmvCubeMaxRowLength;
+                uint32_t maxTileLength = ComputeMaxRowLength<float>();
+                CHECK_RET(maxTileLength > 0,
+                          LOG_PRINT("[ERROR] aclsparseSpMV: failed to compute max tile length\n");
+                          return ACL_SPARSE_STATUS_INTERNAL_ERROR);
+                CHECK_RET(maxRowLength <= maxTileLength,
+                          LOG_PRINT("[ERROR] aclsparseSpMV: max row length %u exceeds UB capacity %u\n",
+                                    maxRowLength, maxTileLength);
+                          return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES);
+
                 cubeWorkspace = workspace;
                 algType = SPMV_ALG_CUBE;
             } else {
@@ -523,57 +685,59 @@ extern "C" {
             }
         }
 
-        if (opA == ACL_SPARSE_OP_TRANSPOSE && computeType == ACL_FLOAT &&
-            outType != ACL_FLOAT) {
-            const size_t bytes = static_cast<size_t>(cols) * sizeof(float);
-            st = SelectSpmvWorkspace(h, externalBuffer, bytes, &cubeWorkspace);
-            CHECK_RET(st == ACL_SPARSE_STATUS_SUCCESS, return st);
-            aclError ret = aclrtMemsetAsync(cubeWorkspace, bytes, 0, bytes, stream);
-            CHECK_RET(ret == ACL_SUCCESS,
-                      return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-        }
-
-        // ==================== UB 容量检查（仅 vector 版）====================
-        // vector 版按行切分，整行必须放进 UB，因此需要读回 rowPtr 求最大行长。
-        // cube 版（分段求和）按 nnz 切分，行长不受 UB 限制，故跳过该检查以及
-        // 随之而来的 rowPtr D2H 拷贝与 stream 同步。
         if (algType != SPMV_ALG_CUBE) {
-            uint32_t maxRowLength = ComputeMaxRowLengthFromDevice(csrRowPtrDevice, rows, stream);
-            uint32_t maxTileLength =
-                (computeType == ACL_FLOAT) ? ComputeMaxRowLength<float>(opA == ACL_SPARSE_OP_TRANSPOSE) : ComputeMaxRowLength<int32_t>(opA == ACL_SPARSE_OP_TRANSPOSE);
-
-            CHECK_RET(maxTileLength > 0,
-                      LOG_PRINT("[ERROR] aclsparseSpMV: failed to compute max tile length\n");
-                      return ACL_SPARSE_STATUS_INTERNAL_ERROR);
-            CHECK_RET(maxRowLength <= maxTileLength,
-                      LOG_PRINT("[ERROR] aclsparseSpMV: max row length %u exceeds UB capacity %u\n",
-                                maxRowLength, maxTileLength);
-                      return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES);
+            // 向量版 workspace：转置 + f32 计算（f32/f16/bf16 输出）及转置 + c64
+            // 输出需要 double-single 平面 workspace；externalBuffer 为空时回退到
+            // 句柄 workspace（与 cube 路径同一 SelectSpmvWorkspace 口径）。
+            // DS 方案每核整平面覆写（空载核写零平面），不依赖清零，无需 memset。
+            size_t wsSize = SpmvWorkspaceSize(opA, matA, vecY, computeType);
+            if (wsSize > 0) {
+                aclsparseStatus_t wsSt = SelectSpmvWorkspace(h, externalBuffer, wsSize, &vectorWorkspace);
+                CHECK_RET(wsSt == ACL_SPARSE_STATUS_SUCCESS, return wsSt);
+            }
+            // 向量版 kernel 在 UB 内按 SPMV_TILE_ELEMS 固定分块循环处理整行，
+            // 行长不受 UB 容量限制，无需 rowPtr 回读与同步。
         }
 
         // ==================== Tiling 数据准备 ====================
+        // beta 是否为零的判定统一使用上面 ReadSpmvScalar 读出的 host 侧值
+        // （f32/int32/c64 三种 computeType 一致），DEVICE 指针模式下这些值
+        // 已经 D2H，不再触碰调用方指针。
+        const bool betaIsZero = (computeType == ACL_FLOAT)    ? (betaFloat == 0.0f) :
+                                (computeType == ACL_INT32)    ? (betaInt == 0) :
+                                (betaC64.re == 0.0f && betaC64.im == 0.0f);
         SpmvTilingData tilingHost = {
             static_cast<uint32_t>(rows),
             static_cast<uint32_t>(cols),
+            static_cast<uint32_t>(matInner->baseType == ACL_SPARSE_INDEX_BASE_ONE ? 1 : 0),
+            static_cast<uint32_t>(betaIsZero ? 0 : 1),
             static_cast<uint32_t>(nnz)};
 
         // ==================== 启动内核 ====================
         bool trans = (opA == ACL_SPARSE_OP_TRANSPOSE);
 
         int32_t cType, vType, oType;
-        SpmvTypesFromAcl(computeType, valType, outType, &cType, &vType, &oType);
+        SpmvTypesFromAcl(computeType, matInner->valueType, yInner->valueType,
+                         &cType, &vType, &oType);
 
+        // f32 / int32 / complex64 均走上面读出的 host 侧副本（DEVICE 模式下
+        // 已 D2H），kernel 分发器按值消费，与调用方指针解耦。
         const void *alphaPtr = (computeType == ACL_FLOAT) ?
                                    static_cast<const void *>(&alphaFloat) :
-                                   static_cast<const void *>(&alphaInt);
+                               (computeType == ACL_INT32) ?
+                                   static_cast<const void *>(&alphaInt) :
+                                   static_cast<const void *>(&alphaC64);
         const void *betaPtr = (computeType == ACL_FLOAT) ?
                                   static_cast<const void *>(&betaFloat) :
-                                  static_cast<const void *>(&betaInt);
+                              (computeType == ACL_INT32) ?
+                                  static_cast<const void *>(&betaInt) :
+                                  static_cast<const void *>(&betaC64);
 
         spmv_kernel_do(
             static_cast<GM_ADDR>(csrRowPtrDevice), static_cast<GM_ADDR>(csrColIndDevice),
             static_cast<GM_ADDR>(csrValDevice), static_cast<GM_ADDR>(xInner->values),
-            static_cast<GM_ADDR>(yInner->values), tilingHost,
+            static_cast<GM_ADDR>(yInner->values), static_cast<GM_ADDR>(vectorWorkspace),
+            tilingHost,
             alphaPtr, betaPtr,
             cType, vType, oType, trans, algType, blockDim,
             static_cast<GM_ADDR>(cubeWorkspace), cubeTiling, cubeBlocks, stream);

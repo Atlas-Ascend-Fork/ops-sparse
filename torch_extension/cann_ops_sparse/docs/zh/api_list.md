@@ -15,6 +15,7 @@
 | `torch.sparse.mm` | `aten::_sparse_sparse_matmul` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | 公共路由 → spgemm | [spgemm.md](spgemm.md) |
 | `Tensor.to_dense` | `aten::_to_dense` | `SparseCsrPrivateUse1` / `SparsePrivateUse1` | sparse2dense | [sparse2dense.md](sparse2dense.md) |
 | `Tensor.to_sparse` / `Tensor.to_sparse_csr` / `Tensor.to_sparse_csc` / `Tensor.to_sparse_bsr` | `aten::_to_sparse` / `aten::_to_sparse.sparse_dim` / `aten::_to_sparse_csr` / `aten::_to_sparse_csc` / `aten::_to_sparse_bsr` | `PrivateUse1` | densetosparse | - |
+| `torch.mv` | `aten::mv` | `SparseCsrPrivateUse1` | spmv | [spmv.md](spmv.md) |
 
 当前仓库同时提供 SpMM 与 SpGEMM 执行能力，由公共路由按输入布局选择。
 SpGEMM 的 out overload 尚未实现，调用会明确报错。

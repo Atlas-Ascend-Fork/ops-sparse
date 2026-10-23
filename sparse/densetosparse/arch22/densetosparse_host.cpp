@@ -788,6 +788,7 @@ aclsparseStatus_t aclsparseDenseToSparseAnalysis(
     matB->activeSpmvBuffer = nullptr;
     matB->activeDenseToSparseBuffer = nullptr;
     matB->denseToSparseAnalysisReady = false;
+    matB->spmvCubeMaxRowLengthValid = false;
     status = LaunchAnalysis(handle, matA, matB, buffer);
     if (status == ACL_SPARSE_STATUS_SUCCESS) {
         matB->activeDenseToSparseBuffer = buffer;

@@ -12,6 +12,3 @@
 
 #include "spmv_kernel.h"
 DEFINE_SPMV_KERNEL(float, bfloat16_t, bfloat16_t)
-
-#include "spmv_trans_finalize.h"
-DEFINE_SPMV_TRANS_FINALIZE(bfloat16_t)

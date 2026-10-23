@@ -12,25 +12,59 @@ y = alpha * op(A) * x + beta * y
 
 其中 op(A) 为稀疏矩阵 A 的操作（转置/非转置），x 为输入稠密向量，y 为输入/输出稠密向量。
 
-包含以下接口：
+仓库包含两套实现：arch22（Atlas A2/A3，DAV_2201）与 arch35（Ascend 950PR/950DT），共享同一套 aclsparse 接口。
+
+包含以下接口（三阶段调用流程，语义对标 cuSPARSE SpMV）：
 
 | 接口名 | 功能简述 |
 |--------|---------|
+| aclsparseSpMVGetBufferSize | 查询执行所需 workspace 字节数 |
+| aclsparseSpMVPreprocess | 可选预处理：arch22 对 CUBE 算法执行一次最长行探测（rowPtr D2H + 流同步）并缓存到矩阵描述符，其余算法仅参数校验；arch35 对转置路径构建可复用的确定性 CSR-to-CSC 索引 |
 | aclsparseSpMV | 执行稀疏矩阵-稠密向量乘法 y = alpha * op(A) * x + beta * y |
-| aclsparseSpMVGetBufferSize | 查询所需 workspace 大小 |
-| aclsparseSpMVPreprocess | 对稀疏矩阵进行预处理并绑定 active plan |
-| aclsparseCsrSetStrides / GetStrides | 设置/获取 CSR rowOffsets、colInd、values 的元素步长 |
-| aclsparseDnVecSetStride / GetStride | 设置/获取稠密向量的元素步长 |
+| aclsparseCsrSetStrides / GetStrides | 设置/获取 CSR rowOffsets、colInd、values 的元素步长（arch35 路径使用） |
+| aclsparseDnVecSetStride / GetStride | 设置/获取稠密向量的元素步长（arch35 路径使用） |
 
 ## 算子执行接口
+
+### aclsparseSpMVGetBufferSize
+
+#### 函数原型
+
+```cpp
+aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpMVAlg_t alg, size_t *bufferSize)
+```
+
+#### 功能说明
+
+- 精确返回执行所需 workspace 字节数：
+  - 一般情形返回 0；
+  - **arch22：转置（opA=TRANSPOSE）且为 FP32 计算（输出 FP32/FP16/BF16）时返回 `groups * roundUp(cols, 8) * 2 * sizeof(float)`**（groups = min(AIV 核数, max(rows, 1))）：该路径在 workspace 中以 double-single（hi/lo 双平面）确定性累加、末尾与 beta*y0 双字结合后单次舍入写回（16bit 输出经 Cast 最近舍入（平局取偶，RNE）转换，舍入中点按双字低位修正），保证消减场景精度与跨核确定性；
+  - **arch22：转置且输出为 COMPLEX64 时返回 `groups * roundUp(2*cols, 8) * 2 * sizeof(float)`**（交错 float2，同理）；
+  - **arch35（Ascend 950PR/950DT）：始终返回非零大小**，包含 192 字节头部和 base 归一化行偏移；转置路径还包含稳定 CSR-to-CSC 元数据（列偏移、行索引和原 CSR value 下标）与累加区，各区域按 64 字节对齐。调用方负责按返回字节数分配 Device 内存，不能硬编码旧大小。
+  - **arch22：`ACL_SPARSE_SPMV_CSR_ALG_CUBE` 返回分段求和所需的 workspace 大小**（gather 乘积区 + 块内推测扫描结果区）；空矩阵（`nnz == 0`）回退到向量版实现，返回 0。
+- 只做空指针与参数校验（arch35 仅检查描述符元数据，允许 CSR 或 x/y 数据指针尚未绑定），不产生 Host<->Device 数据同步。
+
+### aclsparseSpMVPreprocess
+
+#### 函数原型
+
+```cpp
+aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpMVAlg_t alg, void *externalBuffer)
+```
+
+#### 功能说明
+
+- 可选调用；arch22 为参数校验 + workspace 生命周期管理（bufferSize 为 0 时 externalBuffer 可传 nullptr；非 0 必须非空），CUBE 算法额外执行最长行探测并缓存（见接口表）；
+- 对同一 sparsity pattern 多次执行 SpMV 时，描述符、workspace 与预处理结果可复用；pattern 改变后须重新查询与预处理。
+- arch35（Ascend 950PR/950DT）：在 workspace 中生成 base 归一化 row pointer，并将 matA 的 pattern、属性和 workspace 记录为 active plan，后续 `aclsparseSpMV` 可复用；转置路径在调用 stream 上异步构建稳定的按列索引——每列内严格保留原 CSR 的行序和元素序，后续每个输出元素按固定顺序累加，避免浮点 atomic add 引入非确定性。预处理只读取 rowOffsets（rows > 0 时必须绑定）及描述符元数据，并要求 workspace 已分配；values、colInd 和 x/y 可在预处理完成后再绑定，执行阶段仍会完整检查数据指针。后续更新指针可能使缓存 plan 失效，但可直接执行 SpMV（执行时回退读取原始 CSR），无需再次预处理；但原地修改 CSR 结构（rowOffsets 或 colInd 的内容发生变化，即使指针地址不变）后必须重新调用 Preprocess——Host 不读取设备端索引内容，无法自动发现这种变化，否则可能复用旧的归一化行偏移；仅原地更新 values/x/y 不要求重新预处理。预处理与执行均将 Device 任务入队到 handle 的 stream，不同步回读 CSR；同一 stream 上的异步 H2D 可以直接排在调用前，调用方负责在读取结果或复用/释放相关内存前同步，并保证所有异步操作期间内存有效。
 
 ### aclsparseSpMV
 
 #### 产品支持情况
 
-- Ascend 950PR（A5，DAV_3510）：支持 CSR/I32 的本页 A5 能力矩阵
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR（A5，DAV_3510）/ Ascend 950DT：支持（arch35，能力矩阵见文末「Ascend 950/A5 能力和调用约定」）
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 
 #### 函数原型
 
@@ -42,18 +76,36 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
-| handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE`、`ACL_SPARSE_OP_TRANSPOSE` 和 `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`，Host 内存 |
-| alpha | 输入 | const void* | 标量 alpha 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
-| matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
+| handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，须先调用 `aclsparseSetStream` 绑定 stream，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型：arch22 支持 `ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置；arch35 另支持 `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`，Host 内存 |
+| alpha | 输入 | const void* | 标量 alpha 指针，类型须与 computeType 匹配（complex64 时按交错 float2 传实/虚部）。arch22 当前仅支持 Host pointer mode；arch35 内存位置由 `aclsparseSetPointerMode` 控制，支持 Host/Device 内存 |
+| matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式；arch22 索引 I32、base 0/1，Host 内存 |
 | vecX | 输入 | aclsparseConstDnVecDescr_t | 输入稠密向量 x 的描述符，Host 内存 |
-| beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
-| vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量 y 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | A5 支持 `ACL_INT32`、`ACL_FLOAT` 或 `ACL_COMPLEX64`；Atlas A2/A3 支持 `ACL_FLOAT` 或 `ACL_INT32`，Host 内存 |
-| alg | 输入 | aclsparseSpMVAlg_t | 算法类型，随产品不同：Ascend 950PR/950DT 支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`、`ACL_SPARSE_SPMV_CSR_ALG1`、`ACL_SPARSE_SPMV_CSR_ALG2`；Atlas A2/A3 支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`（向量单元实现）与 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`（cube 段求和实现），Host 内存 |
-| externalBuffer | 输入 | void* | 大小由 `aclsparseSpMVGetBufferSize` 查询的 Device workspace；A5 始终需要非空、64 字节对齐的 buffer。Atlas A2/A3 查询返回 0 时可传 nullptr，否则按查询大小分配 |
+| beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。pointer mode 同 alpha；beta=0 时不读取 y 的原始值 |
+| vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量 y 的描述符，原地更新，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型：arch22 支持 `ACL_INT32` / `ACL_FLOAT` / `ACL_COMPLEX64`；arch35 支持 `ACL_FLOAT` / `ACL_INT32` / `ACL_COMPLEX64` |
+| alg | 输入 | aclsparseSpMVAlg_t | 算法类型，随产品不同：arch22（Atlas A2/A3）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` / `ACL_SPARSE_SPMV_CSR_ALG1` / `ACL_SPARSE_SPMV_CSR_ALG2`（向量单元实现）与 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`（cube 段求和实现）；arch35（Ascend 950PR/950DT）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` / `ACL_SPARSE_SPMV_CSR_ALG1` / `ACL_SPARSE_SPMV_CSR_ALG2` |
+| externalBuffer | 输入 | void* | workspace，大小按 GetBufferSize 返回值分配；返回 0 时传 nullptr（arch22 转置确定性累加、arch22 cube 算法时必须分配；arch35 始终需要非空、64 字节对齐的 buffer，Device 内存） |
 
-#### 约束说明
+#### 约束说明（arch22：Atlas A2/A3）
+
+- handle 不可为 nullptr，且须先调用 `aclsparseSetStream` 设置 stream；计算在调用方 stream 上异步执行
+- matA、vecX、vecY 不可为 nullptr；alpha、beta 不可为 nullptr
+- matA 仅支持 CSR 格式（`ACL_SPARSE_FORMAT_CSR`）；CSC/COO 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
+- matA 的行偏移和列索引类型必须均为 `ACL_SPARSE_INDEX_32I`；`ACL_SPARSE_INDEX_64I` 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
+- 索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
+- `ACL_SPARSE_SPMV_CSR_ALG_CUBE`（cube 段求和）额外约束：opA 须为 `ACL_SPARSE_OP_NON_TRANSPOSE`，索引基址须为 `ACL_SPARSE_INDEX_BASE_ZERO`，computeType 与 vecY 值类型均为 `ACL_FLOAT`，matA / vecX 值类型为 `ACL_FLOAT` 或 `ACL_FLOAT16`（fp16 输入时 cube 以 fp32 累加、输出 fp32）；最长行须不超过 UB 容量上界。由于归约顺序不同，其结果与默认算法可能存在浮点误差差异；退化输入（空矩阵等）自动回退到向量版实现
+- 支持动态 M/K/nnz、空行、长尾行（单行非零元数不受 UB 容量限制，行内分块循环处理）、nnz=0/1 等边界输入
+- **重复坐标与有序性约束**：同一行内允许出现重复列坐标，重复项按数学语义累加（与 cuSPARSE 一致）；列索引不要求有序、不要求唯一
+- 输入 A/X 只读，Y 原地更新；不发生 CPU 侧计算与无谓的 Host 同步
+- 维度匹配：
+  - 非转置模式：vecX 大小 >= A.cols，vecY 大小 >= A.rows
+  - 转置模式：vecX 大小 >= A.rows，vecY 大小 >= A.cols
+- vecX 的值类型须与 matA 的值类型一致
+- 描述符元素步长固定按 1 处理（不读取 `aclsparseCsrSetStrides` / `aclsparseDnVecSetStride` 设置的 stride）
+- 未声明的格式/类型组合返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
+
+#### 约束说明（arch35：Ascend 950PR/950DT）
 
 - handle 不可为 nullptr，且须先调用 `aclsparseSetStream` 设置 stream
 - matA、vecX、vecY 不可为 nullptr
@@ -84,21 +136,46 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
   `[base, cols+base)`。SpMV 和 Preprocess 不同步回读 Device 数据，也不承诺返回内容校验错误
 - INT8→INT32 路径对完整的 `alpha * dot(A, x) + beta * y` 做最终 INT32 饱和，保留正负项抵消；
   使用乘法前范围检查和平移后的饱和边界，避免中间 INT64 乘加溢出。连续、stride 和转置路径语义一致。
-- 支持的值类型组合：
-  - matA=ACL_FLOAT, vecX=ACL_FLOAT, vecY=ACL_FLOAT, computeType=ACL_FLOAT
-  - matA=ACL_FLOAT16, vecX=ACL_FLOAT16, vecY=ACL_FLOAT 或 ACL_FLOAT16, computeType=ACL_FLOAT
-  - matA=ACL_BF16, vecX=ACL_BF16, vecY=ACL_FLOAT 或 ACL_BF16, computeType=ACL_FLOAT
-  - matA=ACL_INT8, vecX=ACL_INT8, vecY=ACL_INT32, computeType=ACL_INT32
-  - matA=ACL_INT8, vecX=ACL_INT8, vecY=ACL_FLOAT, computeType=ACL_FLOAT
-  - matA=ACL_COMPLEX64, vecX=ACL_COMPLEX64, vecY=ACL_COMPLEX64, computeType=ACL_COMPLEX64
-  - matA=ACL_FLOAT, vecX=ACL_FLOAT, vecY=ACL_COMPLEX64, computeType=ACL_COMPLEX64
 
-Atlas A2/A3 差异：
+#### 支持的类型组合
 
-- 仅支持 base 0、NON_TRANSPOSE/TRANSPOSE 和默认元素 stride 1，不支持共轭转置。
-- computeType 支持 `ACL_FLOAT` 或 `ACL_INT32`；向量长度可大于所需维度。
-- alg 支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` 与 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`。
-- CUBE 仅支持非转置，computeType 与 y 为 FLOAT，A/x 为 FLOAT 或 FLOAT16；fp16 乘积以 fp16 计算、fp32 累加。归约顺序不同可能造成与默认算法的浮点误差差异。
+arch22（Atlas A2/A3）：
+
+| matA/vecX 值类型 | vecY 类型 | computeType | 说明 |
+|---|---|---|---|
+| ACL_INT8 | ACL_INT32 | ACL_INT32 | 逐元素精确匹配语义 |
+| ACL_INT8 | ACL_FLOAT | ACL_FLOAT | |
+| ACL_FLOAT16 | ACL_FLOAT | ACL_FLOAT | |
+| ACL_BF16 | ACL_FLOAT | ACL_FLOAT | |
+| ACL_FLOAT16 | ACL_FLOAT16 | ACL_FLOAT | FP32 计算，末尾一次性舍入 |
+| ACL_BF16 | ACL_BF16 | ACL_FLOAT | FP32 计算，末尾一次性舍入 |
+| ACL_FLOAT | ACL_FLOAT | ACL_FLOAT | |
+| ACL_COMPLEX64 | ACL_COMPLEX64 | ACL_COMPLEX64 | 复数标量 alpha/beta 按交错 float2 传入 |
+| ACL_FLOAT | ACL_COMPLEX64 | ACL_COMPLEX64 | 实向量/矩阵提升为复数计算 |
+| ACL_INT32 | ACL_INT32 | ACL_INT32 | 仓内既有组合，保留 |
+| ACL_INT32 | ACL_FLOAT | ACL_FLOAT | 仓内既有组合，保留 |
+
+arch35（Ascend 950PR/950DT）支持的值类型组合：
+
+- matA=ACL_FLOAT, vecX=ACL_FLOAT, vecY=ACL_FLOAT, computeType=ACL_FLOAT
+- matA=ACL_FLOAT16, vecX=ACL_FLOAT16, vecY=ACL_FLOAT 或 ACL_FLOAT16, computeType=ACL_FLOAT
+- matA=ACL_BF16, vecX=ACL_BF16, vecY=ACL_FLOAT 或 ACL_BF16, computeType=ACL_FLOAT
+- matA=ACL_INT8, vecX=ACL_INT8, vecY=ACL_INT32, computeType=ACL_INT32
+- matA=ACL_INT8, vecX=ACL_INT8, vecY=ACL_FLOAT, computeType=ACL_FLOAT
+- matA=ACL_COMPLEX64, vecX=ACL_COMPLEX64, vecY=ACL_COMPLEX64, computeType=ACL_COMPLEX64
+- matA=ACL_FLOAT, vecX=ACL_FLOAT, vecY=ACL_COMPLEX64, computeType=ACL_COMPLEX64
+
+#### 返回值
+
+| 返回值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_STATUS_SUCCESS` | 成功 |
+| `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为空或未绑定 stream |
+| `ACL_SPARSE_STATUS_INVALID_VALUE` | 描述符/标量/bufferSize 指针为空、向量长度不足、需要 workspace 时 externalBuffer 为空、arch35 当前阶段使用的数据指针未绑定等 |
+| `ACL_SPARSE_STATUS_NOT_SUPPORTED` | 格式非 CSR、索引类型非 I32、非法 opA/alg/indexBase、未声明的 dtype 组合 |
+| `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | arch35 转置且 NNZ>0 时 workspace 为空或不足 |
+| `ACL_SPARSE_STATUS_EXECUTION_FAILED` | arch22 kernel 启动或 stream 同步失败 |
+| `ACL_SPARSE_STATUS_INTERNAL_ERROR` | arch35 公共 GetAivCoreCount 返回 0；不使用固定核数兜底 |
 
 #### 支持的稀疏格式
 
@@ -110,37 +187,51 @@ Atlas A2/A3 差异：
 
 #### 调用示例
 
-暂无运行示例，具体编译和执行过程请参考[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)。
+三阶段调用流程：
 
-### aclsparseSpMVGetBufferSize
+```cpp
+size_t bufferSize = 0;
+aclsparseSpMVGetBufferSize(handle, op, alpha, matA, vecX, beta, vecY, computeType, alg, &bufferSize);
+void *workspace = nullptr;
+if (bufferSize > 0) {
+    aclrtMalloc(&workspace, bufferSize, ACL_MEM_MALLOC_NORMAL_ONLY);
+}
+aclsparseSpMVPreprocess(handle, op, alpha, matA, vecX, beta, vecY, computeType, alg, workspace);
+aclsparseSpMV(handle, op, alpha, matA, vecX, beta, vecY, computeType, alg, workspace);
+```
 
-查询 `aclsparseSpMV` 所需的 workspace 字节数。在 arch22 默认算法的转置模式下，FP16/BF16 输出使用每列 4 字节的 FP32 累加工作区，最后一次转换到输出类型；未传入 `externalBuffer` 时使用句柄工作区。调用方负责按返回字节数分配 Device 内存。
-此阶段只检查描述符元数据及参数，不读取 CSR 或 x/y 数据，允许这些数据指针尚未绑定。
+具体编译、三阶段调用和自测命令请参考 [SPMV 测试说明](../../test/spmv/README.md)；通用工程构建方式见
+[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)。
 
-- Ascend 950PR/950DT：始终返回非零大小，包含 192 字节头部和归一化行偏移；转置时还包含累加区，各区域按 64 字节对齐。
-- Atlas A2/A3 `ACL_SPARSE_SPMV_ALG_DEFAULT`（向量版）：转置且 FP16/BF16 输出时返回
-  `cols * sizeof(float)`，用于 FP32 累加；其他路径返回 0。
-  `externalBuffer` 可传 `nullptr`，需要工作区时由句柄提供。
-- Atlas A2/A3 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`：返回分段求和所需的 workspace 大小（gather 乘积区 +
-  块内推测扫描结果区）。调用方须按该大小申请显存，并作为 `aclsparseSpMV` 的
-  `externalBuffer` 传入，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-  空矩阵（`nnz == 0`）会回退到向量版实现，返回 0。
+非连续 Tensor（arch35）在创建普通描述符后设置元素步长，SpMV 三阶段接口保持不变：
+
+```cpp
+aclsparseCsrSetStrides(matA, rowOffsetsStride, colIndStride, valuesStride);
+aclsparseDnVecSetStride(vecX, xStride);
+aclsparseDnVecSetStride(vecY, yStride);
+```
+
+未调用 stride 设置接口时保持兼容行为，所有步长均为 1。更新 CSR 指针或 stride 后，转置路径必须重新调用
+`aclsparseSpMVPreprocess`。
+
+## Python/ATen 接口
+
+ops-sparse 同时交付 Python/torch 层适配（`sparse/spmv/torch_extension/`，基于仓内统一的 `cann_ops_sparse` torch_extension 框架）：
+
+- 公开入口 `torch.mv(mat, vec)`，内部映射 `aten::mv` 的 `SparseCsrPrivateUse1` 分发键：仅覆盖 **NPU 上的 CSR 二维稀疏矩阵 × 一维稠密向量**，在 NPU 执行，**不做 CPU fallback**；不支持的组合（layout/dtype/shape/device 不符）显式抛错。
+- ATen 路径固定按 `alpha=1`、`beta=0` 调用底层接口；其余 alpha/beta 组合请使用 aclsparse C++ 三阶段接口。
+- INT8 输入输出 INT32，其余输出 dtype 与输入一致；int64 索引在 NPU 上自动转 int32。
+- 适配层校验参数、dtype、shape、layout、stride 与 device，异常与 stream 异步语义与 PyTorch 对齐。
 
 workspace 由调用方持有，`aclsparseSpMV` 只在其上排队异步任务、不做 stream 同步；
 因此复用同一块 buffer 前需自行保证前一次 SpMV 已完成。
 
-### aclsparseSpMVPreprocess
-
-已支持 A5。对同一 CSR pattern 可选调用；它在 workspace 中生成 base 归一化 row pointer，
-并将 matA 的 pattern、属性和 workspace 记录为 active plan，后续 `aclsparseSpMV` 可复用。
-Atlas A2/A3 暂未支持该接口。A5 预处理只读取 rowOffsets（rows > 0 时必须绑定）及描述符元数据，
-并要求 workspace 已分配；values、colInd 和 x/y 可在预处理完成后再绑定，执行阶段仍会完整检查数据指针。
-后续更新指针可能使缓存 plan 失效，但可直接执行 SpMV，执行时回退读取原始 CSR，无需再次预处理。
-这不适用于原地修改 CSR 结构：若 rowOffsets 或 colInd 的内容发生变化，即使指针地址不变，
-也必须在更新完成后重新调用 Preprocess，再执行 SpMV。Host 不读取设备端索引内容，无法自动
-发现这种变化；否则可能复用旧的归一化行偏移。仅原地更新 values/x/y 不要求重新预处理。
-预处理与执行均将 Device 任务入队到 handle 的 stream，不同步回读 CSR；同一 stream 上的异步 H2D 可以直接排在调用前，
-调用方负责在读取结果或复用/释放相关内存前同步，并保证所有异步操作期间内存有效。
+- Atlas A2/A3 `ACL_SPARSE_SPMV_ALG_DEFAULT`（向量版）：所有中间量都在 UB 内，返回 0，
+  `externalBuffer` 可传 `nullptr`。
+- Atlas A2/A3 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`：返回分段求和所需的 workspace 大小（gather 乘积区 +
+  块内推测扫描结果区）。调用方须按该大小申请显存，并作为 `aclsparseSpMV` 的
+  `externalBuffer` 传入；未提供时回退到句柄上的 workspace（容量不足则报错）。
+  空矩阵（`nnz == 0`）会回退到向量版实现，返回 0。
 
 ## Ascend 950/A5 能力和调用约定
 

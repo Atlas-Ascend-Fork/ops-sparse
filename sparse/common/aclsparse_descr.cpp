@@ -619,6 +619,7 @@ static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
     descr->values = values;
     descr->activeBuffer = nullptr;
     descr->activeSpmvBuffer = nullptr;
+    descr->spmvCubeMaxRowLengthValid = false;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -645,6 +646,7 @@ aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
     descr->denseToSparseAnalysisReady = false;
     descr->activeBuffer = nullptr;
     descr->activeSpmvBuffer = nullptr;
+    descr->spmvCubeMaxRowLengthValid = false;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

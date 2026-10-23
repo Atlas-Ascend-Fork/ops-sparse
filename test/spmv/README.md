@@ -11,7 +11,45 @@ SpMV 计算 `y = alpha * op(A) * x + beta * y`。平台能力以
 | Ascend 950PR/950DT（arch35） | `arch35/spmv_test.cpp`、`arch35/spmv_test.csv` | `ops_sparse_add_gtest_tests(spmv ${OPS_SPARSE} EIGEN)` |
 
 A2/A3 支持 DEFAULT 与 CSR_ALG_CUBE；CUBE 仅支持非转置、FP32/FP16 输入和 FP32 输出。
-以下用例名、CSV 和 GTest 命令均针对 A5，不能直接用于 arch22 程序。
+下文 A5 各节的用例名、CSV 和 GTest 命令均针对 arch35，不能直接用于 arch22 程序。
+
+## arch22（Atlas A2/A3）编译运行
+
+先加载实际安装路径的 CANN 环境，例如：
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+```
+
+在仓库根目录构建并运行 arch22 C++ UT：
+
+```bash
+bash build.sh --ops=spmv --run
+```
+
+> 注：`build.sh` 默认 Debug 构建（内核性能偏低）。复测性能请显式使用 Release：
+>
+> ```bash
+> CMAKE_BUILD_TYPE=Release bash build.sh --ops=spmv --run
+> ```
+
+执行结果末尾输出汇总，全部用例通过说明精度对比成功：
+
+```txt
+[PASS] spmv_test: 365/365 cases passed, pass rate 100%
+```
+
+设置 `SPARSE_TEST_PRESMOKE=1` 可将随机用例的 shape 缩小 4 倍做预冒烟（自带固定数组的
+回归用例不缩放）。
+
+Python/ATen 端到端测试（需 PyTorch 2.7+ 与 torch_npu 26.0.0+；先完成上述构建生成
+`build_out/lib64/libops_sparse.so`）：
+
+```bash
+bash build.sh --torch_extension --ops=spmv
+python3 -m pip install build_out/cann_ops_sparse-*.whl --force-reinstall --no-deps
+OPS_SPARSE_LIB_DIR=$PWD/build_out/lib64 python3 -m pytest test/spmv/python/ -v
+```
 
 ## A2/A3 转置 finalize 整数边界回归（无需 NPU）
 

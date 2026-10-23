@@ -68,16 +68,20 @@ inline struct aclsparseDnVecDescr *ToVecInner(aclsparseConstDnVecDescr_t desc) {
 
 #define SPMV_COMPUTE_F32 0
 #define SPMV_COMPUTE_I32 1
+#define SPMV_COMPUTE_C64 2
 
 #define SPMV_VAL_F32 0
 #define SPMV_VAL_HALF 1
 #define SPMV_VAL_BF16 2
 #define SPMV_VAL_I32 3
+#define SPMV_VAL_I8 4
+#define SPMV_VAL_C64 5
 
 #define SPMV_OUT_F32 0
 #define SPMV_OUT_HALF 1
 #define SPMV_OUT_BF16 2
 #define SPMV_OUT_I32 3
+#define SPMV_OUT_C64 4
 
 // 算法实现选择：向量版（每核处理若干整行）/ cube 版（矩阵单元段求和）
 #define SPMV_ALG_VECTOR 0
@@ -87,27 +91,32 @@ static inline void SpmvTypesFromAcl(aclDataType computeType,
 									aclDataType valType, aclDataType outType,
 									int32_t *cType, int32_t *vType,
 									int32_t *oType) {
-	*cType = (computeType == ACL_INT32) ? SPMV_COMPUTE_I32 : SPMV_COMPUTE_F32;
+	*cType = (computeType == ACL_INT32) ? SPMV_COMPUTE_I32 :
+	         (computeType == ACL_COMPLEX64) ? SPMV_COMPUTE_C64 : SPMV_COMPUTE_F32;
 
-	if (valType == ACL_FLOAT16) {
+	if (valType == ACL_FLOAT16)
 		*vType = SPMV_VAL_HALF;
-	} else if (valType == ACL_BF16) {
+	else if (valType == ACL_BF16)
 		*vType = SPMV_VAL_BF16;
-	} else if (valType == ACL_INT32) {
+	else if (valType == ACL_INT32)
 		*vType = SPMV_VAL_I32;
-	} else {
+	else if (valType == ACL_INT8)
+		*vType = SPMV_VAL_I8;
+	else if (valType == ACL_COMPLEX64)
+		*vType = SPMV_VAL_C64;
+	else
 		*vType = SPMV_VAL_F32;
-	}
 
-	if (outType == ACL_FLOAT16) {
+	if (outType == ACL_FLOAT16)
 		*oType = SPMV_OUT_HALF;
-	} else if (outType == ACL_BF16) {
+	else if (outType == ACL_BF16)
 		*oType = SPMV_OUT_BF16;
-	} else if (outType == ACL_INT32) {
+	else if (outType == ACL_INT32)
 		*oType = SPMV_OUT_I32;
-	} else {
+	else if (outType == ACL_COMPLEX64)
+		*oType = SPMV_OUT_C64;
+	else
 		*oType = SPMV_OUT_F32;
-	}
 }
 
 #endif // SPMV_H

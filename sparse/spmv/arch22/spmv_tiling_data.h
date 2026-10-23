@@ -18,6 +18,8 @@
 struct SpmvTilingData {
     uint32_t totalRowsNum; // 矩阵总行数
     uint32_t totalColNum;  // 矩阵总列数
+    uint32_t indexBase;    // CSR 索引基值：0 或 1
+    uint32_t readY;        // 1 = beta 非零需要读 y；0 = beta 为 0，直接覆写不读 y
     uint32_t totalNnz;     // 矩阵总非零元数
 };
 

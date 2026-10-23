@@ -118,6 +118,10 @@ struct aclsparseSpMatDescr {
     // It must not be reused after a stream switch without re-preprocessing.
     const void *activeStream = nullptr;
     uint64_t activeStreamEpoch = 0;
+    // SpMV cube 算法的最长行探测缓存：由 aclsparseSpMVPreprocess 写入，
+    // aclsparseSpMV 直接复用以免每次调用 D2H+同步；ptrs 重绑定或行数变化时失效。
+    uint32_t spmvCubeMaxRowLength = 0;
+    bool spmvCubeMaxRowLengthValid = false;
     // DenseToSparse discovers nnz/offsets before callers allocate its output
     // payload. Rebinding indices/values must not discard that analysis, while
     // generic SpMM/SDDMM and SpMV preprocess caches still require invalidation.
