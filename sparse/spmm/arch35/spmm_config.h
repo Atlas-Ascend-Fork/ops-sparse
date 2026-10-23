@@ -1,0 +1,133 @@
+/**
+ * ----------------------------------------------------------------------------------------------------------
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * ----------------------------------------------------------------------------------------------------------
+ */
+
+#ifndef SPMM_CONFIG_H
+#define SPMM_CONFIG_H
+
+#ifndef SPMM_ROUNDUP
+#define SPMM_ROUNDUP(a, b) (((a) + (b) - 1) / (b) * (b))
+#endif
+
+// Order pair tags (orderB, orderC).
+#define SPMM_ORDER_RR 0
+#define SPMM_ORDER_RC 1
+#define SPMM_ORDER_CR 2
+#define SPMM_ORDER_CC 3
+
+// Data type encoding for host-side kernel dispatch.
+#define SPMM_DTYPE_INVALID (-1)
+#define SPMM_DTYPE_FP32 0
+#define SPMM_DTYPE_FP16 1
+#define SPMM_DTYPE_INT8 2
+#define SPMM_DTYPE_BF16 3
+#define SPMM_DTYPE_COMPLEX64 4
+#define SPMM_DTYPE_FP16_FP32 5
+#define SPMM_DTYPE_BF16_FP32 6
+
+// Workspace layout (all aligned to 64B):
+//   [ 0      , tilingOff       )  : 64B header (reserved / padding)
+//   [ tilingOff   , reorderOff )  : SpmmTilingWireV1
+//   [ reorderOff  , binEdgeOff )  : int32 reorder[m]    (logical row -> original row)
+//   [ binEdgeOff  , endOff     )  : int32 bin_edge[bin_num + 1]
+#define SPMM_WS_HEADER_BYTES     64
+#define SPMM_WS_ALIGN            64
+#define SPMM_CUBE_ROWS           32
+#define SPMM_CUBE_MIN_ROWS       16
+#define SPMM_CUBE_MAX_K          48
+#define SPMM_CUBE_MAX_N          256
+#define SPMM_FP32_CUBE_MAX_K     96
+#define SPMM_FP32_CUBE_MAX_N     2048
+#define SPMM_FP32_CUBE_FAST_ROWS 32
+#define SPMM_FP32_CUBE_FAST_K    64
+#define SPMM_CUBE_TILING_BYTES   256
+#define SPMM_FP32_REGBASE_ROWS   128
+#define SPMM_FP32_REGBASE_N      128
+#define SPMM_FP32_REGBASE_DEGREE 7
+#define SPMM_FP32_REGBASE_WINDOW_ROWS \
+    (SPMM_FP32_REGBASE_ROWS + SPMM_FP32_REGBASE_DEGREE - 1)
+#define SPMM_FP32_REGBASE_MAX_REFRESH_ROWS 2048
+#define SPMM_FP32_DEGREE2_ROWS        96
+#define SPMM_FP32_DEGREE2_TILE_N      256
+#define SPMM_FP32_DEGREE2_WINDOW_ROWS 80
+#define SPMM_FP32_DEGREE2_DEGREE      2
+#define SPMM_FP32_DEGREE2_MIN_ROWS    1000
+#define SPMM_FP32_DEGREE2_MIN_BATCH_ROWS 16
+#define SPMM_FP32_DEGREE2_MIN_AVERAGE_ROWS 48
+#define SPMM_FP32_DEGREE4_ROWS        64
+#define SPMM_FP32_DEGREE4_TILE_N      448
+#define SPMM_FP32_DEGREE4_WINDOW_ROWS 64
+#define SPMM_FP32_DEGREE4_DEGREE      4
+#define SPMM_FP32_DEGREE4_MAX_DEGREE  8
+#define SPMM_FP32_DEGREE16_DEGREE     16
+#define SPMM_FP32_DEGREE32_DEGREE     32
+#define SPMM_FP32_STRUCTURED_MAX_DEGREE 64
+#define SPMM_FP32_DEGREE4_MIN_N       1200
+#define SPMM_FP32_DEGREE4_MIN_AVERAGE_ROWS 48
+#define SPMM_FP32_DEGREE8_MIN_AVERAGE_ROWS 32
+#define SPMM_FP32_DEGREE16_MIN_AVERAGE_ROWS 24
+#define SPMM_FP32_DEGREE32_ROWS       48
+#define SPMM_FP32_DEGREE32_TILE_N     512
+#define SPMM_FP32_DEGREE32_WINDOW_ROWS 64
+#define SPMM_FP32_DEGREE32_MIN_N      1000
+#define SPMM_FP32_DEGREE32_MIN_AVERAGE_ROWS 8
+#define SPMM_FP32_DEGREE32_MAX_TASKS  2000
+#define SPMM_FP32_DEGREE64_DEGREE     64
+#define SPMM_FP32_DEGREE64_ROWS       32
+#define SPMM_FP32_DEGREE64_MODE       33
+#define SPMM_FP32_DEGREE64_TILE_N     448
+#define SPMM_FP32_DEGREE64_WINDOW_ROWS 96
+#define SPMM_FP32_DEGREE64_MIN_N      1000
+#define SPMM_FP32_DEGREE64_MIN_AVERAGE_ROWS 16
+#define SPMM_FP32_DEGREE64_MAX_TASKS  2100
+#define SPMM_FP32_DEGREE4_MAX_TASKS   1400
+#define SPMM_STRUCTURED_MIN_AVERAGE_ROWS_RESERVE 8
+#define SPMM_COMPLEX64_DEGREE2_ROWS         64
+#define SPMM_COMPLEX64_DEGREE2_TILE_N       256
+#define SPMM_COMPLEX64_DEGREE2_WINDOW_ROWS  48
+#define SPMM_COMPLEX64_DEGREE2_OUTPUT_ROWS  32
+#define SPMM_COMPLEX64_DEGREE2_OUTPUT_DEPTH 2
+#define SPMM_COMPLEX64_DEGREE2_DEGREE       2
+#define SPMM_COMPLEX64_DEGREE4_ROWS         64
+#define SPMM_COMPLEX64_DEGREE4_TILE_N       256
+#define SPMM_COMPLEX64_DEGREE4_WINDOW_ROWS  48
+#define SPMM_COMPLEX64_DEGREE4_OUTPUT_ROWS  32
+#define SPMM_COMPLEX64_DEGREE4_OUTPUT_DEPTH 2
+#define SPMM_COMPLEX64_DEGREE4_DEGREE       4
+#define SPMM_COMPLEX64_DEGREE8_ROWS         48
+#define SPMM_COMPLEX64_DEGREE8_TILE_N       384
+#define SPMM_COMPLEX64_DEGREE8_WINDOW_ROWS  56
+#define SPMM_COMPLEX64_DEGREE8_OUTPUT_ROWS  24
+#define SPMM_COMPLEX64_DEGREE8_OUTPUT_DEPTH 1
+#define SPMM_COMPLEX64_DEGREE8_DEGREE       8
+#define SPMM_COMPLEX64_DEGREE64_ROWS         4
+#define SPMM_COMPLEX64_DEGREE64_TILE_N       256
+#define SPMM_COMPLEX64_DEGREE64_WINDOW_ROWS  112
+#define SPMM_COMPLEX64_DEGREE64_OUTPUT_ROWS  4
+#define SPMM_COMPLEX64_DEGREE64_OUTPUT_DEPTH 1
+#define SPMM_COMPLEX64_DEGREE64_DEGREE       64
+#define SPMM_COMPLEX64_DEGREE64_MIN_AVERAGE_ROWS 3
+#define SPMM_COMPLEX64_REGBASE_MAX_DEGREE   64
+#define SPMM_COMPLEX64_COMPONENTS            2
+#define SPMM_COMPLEX64_REGBASE_MIN_N       1000
+#define SPMM_COMPLEX64_REGBASE_MIN_ROWS    1000
+#define SPMM_COMPLEX64_REGBASE_MIN_AVERAGE_ROWS 8
+#define SPMM_COMPLEX64_DEGREE2_MIN_AVERAGE_ROWS 48
+
+// Compatibility aliases for the original degree-2 focused regression.
+#define SPMM_COMPLEX64_REGBASE_ROWS SPMM_COMPLEX64_DEGREE2_ROWS
+#define SPMM_COMPLEX64_REGBASE_TILE_N SPMM_COMPLEX64_DEGREE2_TILE_N
+#define SPMM_COMPLEX64_REGBASE_WINDOW_ROWS SPMM_COMPLEX64_DEGREE2_WINDOW_ROWS
+#define SPMM_COMPLEX64_REGBASE_DEGREE SPMM_COMPLEX64_DEGREE2_DEGREE
+#define SPMM_COMPLEX64_SEGMENTED_CUBE_MODE 65
+#define SPMM_COMPLEX64_SEGMENTED_MAX_SLOTS 3
+
+#endif // SPMM_CONFIG_H

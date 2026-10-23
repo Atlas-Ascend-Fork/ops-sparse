@@ -91,6 +91,16 @@ struct aclsparseSpMatDescr {
     uint32_t signature = kSpMatSignature;
     // Non-SpMV preprocess cache (SpMM/SDDMM workspace layout).
     const void *activeBuffer = nullptr;
+    // Monotonic host-side identity used to distinguish descriptor address reuse
+    // when a device workspace is shared by multiple CSR descriptors.
+    uint64_t spmmWorkspaceOwnerId = 0;
+    bool spmmCubeEligible = false;
+    int32_t spmmCubeRows = 0;
+    int32_t spmmCubeGroupCount = 0;
+    int32_t spmmDegree2FallbackCount = 0;
+    int32_t spmmComplexFallbackCount = 0;
+    bool spmmIdentityReorder = false;
+    int32_t spmmUniformDegree = -1;
     // SpMV uses a separate layout and must never populate activeBuffer.
     const void *activeSpmvBuffer = nullptr;
     // Parameters captured by the most recent SpMV preprocess. Keeping
@@ -233,8 +243,7 @@ struct aclsparseDnMatDescr {
 };
 
 // SpMM 支持的 dtype 组合四元组（matA / matB / matC / computeType）。
-// arch22 仅支持全 FP32；arch35 支持统一 FP32 / FP16 / INT8 量化共三组合，
-// 各架构以表驱动方式传入公共校验函数。
+// 支持的组合由各架构的表决定；dtype 匹配逻辑可独立复用。
 struct AclsparseSpmmDtypeCombo {
     aclDataType matA;
     aclDataType matB;
@@ -243,8 +252,7 @@ struct AclsparseSpmmDtypeCombo {
 };
 
 // SpMM dtype 组合匹配（表驱动）：matA/matB/matC/computeType 四元组与 combos
-// 表中任一组合全等即命中。供 AclsparseValidateSpmmCommon 调用，独立成函数以
-// 控制单函数圈复杂度。
+// 表中任一组合全等即命中。供公共或架构特定校验复用。
 inline bool AclsparseMatchSpmmDtypeCombo(
     const aclsparseSpMatDescr *matA, const aclsparseDnMatDescr *matB,
     const aclsparseDnMatDescr *matC, aclDataType computeType,
@@ -259,10 +267,10 @@ inline bool AclsparseMatchSpmmDtypeCombo(
     return false;
 }
 
-// SpMM 入参公共校验（arch22/arch35 共用，消除跨架构重复代码）：
+// SpMM 入参公共校验，适用于下述 base-zero 和 opB 限制：
 // 非空 + opA/opB 操作类型 + CSR 格式 + 索引类型（严格 I32）+ base-zero +
 // dtype 组合（表驱动）+ 维度匹配 + 零维守卫。
-// allowOpBTranspose：arch35 支持 opB 转置（N/T），arch22 仅支持 N 时传 false。
+// allowOpBTranspose：true 允许 N/T，false 仅允许 N。
 // 各架构差异化检查（alg 集合、紧凑布局、INT32_MAX 上限等）由调用方在本函数
 // 返回 SUCCESS 后自行补充。
 inline aclsparseStatus_t AclsparseValidateSpmmCommon(

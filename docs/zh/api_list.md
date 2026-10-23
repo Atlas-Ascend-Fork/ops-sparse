@@ -1195,8 +1195,8 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏计算句柄。
-- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，A2/A3 支持非转置、转置和共轭转置。
-- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，A2/A3 支持非转置、转置和共轭转置。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，支持非转置、转置和共轭转置；CSR_ALG3 仅支持非转置。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，支持非转置、转置及合法算法组合下的共轭转置。
 - `alpha`（IN）：HOST/DEVICE，标量 alpha 参数。
 - `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
 - `matB`（IN）：HOST，输入稠密矩阵 B 的描述符。
@@ -1277,7 +1277,7 @@ aclsparseStatus_t aclsparseSpMM(
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏矩阵处理器句柄。
-- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，A2/A3 支持非转置、转置和共轭转置。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，支持非转置、转置和共轭转置；CSR_ALG3 仅支持非转置。
 - `opB`（IN）：HOST，稠密矩阵 B 的操作类型。
 - `alpha`（IN）：HOST/DEVICE，标量 alpha。
 - `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。

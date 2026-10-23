@@ -6,7 +6,16 @@
 | :--- | :---: | :---: |
 | <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | `arch22` | √ |
 | <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | `arch22` | √ |
-| <term>Ascend 950PR</term> | - | × |
+| <term>Ascend 950PR/Ascend 950DT</term> | `arch35` | √ |
+
+Ascend 950 构建命令为 `bash build.sh --ops=spmm --soc=ascend950`。
+
+Torch 扩展与 `libops_sparse.so` 应从同一版本源码构建，头文件由 wheel 打包提供。
+源码构建时使用 `OPS_SPARSE_LIB_DIR` 指向本次构建的主库目录，重新构建并加载对应
+的 JIT 扩展；切换主库后重新启动 Python 进程。SpMM 三阶段调用统一使用
+`ACL_SPARSE_SPMM_ALG_DEFAULT`，由原生库选择执行路径。加载路径可在首次 SpMM
+调用后查看当前进程的 `/proc/<pid>/maps` 中
+`libops_sparse.so` 对应的绝对路径。
 
 ## 功能说明
 
@@ -70,7 +79,7 @@ torch.sparse.mm(mat1: Tensor, mat2: Tensor) -> Tensor
 
 `mat1` / `mat2` / `input` / `out` 必须位于同一 NPU device。不做隐式 dtype 提升。
 
-支持的 dtype 组合（与 `sparse/spmm/README.md` 的 arch22 约束一致）：
+支持的 dtype 组合（原生接口约束见 `sparse/spmm/README.md`）：
 
 | `mat1` / `mat2` / `out` dtype | 底层 computeType |
 | :--- | :--- |
@@ -112,14 +121,12 @@ SpMM 的公共矩阵路由注册了一阶 VJP，支持 `float16`、`bfloat16`、
   `out` dtype 与输入不符、device 不一致，或 `m`/`k`/`nnz` 超出 int32 时抛 `RuntimeError`。
 - int64 CSR 索引窄化到 int32 会溢出时抛 `RuntimeError`，不会静默截断。
 - `m`/`k`/`n` 任一为 0 时返回合法的零长度结果，取值遵循 `out = beta * self`，不启动
-  主 Kernel（与 `sparse/spmm/README.md` 中 arch22 的零维行为一致）。
+  主 Kernel（Ascend 950 的零维和空乘积由适配层处理）。
 - functional 与 out overload 都由公共路由进入同一个 SpMM provider；out overload
   返回调用方传入的原对象。
 - 正常路径全程异步，不做设备同步。handle 由公共层按 `device + stream` 缓存，
   workspace 与临时 Tensor 的 storage 记录到同一条 stream 上。
-- `SPMM_ADAPTER_OUT_OF_PLACE=0` 可关闭 out-of-place 优化（该优化在 `self` 已是整块
-  连续 `m x n` 时让底层直接读 `self`、省掉一次 `self -> out` 拷贝）；关闭后功能不变，
-  只是多一次拷贝。
+- 连续 FP32/Complex64 输入可使用对应架构的独立输出路径；其他组合使用原地接口。
 - C++ wrapper 在首次 NPU 调用时 JIT 编译；导入 `cann_ops_sparse` 不触发编译。
 
 ## 调用示例

@@ -172,6 +172,7 @@ target_include_directories(${OPS_SPARSE} BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common
 )
+
 target_include_directories(${OPS_SPARSE} PRIVATE
     ./include
     ./sparse/common
@@ -193,6 +194,7 @@ target_link_libraries(${OPS_SPARSE} PRIVATE
     tiling_api
     platform
     graph  # ge::Shape / ge::DataType, used by coosort host GetSortMaxMinTmpSize
+    register
 )
 
 # ========= 安装规则（CPack 打包时放入 lib64 和 include） =========

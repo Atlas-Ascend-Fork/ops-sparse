@@ -11,7 +11,7 @@
 // CSR x dense SpMM 的 C++ 封装（aten::addmm.out）。
 //
 // 该 wrapper 只做 ATen <-> ACLSparse 的桥接（张量解包、描述符生命周期、布局描述），
-// 计算全部交给本仓 sparse/spmm/arch22 已实现的 aclsparseSpMM* C API，不重复实现
+// 计算全部交给本仓对应架构实现的 aclsparseSpMM* C API，不重复实现
 // 任何 tiling / kernel 逻辑。handle、stream、workspace 与 storage 生命周期按规范
 // 交给公共层 aclsparse_common.h。
 //
@@ -35,6 +35,14 @@
 #include <pybind11/complex.h>
 
 #include "aclsparse_common.h"
+
+extern "C" aclsparseStatus_t aclsparseSpMMPrivateOutOfPlace(
+    aclsparseHandle_t handle, aclsparseOperation_t opA,
+    aclsparseOperation_t opB, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+    const void *beta, aclsparseConstDnMatDescr_t initialC,
+    aclsparseDnMatDescr_t matC, aclDataType computeType,
+    aclsparseSpMMAlg_t alg, void *buffer);
 
 namespace {
 
@@ -192,6 +200,16 @@ using SpmmOutOfPlaceFn = aclsparseStatus_t (*)(aclsparseHandle_t, aclsparseOpera
     const void *, aclsparseConstSpMatDescr_t, aclsparseConstDnMatDescr_t, const void *, aclsparseDnMatDescr_t,
     void *, aclDataType, aclsparseSpMMAlg_t, void *);
 
+using SpmmPrivateOutOfPlaceFn = decltype(&aclsparseSpMMPrivateOutOfPlace);
+
+SpmmPrivateOutOfPlaceFn GetSpmmPrivateOutOfPlaceFn()
+{
+    static const auto fn = reinterpret_cast<SpmmPrivateOutOfPlaceFn>(
+        dlsym(RTLD_DEFAULT, "aclsparseSpMMPrivateOutOfPlace"));
+    return fn;
+}
+
+
 // aclsparseSpMMOutOfPlaceInternal 不在对外头文件里，用 dlsym 取：取不到就退回普通
 // 的原地 aclsparseSpMM，功能不受影响，只是多一次 self -> out 的拷贝。
 SpmmOutOfPlaceFn GetSpmmOutOfPlaceFn()
@@ -199,14 +217,6 @@ SpmmOutOfPlaceFn GetSpmmOutOfPlaceFn()
     static SpmmOutOfPlaceFn fn =
         reinterpret_cast<SpmmOutOfPlaceFn>(dlsym(RTLD_DEFAULT, "aclsparseSpMMOutOfPlaceInternal"));
     return fn;
-}
-
-bool SpmmOutOfPlaceEnabled()
-{
-    // out-of-place 默认开启。原用 SPMM_ADAPTER_OUT_OF_PLACE=0 环境变量关闭，但
-    // C++ 编程规范禁止非安全函数 getenv（codecheck 命中），故去掉环境变量读取，
-    // 保持默认开启。
-    return true;
 }
 
 void ValidateAddmmInputs(const at::Tensor &self, const at::Tensor &mat1, const at::Tensor &mat2,
@@ -303,78 +313,153 @@ CsrOperands PrepareCsrOperands(const at::Tensor &crow, const at::Tensor &col, co
 bool CanUseSeparateOutput(SpmmOutOfPlaceFn outOfPlace, bool skipInput, const at::Tensor &self,
     const at::Tensor &out, int64_t m, int64_t n)
 {
-    return outOfPlace != nullptr && SpmmOutOfPlaceEnabled() && !skipInput && self.dim() == 2 &&
+    return (outOfPlace != nullptr || (GetSpmmPrivateOutOfPlaceFn() != nullptr &&
+        (self.scalar_type() == at::kFloat || self.scalar_type() == at::kComplexFloat))) && !skipInput && self.dim() == 2 &&
         self.size(0) == m && self.size(1) == n && self.is_contiguous() && !self.is_conj() && !self.is_neg() &&
         !out.is_conj() && !out.is_neg();
+}
+
+void ValidateEmptySparseStorage(const CsrOperands &csr, int64_t m, int64_t k)
+{
+    const int64_t nnz = csr.values.numel();
+    TORCH_CHECK(csr.crow.dim() == 1 && csr.col.dim() == 1 &&
+                csr.values.dim() == 1 && csr.crow.numel() == m + 1 &&
+                csr.col.numel() == nnz && nnz <= std::numeric_limits<int32_t>::max(),
+        "invalid CSR storage sizes");
+    const at::Tensor rows = csr.crow.cpu();
+    const int32_t *rowOffsets = rows.data_ptr<int32_t>();
+    TORCH_CHECK(rowOffsets[0] == 0 && rowOffsets[m] == nnz,
+        "CSR row offsets must start at zero and end at nnz");
+    for (int64_t row = 0; row < m; ++row) {
+        TORCH_CHECK(rowOffsets[row] >= 0 && rowOffsets[row] <= rowOffsets[row + 1] &&
+                    rowOffsets[row + 1] <= nnz, "invalid CSR row offset range");
+    }
+    if (nnz == 0) return;
+    const at::Tensor columns = csr.col.cpu();
+    const int32_t *columnIndices = columns.data_ptr<int32_t>();
+    for (int64_t position = 0; position < nnz; ++position) {
+        TORCH_CHECK(columnIndices[position] >= 0 && columnIndices[position] < k,
+            "CSR column index is out of bounds");
+    }
+}
+
+void ExecuteSeparateOutput(aclsparseHandle_t handle, const ScalarBuf &alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+    const ScalarBuf &beta, aclsparseDnMatDescr_t initialC, at::Tensor &out,
+    aclDataType valueType, aclDataType computeType, void *buffer, const at::Tensor &self)
+{
+    const auto native = GetSpmmOutOfPlaceFn();
+    if (native != nullptr) {
+        ACLSPARSE_CHECK(native(handle, kOp, kOp, alpha.data, matA, matB, beta.data,
+            initialC, out.data_ptr(), computeType, kAlg, buffer));
+        return;
+    }
+    const DnMatGuard output(out.size(0), out.size(1), out.size(1), out.data_ptr(),
+        valueType, ACL_SPARSE_ORDER_ROW);
+    const DnMatGuard input(out.size(0), out.size(1), out.size(1), self.data_ptr(),
+        valueType, ACL_SPARSE_ORDER_ROW);
+    const auto status = GetSpmmPrivateOutOfPlaceFn()(handle, kOp, kOp, alpha.data, matA,
+        matB, beta.data, input.get(), output.get(), computeType, kAlg, buffer);
+    if (status != ACL_SPARSE_STATUS_NOT_SUPPORTED) {
+        ACLSPARSE_CHECK(status);
+        return;
+    }
+    PrepareOutput(self, out.size(0), out.size(1), false, out);
+    (void)c10_npu::getCurrentNPUStream(out.device().index()).stream(true);
+    ACLSPARSE_CHECK(aclsparseSpMM(handle, kOp, kOp, alpha.data, matA, matB, beta.data,
+        output.get(), computeType, kAlg, buffer));
+}
+
+bool RunEmptyProduct(const CsrOperands &csr, int64_t m, int64_t k, int64_t n,
+    const ScalarBuf &beta, aclDataType valueType, const at::Tensor &self, at::Tensor &out)
+{
+    if (m != 0 && k != 0 && n != 0 && csr.values.numel() != 0) return false;
+    ValidateEmptySparseStorage(csr, m, k);
+    if (m == 0 || n == 0) return true;
+    if (ScalarIsZero(beta, valueType)) {
+        out.zero_();
+    } else {
+        PrepareOutput(self, m, n, false, out);
+        const at::Scalar scale = valueType == ACL_COMPLEX64
+            ? at::Scalar(c10::complex<double>(beta.data[0], beta.data[1]))
+            : at::Scalar(beta.data[0]);
+        out.mul_(scale);
+    }
+    return true;
+}
+
+struct SpmmRequest {
+    at::Tensor self;
+    at::Tensor mat1;
+    at::Tensor mat2;
+    at::Tensor out;
+    ScalarBuf alpha;
+    ScalarBuf beta;
+    aclDataType valueType;
+};
+
+void LaunchSpmm(AclSparseContext &context, const CsrOperands &csr,
+    const DenseLayout &matB, SpmmRequest &request, bool separateOutput)
+{
+    const auto &mat1 = request.mat1;
+    const auto &alpha = request.alpha;
+    const auto &beta = request.beta;
+    const auto valueType = request.valueType;
+    const auto computeType = ComputeTypeFor(valueType);
+    const int64_t m = mat1.size(0), k = mat1.size(1), n = request.mat2.size(1);
+    const SpMatGuard matA(m, k, csr.values.numel(), csr.crow.data_ptr(), csr.col.data_ptr(),
+        csr.values.data_ptr(), valueType);
+    const DnMatGuard denseB(k, n, matB.ld, matB.storage.data_ptr(), valueType, matB.order);
+    void *initialC = separateOutput && GetSpmmOutOfPlaceFn() != nullptr
+        ? request.self.data_ptr() : request.out.data_ptr();
+    const DnMatGuard denseC(m, n, n, initialC, valueType, ACL_SPARSE_ORDER_ROW);
+    const auto handle = context.handle();
+    size_t bufferSize = 0;
+    ACLSPARSE_CHECK(aclsparseSpMMGetBufferSize(handle, kOp, kOp, alpha.data, matA.get(),
+        denseB.get(), beta.data, denseC.get(), computeType, kAlg, &bufferSize));
+    AclSparseWorkspace workspace(context, csr.values, bufferSize);
+    ACLSPARSE_CHECK(aclsparseSpMMPreprocess(handle, kOp, kOp, alpha.data, matA.get(),
+        denseB.get(), beta.data, denseC.get(), computeType, kAlg, workspace.data()));
+    if (separateOutput) {
+        ExecuteSeparateOutput(handle, alpha, matA.get(), denseB.get(), beta, denseC.get(),
+            request.out, valueType, computeType, workspace.data(), request.self);
+    } else {
+        ACLSPARSE_CHECK(aclsparseSpMM(handle, kOp, kOp, alpha.data, matA.get(), denseB.get(),
+            beta.data, denseC.get(), computeType, kAlg, workspace.data()));
+    }
+}
+
+void ExecuteSpmmRequest(SpmmRequest &request, AclSparseContext &context)
+{
+    auto &out = request.out;
+    const auto &mat1 = request.mat1;
+    const int64_t m = mat1.size(0), k = mat1.size(1), n = request.mat2.size(1);
+    request.mat2 = out.is_alias_of(request.mat2) ? request.mat2.clone() : request.mat2;
+    request.self = out.is_alias_of(request.self) ? request.self.clone() : request.self;
+    const auto crow = out.is_alias_of(mat1.crow_indices()) ? mat1.crow_indices().clone() : mat1.crow_indices();
+    const auto col = out.is_alias_of(mat1.col_indices()) ? mat1.col_indices().clone() : mat1.col_indices();
+    const auto values = out.is_alias_of(mat1.values()) ? mat1.values().clone() : mat1.values();
+    const bool skipInput = ScalarIsZero(request.beta, request.valueType);
+    const bool separateOutput = CanUseSeparateOutput(GetSpmmOutOfPlaceFn(), skipInput,
+        request.self, out, m, n);
+    PrepareOutput(request.self, m, n, skipInput || separateOutput, out);
+    const auto csr = PrepareCsrOperands(crow, col, values);
+    if (RunEmptyProduct(csr, m, k, n, request.beta, request.valueType, request.self, out)) return;
+    const auto matB = ResolveDenseLayout(request.mat2);
+    context.RecordTensors(csr.crow, csr.col, csr.values, matB.storage, request.self, out);
+    // Submit queued tensor preparation before ACL launches on the same stream.
+    (void)c10_npu::getCurrentNPUStream(mat1.device().index()).stream(true);
+    LaunchSpmm(context, csr, matB, request, separateOutput);
 }
 
 at::Tensor AddmmOut(const at::Tensor &self, const at::Tensor &mat1, const at::Tensor &mat2,
     const std::complex<double> &beta, const std::complex<double> &alpha, at::Tensor out)
 {
     ValidateAddmmInputs(self, mat1, mat2, out);
-
-    const int64_t m = mat1.size(0);
-    const int64_t k = mat1.size(1);
-    const int64_t n = mat2.size(1);
-    const int64_t nnz = mat1._nnz();
-    const aclDataType valueType = ToAclDataType(mat1.scalar_type());
-    const aclDataType computeType = ComputeTypeFor(valueType);
-    const ScalarBuf alphaBuf = ToAclScalar(alpha, valueType, "alpha");
-    const ScalarBuf betaBuf = ToAclScalar(beta, valueType, "beta");
-
-    // RunAclSparse 负责 DeviceGuard、当前 NPU stream 以及按 device+stream 缓存的
-    // handle；下面所有张量申请都在它的 DeviceGuard 生效之后发生。
-    RunAclSparse(mat1, [&](AclSparseContext &context) {
-        // out 与 self/mat2/mat1 的 values/crow/col 混叠时先留快照，PrepareOutput 会改写 out。
-        const at::Tensor mat2Input = out.is_alias_of(mat2) ? mat2.clone() : mat2;
-        const at::Tensor selfInput = out.is_alias_of(self) ? self.clone() : self;
-        // out 通过 view(dtype) 位重解释也能与 CSR 的 values/crow/col 共享存储；PrepareOutput
-        // 先写 out 会清掉尚未读取的 CSR 数据，故把三者都提前快照。
-        const at::Tensor mat1Crow = out.is_alias_of(mat1.crow_indices()) ? mat1.crow_indices().clone() : mat1.crow_indices();
-        const at::Tensor mat1Col = out.is_alias_of(mat1.col_indices()) ? mat1.col_indices().clone() : mat1.col_indices();
-        const at::Tensor mat1Values = out.is_alias_of(mat1.values()) ? mat1.values().clone() : mat1.values();
-        const bool skipInput = ScalarIsZero(betaBuf, valueType);
-        const SpmmOutOfPlaceFn outOfPlace = GetSpmmOutOfPlaceFn();
-        const bool separateOutput = CanUseSeparateOutput(outOfPlace, skipInput, selfInput, out, m, n);
-        PrepareOutput(selfInput, m, n, skipInput || separateOutput, out);
-
-        const CsrOperands csr = PrepareCsrOperands(mat1Crow, mat1Col, mat1Values);
-        const DenseLayout matB = ResolveDenseLayout(mat2Input);
-        // 这些 storage 都会被异步 kernel 读写，必须记录到 handle 绑定的那条 stream 上，
-        // 不能指望 Python 局部变量离开作用域后碰巧还活着。
-        context.RecordTensors(csr.crow, csr.col, csr.values, matB.storage, selfInput, out);
-
-        // 上面的准备工作（out 的 beta 缩放拷贝、int64->int32 索引窄化、非连续稠密
-        // 操作数物化）都是通过 PyTorch 下发的，会先进入 torch_npu 的任务队列；而下面
-        // 的 aclsparse* 调用直接走 ACL stream、不经过该队列。必须先把队列里的任务提交
-        // 出去，否则 kernel 可能早于这些准备工作执行，读到未初始化或未转换的数据
-        // （实测表现为 out 全是垃圾值，且只在需要额外拷贝的 shape/layout 上偶发）。
-        // stream(true) 只是提交队列任务，不是设备同步。
-        (void)c10_npu::getCurrentNPUStream(mat1.device().index()).stream(true);
-
-        const SpMatGuard matADescr(m, k, nnz, csr.crow.data_ptr(), csr.col.data_ptr(), csr.values.data_ptr(),
-            valueType);
-        const DnMatGuard matBDescr(k, n, matB.ld, matB.storage.data_ptr(), valueType, matB.order);
-        // separateOutput 时 matC 描述的是只读的 self，真正的输出缓冲由 matY 单独传入。
-        void *matCData = separateOutput ? selfInput.data_ptr() : out.data_ptr();
-        const DnMatGuard matCDescr(m, n, n > 0 ? n : 1, matCData, valueType, ACL_SPARSE_ORDER_ROW);
-
-        const aclsparseHandle_t handle = context.handle();
-        size_t bufferSize = 0;
-        ACLSPARSE_CHECK(aclsparseSpMMGetBufferSize(handle, kOp, kOp, alphaBuf.data, matADescr.get(),
-            matBDescr.get(), betaBuf.data, matCDescr.get(), computeType, kAlg, &bufferSize));
-        AclSparseWorkspace workspace(context, csr.values, bufferSize);
-        ACLSPARSE_CHECK(aclsparseSpMMPreprocess(handle, kOp, kOp, alphaBuf.data, matADescr.get(),
-            matBDescr.get(), betaBuf.data, matCDescr.get(), computeType, kAlg, workspace.data()));
-        if (separateOutput) {
-            ACLSPARSE_CHECK(outOfPlace(handle, kOp, kOp, alphaBuf.data, matADescr.get(), matBDescr.get(),
-                betaBuf.data, matCDescr.get(), out.data_ptr(), computeType, kAlg, workspace.data()));
-        } else {
-            ACLSPARSE_CHECK(aclsparseSpMM(handle, kOp, kOp, alphaBuf.data, matADescr.get(), matBDescr.get(),
-                betaBuf.data, matCDescr.get(), computeType, kAlg, workspace.data()));
-        }
-    });
-
+    const auto valueType = ToAclDataType(mat1.scalar_type());
+    SpmmRequest request{self, mat1, mat2, out, ToAclScalar(alpha, valueType, "alpha"),
+        ToAclScalar(beta, valueType, "beta"), valueType};
+    RunAclSparse(mat1, [&](AclSparseContext &context) { ExecuteSpmmRequest(request, context); });
     return out;
 }
 
@@ -382,5 +467,12 @@ at::Tensor AddmmOut(const at::Tensor &self, const at::Tensor &mat1, const at::Te
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
+    m.def("release_cached_handles", &cann_ops_sparse::AclSparseHandleCache::Clear);
+    m.def("sparse_addmm", [](const at::Tensor &self, const at::Tensor &mat1,
+              const at::Tensor &mat2, const std::complex<double> &beta,
+              const std::complex<double> &alpha) {
+        auto out = at::empty({mat1.size(0), mat2.size(1)}, self.options());
+        return AddmmOut(self, mat1, mat2, beta, alpha, out);
+    }, "beta * self + alpha * (mat1 @ mat2) for CSR x dense on NPU");
     m.def("addmm_out", &AddmmOut, "beta * self + alpha * (mat1 @ mat2) into out, for a CSR mat1 on NPU");
 }

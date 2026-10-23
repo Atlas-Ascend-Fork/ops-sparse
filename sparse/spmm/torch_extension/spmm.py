@@ -51,6 +51,9 @@ def _copy_result(out: torch.Tensor, result: torch.Tensor) -> torch.Tensor:
 def _execute_spmm(request):
     """Execute a normalized CSR-dense request selected by the shared router."""
     extension = _spmm_op_builder.load()
+    if request.operation == "addmm" and request.out is None:
+        return extension.sparse_addmm(
+            request.self, request.mat1, request.mat2, request.beta, request.alpha)
     shape = (request.mat1.size(0), request.mat2.size(1))
     out = request.out
     direct_out = out is not None and out.is_contiguous() and not out.is_conj()

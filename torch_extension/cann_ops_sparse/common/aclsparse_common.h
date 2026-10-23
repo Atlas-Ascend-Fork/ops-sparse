@@ -89,6 +89,21 @@ public:
         return entry;
     }
 
+    // The builder calls this from Python's exit callbacks, before torch_npu
+    // destroys its streams and resets devices. Static destruction is too late
+    // because aclsparseDestroy synchronizes the borrowed stream and frees ACL
+    // memory. Select each handle's device while that runtime is still alive.
+    static void Clear()
+    {
+        std::lock_guard<std::mutex> lock(CacheMutex());
+        for (auto &entry : Cache()) {
+            c10::DeviceGuard guard(c10::Device(c10::DeviceType::PrivateUse1,
+                static_cast<c10::DeviceIndex>(entry.first.device_index)));
+            entry.second.reset();
+        }
+        Cache().clear();
+    }
+
 private:
     struct Key {
         int device_index;

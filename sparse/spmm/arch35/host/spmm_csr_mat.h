@@ -16,10 +16,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "spmm.h"
+#include "spmm_host.h"
 #include "cann_ops_sparse.h"
 #include "aclsparse_host_utils.h"
 #include "aclsparse_descr_internal.h"
+
+namespace spmm_host_internal { struct WsOffsets; }
 
 class SpmmCsrMat {
 public:
@@ -44,7 +46,12 @@ public:
                           int64_t binEdgeOffset,
                           bool identity);
 
+    aclsparseStatus_t DoTransposePreProcess(uint8_t *workspace,
+        const spmm_host_internal::WsOffsets &offsets);
+
     int32_t GetBinNum() const { return blockDim; }
+    bool IsIdentityReorder() const { return identityReorder; }
+    int32_t GetUniformDegree() const { return uniformDegree; }
 
 private:
     aclsparseSpMatDescr *matDesc;
@@ -52,6 +59,8 @@ private:
     int64_t k;
     int64_t nnz;
     int32_t blockDim;
+    bool identityReorder = false;
+    int32_t uniformDegree = -1;
 };
 
 #endif // SPMM_CSR_MAT_H

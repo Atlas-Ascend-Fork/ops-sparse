@@ -15,7 +15,14 @@
 
 #include <unistd.h>
 #include <stdint.h>
+#if defined(OPS_SPARSE_TORCH_NPU_BUILD)
+// torch_npu ships the ACL declarations used by its C++ extension headers.
+// Reuse that already-loaded header in the adapter build so it does not mix
+// torch_npu's ACL ABI with a second CANN acl_base_rt.h declaration set.
+#include <acl/acl.h>
+#else
 #include <acl/acl_base_rt.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

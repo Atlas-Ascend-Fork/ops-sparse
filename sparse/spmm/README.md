@@ -14,7 +14,7 @@ C = alpha * op(A) * op(B) + beta * C
 
 调用流程为三步法：
 1. **GetBufferSize**：查询所需 workspace 大小
-2. **Preprocess**：对稀疏矩阵进行预处理（行重排 + 分箱），加速后续计算
+2. **Preprocess（可选）**：对稀疏矩阵进行预处理（行重排 + 分箱），加速后续计算；省略时首次 SpMM 自动构建
 3. **SpMM**：执行 C = alpha * op(A) * op(B) + beta * C
 
 包含以下接口：
@@ -46,14 +46,14 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
-| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；支持非转置、转置和共轭转置，CSR_ALG3 仅支持非转置，Host 内存 |
+| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；支持非转置、转置及合法算法组合下的共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型；A2/A3 实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950 的 INT8 组合使用 `ACL_INT32`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型；A2/A3 支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3 和 FP32_HIGH_PRECISION，Host 内存；不同算法会选择对应的布局/确定性路径 |
 | size | 输出 | size_t* | 输出所需 workspace 大小（字节），Host 内存 |
 
@@ -63,6 +63,30 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 - matA、matB、matC 不可为 nullptr
 - matA 仅支持 CSR 格式（`ACL_SPARSE_FORMAT_CSR`）
 - matA 的行偏移和列索引类型必须均为 `ACL_SPARSE_INDEX_32I`，且两者类型相同
+##### Ascend 950
+
+- matA 的索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
+- opA 支持非转置、转置和共轭转置；CSR_ALG3 仅支持非转置
+- opB 支持 `ACL_SPARSE_OP_NON_TRANSPOSE`、`ACL_SPARSE_OP_TRANSPOSE` 和 `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`；CSR_ALG3 不支持共轭转置
+- 支持以下数据类型组合：
+  - matA=ACL_FLOAT, matB=ACL_FLOAT, matC=ACL_FLOAT, computeType=ACL_FLOAT
+  - matA=ACL_FLOAT16, matB=ACL_FLOAT16, matC=ACL_FLOAT16, computeType=ACL_FLOAT
+  - matA=ACL_FLOAT16, matB=ACL_FLOAT16, matC=ACL_FLOAT, computeType=ACL_FLOAT
+  - matA=ACL_BF16, matB=ACL_BF16, matC=ACL_BF16, computeType=ACL_FLOAT
+  - matA=ACL_BF16, matB=ACL_BF16, matC=ACL_FLOAT, computeType=ACL_FLOAT
+  - matA=ACL_COMPLEX64, matB=ACL_COMPLEX64, matC=ACL_COMPLEX64, computeType=ACL_COMPLEX64
+  - matA=ACL_INT8, matB=ACL_INT8, matC=ACL_INT32, computeType=ACL_INT32
+- 设 op(A) 的逻辑形状为 `m x k`，C 的形状为 `m x n`：
+  - `opB=ACL_SPARSE_OP_NON_TRANSPOSE` 时，B 描述符形状为 `k x n`；
+  - `opB=ACL_SPARSE_OP_TRANSPOSE` 时，B 描述符形状为 `n x k`；
+  - 行主序矩阵的 `ld` 不小于物理列数，列主序矩阵的 `ld` 不小于物理行数。
+- 零维输入：m / k / n（matA.rows / matA.cols / matC.cols）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- opA 为转置或共轭转置时，逻辑形状为原始 A 的列数乘行数；维度校验和 workspace 大小均按逻辑形状计算。
+- 转置预处理保存 CSR 结构和原始 values 的置换关系，执行时读取当前 values；Complex64 共轭转置同时取复数共轭。
+- 非零维矩阵允许 `nnz=0` 和空行。
+
+##### A2/A3
+
 - A2/A3 的 matA 索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
 - A2/A3 的 opA/opB 支持 `ACL_SPARSE_OP_NON_TRANSPOSE`、`ACL_SPARSE_OP_TRANSPOSE` 和
   `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`
@@ -110,14 +134,14 @@ aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOpe
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
-| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；支持非转置、转置和共轭转置，CSR_ALG3 仅支持非转置，Host 内存 |
+| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；支持非转置、转置及合法算法组合下的共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型；A2/A3 实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950 的 INT8 组合使用 `ACL_INT32`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型，Host 内存 |
 | buffer | 输入 | void* | workspace 缓冲区（由 GetBufferSize 返回的大小分配），Device 内存 |
 
@@ -155,14 +179,14 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream，Host 内存 |
-| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
-| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；A2/A3 支持非转置、转置和共轭转置，Host 内存 |
+| opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型；支持非转置、转置和共轭转置，CSR_ALG3 仅支持非转置，Host 内存 |
+| opB | 输入 | aclsparseOperation_t | 稠密矩阵 B 的操作类型；支持非转置、转置及合法算法组合下的共轭转置，Host 内存 |
 | alpha | 输入 | const void* | 标量 alpha 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏矩阵 A 的描述符，仅支持 CSR 格式，Host 内存 |
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型；A2/A3 实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950 的 INT8 组合使用 `ACL_INT32`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型，Host 内存 |
 | buffer | 输入 | void* | workspace 缓冲区（由 GetBufferSize 返回的大小分配），Device 内存 |
 
@@ -170,7 +194,8 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 
 - 同 aclsparseSpMMGetBufferSize 的约束
 - buffer 不可为 nullptr，需按 GetBufferSize 返回的大小分配
-- 调用前须先调用 `aclsparseSpMMPreprocess` 进行预处理
+- A2/A3 调用前须先调用 `aclsparseSpMMPreprocess` 进行预处理
+- Ascend 950 的 `aclsparseSpMMPreprocess` 为可选步骤，首次直接执行会构建 workspace
 - A2/A3 支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3、FP32_HIGH_PRECISION；算法会参与 host
   侧路径选择，CSR_ALG3 的操作限制见 GetBufferSize 约束
 - A2/A3 的 `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` 仅支持 fp32，使用 Kahan 补偿求和

@@ -23,8 +23,15 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <atomic>
 
 namespace {
+
+uint64_t NextSpmmWorkspaceOwnerId()
+{
+    static std::atomic<uint64_t> nextOwnerId {1};
+    return nextOwnerId.fetch_add(1, std::memory_order_relaxed);
+}
 
 static int64_t CeilDiv(int64_t value, int64_t divisor)
 {
@@ -482,6 +489,7 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     }
 
     inner->format = ACL_SPARSE_FORMAT_CSR;
+    inner->spmmWorkspaceOwnerId = NextSpmmWorkspaceOwnerId();
     inner->rows = static_cast<uint64_t>(rows);
     inner->cols = static_cast<uint64_t>(cols);
     inner->nnz = static_cast<uint64_t>(nnz);
@@ -617,6 +625,7 @@ static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
     descr->ptrs = offsets;
     descr->idxs = indices;
     descr->values = values;
+    descr->spmmWorkspaceOwnerId = NextSpmmWorkspaceOwnerId();
     descr->activeBuffer = nullptr;
     descr->activeSpmvBuffer = nullptr;
     descr->spmvCubeMaxRowLengthValid = false;
@@ -642,6 +651,7 @@ aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
     descr->ptrStride = rowOffsetsStride;
     descr->idxStride = colIndStride;
     descr->valueStride = valuesStride;
+    descr->spmmWorkspaceOwnerId = NextSpmmWorkspaceOwnerId();
     descr->activeDenseToSparseBuffer = nullptr;
     descr->denseToSparseAnalysisReady = false;
     descr->activeBuffer = nullptr;
@@ -749,6 +759,7 @@ aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void
         ResetSpmvActivePlan(spMatDescr);
     }
     spMatDescr->values = values;
+    spMatDescr->spmmWorkspaceOwnerId = NextSpmmWorkspaceOwnerId();
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

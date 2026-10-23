@@ -13,6 +13,7 @@
 Native sources are added with their corresponding wrapper PRs.
 """
 
+import atexit
 import os
 import platform
 import threading
@@ -60,7 +61,14 @@ class OpBuilder(ABC):
         with _LOAD_LOCK:
             self._ensure_initialized()
             if self.name not in self._loaded_ops:
-                self._loaded_ops[self.name] = self._build_extension()
+                module = self._build_extension()
+                release_handles = getattr(module, "release_cached_handles", None)
+                if callable(release_handles):
+                    # torch_npu was imported before the operator package. Exit
+                    # callbacks run in reverse order, keeping its runtime alive
+                    # until cached ACLSparse handles have been released.
+                    atexit.register(release_handles)
+                self._loaded_ops[self.name] = module
             return self._loaded_ops[self.name]
 
     def _ensure_initialized(self) -> None:

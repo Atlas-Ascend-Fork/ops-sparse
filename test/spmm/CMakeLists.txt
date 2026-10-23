@@ -8,20 +8,23 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-# SPMM V1 仅在 Ascend 950PR（SIMT 扩展 + dav-3510）上交付，与 src/spmm/ 的 SOC 网关保持一致。
+# SPMM arch35 在 Ascend 950PR（SIMT 扩展 + dav-3510）上交付，与 sparse/spmm/ 的 SOC 网关保持一致。
 # SPMM arch22 在 dav-2201 上交付，覆盖 Ascend910_93 系列与 Ascend910B 系列（二者均映射到 arch22，
 # 见根 CMakeLists 的 SOC_VERSION -> NPU_ARCH 映射），故统一编译 arch22 测试。
 if(SOC_VERSION_LOWER MATCHES "^ascend950")
-    add_executable(spmm_test
-        arch35/spmm_test.cpp
-    )
-    target_include_directories(spmm_test PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        $ENV{LINUX_INCLUDE_PATH}
-    )
-    target_link_libraries(spmm_test PRIVATE
-        ${OPS_SPARSE}
-        $ENV{EAGER_LIBRARY_PATH}/libascendcl.so
+    ops_sparse_add_gtest_tests(spmm ${OPS_SPARSE})
+    if(NOT TARGET spmm_test)
+        message(FATAL_ERROR "SpMM arch35 tests require GTest")
+    endif()
+    target_sources(spmm_test PRIVATE
+        arch35/spmm_task_dtype_test.cpp
+        arch35/spmm_cube_path_test.cpp
+        arch35/spmm_cube_dtype_test.cpp
+        arch35/spmm_fp32_regbase_test.cpp
+        arch35/spmm_fp32_degree2_test.cpp
+        arch35/spmm_complex64_degree2_test.cpp
+        arch35/spmm_workspace_owner_test.cpp
+        arch35/spmm_transpose_test.cpp
     )
 elseif(SOC_VERSION_LOWER MATCHES "^ascend910_93" OR SOC_VERSION_LOWER MATCHES "^ascend910b")
     add_executable(spmm_test

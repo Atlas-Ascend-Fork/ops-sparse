@@ -367,7 +367,9 @@ at::Tensor output;
 - 稀疏/稠密 descriptor 和其他调用级原生资源必须在所有成功与异常路径中恰好释放
   一次。优先使用局部 RAII 封装，避免多处手工清理造成泄漏或重复释放。
 - 公共层按 `device + stream` 缓存 ACLSparse handle，并为同一 handle 串行化调用；算子
-  wrapper 不得自行缓存或跨 stream 复用 handle。缓存随扩展卸载或进程退出析构并释放。
+  wrapper 复用公共层的 handle。以 `spmm` 为例，`OpBuilder` 在首次加载时注册
+  `release_cached_handles` 退出回调。回调通过 `AclSparseHandleCache::Clear` 按所属
+  device 释放 handle，随后由 `torch_npu` 清理 stream 和 device。
 - workspace 大小必须由对应 API 查询，并通过公共层 `AclSparseWorkspace` 申请；该类会
   记录 workspace 到 handle 初始化时绑定的 stream，不能在异步任务完成前复用或销毁其 storage。
 - 临时 Tensor、输入和输出 storage 必须按 torch_npu 提供的机制记录到当前 stream。优先

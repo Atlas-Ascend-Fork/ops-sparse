@@ -12,16 +12,18 @@
 
 // End-to-end test for aclsparseSpMM with FP32 / FP16 / INT8 data types.
 //
-//   C = alpha * A * B + beta * C
+//   C = alpha * A * op(B) + beta * C
 //
-// Three test cases:
-//   FP32: A(fp32) * B(fp32) -> C(fp32),  computeType=fp32
+// Coverage:
+//   FP32: opB N/T x B/C row/column-major, padded leading dimensions, beta
 //   FP16: A(fp16) * B(fp16) -> C(fp16),  computeType=fp32  (accumulate in fp32)
 //   INT8: A(int8) * B(int8) -> C(int32), computeType=int32 (accumulate in int32)
 
 #include <acl/acl.h>
-#include "cann_ops_sparse.h"
+#include <cann_ops_sparse.h>
+#include "spmm_test_utils.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -48,6 +50,50 @@ struct VerifyResult {
     double mae;
 };
 
+struct DenseStorageSpec {
+    int32_t rows;
+    int32_t cols;
+    int32_t ld;
+    size_t elementCount;
+};
+
+static DenseStorageSpec MakeDenseStorageSpec(
+    int32_t rows, int32_t cols, aclsparseOrder_t order, int32_t ldPadding = 0)
+{
+    const bool rowMajor = (order == ACL_SPARSE_ORDER_ROW);
+    const int32_t ld = (rowMajor ? cols : rows) + ldPadding;
+    const size_t majorCount = static_cast<size_t>(rowMajor ? rows : cols);
+    return DenseStorageSpec{rows, cols, ld, majorCount * static_cast<size_t>(ld)};
+}
+
+static bool IsLogicalDenseElement(
+    size_t index, const DenseStorageSpec &spec, aclsparseOrder_t order)
+{
+    if (order == ACL_SPARSE_ORDER_ROW) {
+        const int32_t row = static_cast<int32_t>(index / static_cast<size_t>(spec.ld));
+        const int32_t col = static_cast<int32_t>(index % static_cast<size_t>(spec.ld));
+        return row < spec.rows && col < spec.cols;
+    }
+    const int32_t col = static_cast<int32_t>(index / static_cast<size_t>(spec.ld));
+    const int32_t row = static_cast<int32_t>(index % static_cast<size_t>(spec.ld));
+    return row < spec.rows && col < spec.cols;
+}
+
+static bool VerifyFloatPaddingUnchanged(
+    const std::vector<float> &got, const std::vector<float> &expect,
+    const DenseStorageSpec &spec, aclsparseOrder_t order)
+{
+    for (size_t i = 0; i < got.size(); ++i) {
+        if (!IsLogicalDenseElement(i, spec, order) && got[i] != expect[i]) {
+            std::printf("[FP32] padding changed at physical index %zu: expected %.8f, got %.8f FAIL\n",
+                        i, expect[i], got[i]);
+            return false;
+        }
+    }
+    std::printf("[FP32] dense padding unchanged PASS\n");
+    return true;
+}
+
 static VerifyResult FailVerify()
 {
     return VerifyResult{false, 0.0, 0.0, 0.0};
@@ -61,6 +107,8 @@ struct SpmmTestResources {
     void *dVals = nullptr;
     void *dB = nullptr;
     void *dC = nullptr;
+    void *dAlpha = nullptr;
+    void *dBeta = nullptr;
     void *dBuffer = nullptr;
     aclsparseHandle_t handle = nullptr;
     aclsparseSpMatDescr_t matA = nullptr;
@@ -99,6 +147,12 @@ struct SpmmTestResources {
         if (dC != nullptr) {
             aclrtFree(dC);
         }
+        if (dAlpha != nullptr) {
+            aclrtFree(dAlpha);
+        }
+        if (dBeta != nullptr) {
+            aclrtFree(dBeta);
+        }
     }
 
     SpmmTestResources() = default;
@@ -122,24 +176,6 @@ struct SpmmTestResources {
     } while (0)
 
 namespace {
-
-int Init(int32_t deviceId, aclrtStream *stream)
-{
-    auto ret = aclInit(nullptr);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclInit failed. ERROR: %d\n", ret); return ret);
-    ret = aclrtSetDevice(deviceId);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSetDevice failed. ERROR: %d\n", ret); return ret);
-    ret = aclrtCreateStream(stream);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtCreateStream failed. ERROR: %d\n", ret); return ret);
-    return 0;
-}
-
-void Finalize(int32_t deviceId, aclrtStream stream)
-{
-    aclrtDestroyStream(stream);
-    aclrtResetDevice(deviceId);
-    aclFinalize();
-}
 
 void GenerateRandomCsr(int32_t m, int32_t k, int32_t nnz,
                       std::vector<int32_t> *rowOff,
@@ -175,6 +211,39 @@ void GenerateRandomCsr(int32_t m, int32_t k, int32_t nnz,
     }
 }
 
+void GenerateSkewedCsr(int32_t m, int32_t k, int32_t nnz,
+                       std::vector<int32_t> *rowOff,
+                       std::vector<int32_t> *colInd,
+                       std::vector<float> *vals)
+{
+    rowOff->assign(static_cast<size_t>(m) + 1, 0);
+    colInd->clear();
+    vals->clear();
+    if (m <= 0 || k <= 0 || nnz <= 0) {
+        return;
+    }
+
+    int32_t remaining = std::min(nnz, m * k);
+    int32_t produced = 0;
+    for (int32_t row = 0; row < m; ++row) {
+        const int32_t rowsAfter = m - row - 1;
+        int32_t rowNnz = 0;
+        if (row == 0) {
+            rowNnz = std::min(k, std::max(0, remaining - rowsAfter));
+        } else if (remaining > 0) {
+            rowNnz = std::min(k, std::max(1, remaining / (rowsAfter + 1)));
+        }
+        rowNnz = std::min(rowNnz, remaining);
+        for (int32_t col = 0; col < rowNnz; ++col) {
+            colInd->push_back(col);
+            vals->push_back(-3.0f + 0.25f * static_cast<float>(produced % 17));
+            ++produced;
+        }
+        remaining -= rowNnz;
+        (*rowOff)[row + 1] = produced;
+    }
+}
+
 void SpmmCpuFp32(int32_t m, int32_t n,
                  const std::vector<int32_t> &rowOff,
                  const std::vector<int32_t> &colInd,
@@ -183,15 +252,15 @@ void SpmmCpuFp32(int32_t m, int32_t n,
                  int32_t ldb, bool bRowMajor, bool opBTranspose,
                  std::vector<float>         *C,
                  int32_t ldc, bool cRowMajor,
-                 float alpha, float beta)
+                 float alpha, float beta, int32_t indexBase = 0)
 {
     for (int32_t r = 0; r < m; ++r) {
         for (int32_t j = 0; j < n; ++j) {
             float acc = 0.0f;
-            int32_t s = rowOff[r];
-            int32_t e = rowOff[r + 1];
+            int32_t s = rowOff[r] - indexBase;
+            int32_t e = rowOff[r + 1] - indexBase;
             for (int32_t p = s; p < e; ++p) {
-                int32_t c = colInd[p];
+                int32_t c = colInd[p] - indexBase;
                 int64_t bIdx;
                 if (!opBTranspose) {
                     bIdx = bRowMajor
@@ -221,15 +290,15 @@ void SpmmCpuInt8(int32_t m, int32_t n,
                  int32_t ldb, bool bRowMajor, bool opBTranspose,
                  std::vector<int32_t>       *C,
                  int32_t ldc, bool cRowMajor,
-                 int32_t alpha, int32_t beta)
+                 int32_t alpha, int32_t beta, int32_t indexBase = 0)
 {
     for (int32_t r = 0; r < m; ++r) {
         for (int32_t j = 0; j < n; ++j) {
-            int32_t acc = 0;
-            int32_t s = rowOff[r];
-            int32_t e = rowOff[r + 1];
+            int64_t acc = 0;
+            int32_t s = rowOff[r] - indexBase;
+            int32_t e = rowOff[r + 1] - indexBase;
             for (int32_t p = s; p < e; ++p) {
-                int32_t c = colInd[p];
+                int32_t c = colInd[p] - indexBase;
                 int64_t bIdx;
                 if (!opBTranspose) {
                     bIdx = bRowMajor
@@ -240,14 +309,18 @@ void SpmmCpuInt8(int32_t m, int32_t n,
                         ? static_cast<int64_t>(j) * ldb + c
                         : static_cast<int64_t>(c) * ldb + j;
                 }
-                acc += static_cast<int32_t>(vals[p]) *
-                       static_cast<int32_t>(B[static_cast<size_t>(bIdx)]);
+                acc += static_cast<int64_t>(vals[p]) *
+                       static_cast<int64_t>(B[static_cast<size_t>(bIdx)]);
             }
             int64_t cIdx = cRowMajor
                 ? static_cast<int64_t>(r) * ldc + j
                 : static_cast<int64_t>(j) * ldc + r;
-            int32_t cOld = (*C)[static_cast<size_t>(cIdx)];
-            (*C)[static_cast<size_t>(cIdx)] = alpha * acc + beta * cOld;
+            int64_t cWide = static_cast<int64_t>(alpha) * acc +
+                            static_cast<int64_t>(beta) *
+                            static_cast<int64_t>((*C)[static_cast<size_t>(cIdx)]);
+            cWide = std::max<int64_t>(-2147483648LL,
+                                      std::min<int64_t>(2147483647LL, cWide));
+            (*C)[static_cast<size_t>(cIdx)] = static_cast<int32_t>(cWide);
         }
     }
 }
@@ -430,6 +503,191 @@ inline float Fp16BitsToFp32(uint16_t h)
 // ============================================================================
 // FP32 test: A(fp32) * B(fp32) -> C(fp32), computeType=ACL_FLOAT
 // ============================================================================
+static void BuildFp32DenseInputs(const DenseStorageSpec &bSpec, const DenseStorageSpec &cSpec,
+                                 aclsparseOrder_t orderB, aclsparseOrder_t orderC, float beta,
+                                 std::vector<float> *hB, std::vector<float> *hC)
+{
+    hB->assign(bSpec.elementCount, 97.0f);
+    for (size_t i = 0; i < hB->size(); ++i) {
+        if (IsLogicalDenseElement(i, bSpec, orderB)) {
+            (*hB)[i] = -5.0f + 10.0f * static_cast<float>(i % 10001) / 10000.0f;
+        }
+    }
+    hC->assign(cSpec.elementCount, -101.0f);
+    for (size_t i = 0; i < hC->size(); ++i) {
+        if (IsLogicalDenseElement(i, cSpec, orderC)) {
+            (*hC)[i] = beta == 0.0f ? 0.0f :
+                -5.0f + 10.0f * static_cast<float>(i % 10001) / 10000.0f;
+        }
+    }
+}
+
+static bool AllocateFp32Resources(int32_t m, int32_t nnz, const DenseStorageSpec &bSpec,
+                                  const DenseStorageSpec &cSpec, bool deviceScalars,
+                                  SpmmTestResources *res, int32_t **dRowOff, int32_t **dColInd,
+                                  float **dVals, float **dB, float **dC)
+{
+    aclError aclRet = aclrtMalloc(&res->dRowOff, sizeof(int32_t) * (m + 1),
+                                  ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    *dRowOff = static_cast<int32_t *>(res->dRowOff);
+    aclRet = aclrtMalloc(&res->dColInd, sizeof(int32_t) * static_cast<size_t>(std::max(1, nnz)),
+                         ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    *dColInd = static_cast<int32_t *>(res->dColInd);
+    aclRet = aclrtMalloc(&res->dVals, sizeof(float) * static_cast<size_t>(std::max(1, nnz)),
+                         ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    *dVals = static_cast<float *>(res->dVals);
+    aclRet = aclrtMalloc(&res->dB, sizeof(float) * bSpec.elementCount, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    *dB = static_cast<float *>(res->dB);
+    aclRet = aclrtMalloc(&res->dC, sizeof(float) * cSpec.elementCount, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    *dC = static_cast<float *>(res->dC);
+    if (!deviceScalars) return true;
+    aclRet = aclrtMalloc(&res->dAlpha, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc alpha failed. ERROR: %d\n", aclRet); return false);
+    aclRet = aclrtMalloc(&res->dBeta, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc beta failed. ERROR: %d\n", aclRet); return false);
+    return true;
+}
+
+static bool UploadFp32Resources(int32_t m, int32_t nnz, const DenseStorageSpec &bSpec,
+                                const DenseStorageSpec &cSpec,
+                                const std::vector<int32_t> &hRowOff,
+                                const std::vector<int32_t> &hColInd,
+                                const std::vector<float> &hValsFp32,
+                                const std::vector<float> &hB, const std::vector<float> &hC,
+                                float alpha, float beta, bool deviceScalars,
+                                const SpmmTestResources &res, int32_t *dRowOff,
+                                int32_t *dColInd, float *dVals, float *dB, float *dC)
+{
+    aclError aclRet = aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(),
+                                  sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return false);
+    if (nnz > 0) {
+        aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(),
+                             sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return false);
+        aclRet = aclrtMemcpy(dVals, sizeof(float) * nnz, hValsFp32.data(),
+                             sizeof(float) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return false);
+    }
+    aclRet = aclrtMemcpy(dB, sizeof(float) * bSpec.elementCount, hB.data(),
+                         sizeof(float) * bSpec.elementCount, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return false);
+    aclRet = aclrtMemcpy(dC, sizeof(float) * cSpec.elementCount, hC.data(),
+                         sizeof(float) * cSpec.elementCount, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return false);
+    if (!deviceScalars) return true;
+    aclRet = aclrtMemcpy(res.dAlpha, sizeof(float), &alpha, sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy alpha failed. ERROR: %d\n", aclRet); return false);
+    aclRet = aclrtMemcpy(res.dBeta, sizeof(float), &beta, sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy beta failed. ERROR: %d\n", aclRet); return false);
+    return true;
+}
+
+static bool CreateFp32Descriptors(aclrtStream stream, int32_t m, int32_t k, int32_t nnz,
+                                  const DenseStorageSpec &bSpec, const DenseStorageSpec &cSpec,
+                                  aclsparseOrder_t orderB, aclsparseOrder_t orderC,
+                                  int32_t indexBase, bool deviceScalars,
+                                  SpmmTestResources *res, int32_t *dRowOff, int32_t *dColInd,
+                                  float *dVals, float *dB, float *dC)
+{
+    aclsparseStatus_t sparseRet = aclsparseCreate(&res->handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return false);
+    sparseRet = aclsparseSetStream(res->handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet); return false);
+    if (deviceScalars) {
+        sparseRet = aclsparseSetPointerMode(res->handle, ACL_SPARSE_POINTER_MODE_DEVICE);
+        CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+                  LOG_PRINT("aclsparseSetPointerMode failed. ERROR: %d\n", sparseRet); return false);
+    }
+    sparseRet = aclsparseCreateCsr(&res->matA, m, k, nnz, dRowOff, dColInd, dVals,
+                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                   indexBase == 0 ? ACL_SPARSE_INDEX_BASE_ZERO : ACL_SPARSE_INDEX_BASE_ONE,
+                                   ACL_FLOAT);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet); return false);
+    sparseRet = aclsparseCreateDnMat(&res->matB, bSpec.rows, bSpec.cols, bSpec.ld, dB,
+                                     ACL_FLOAT, orderB);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return false);
+    sparseRet = aclsparseCreateDnMat(&res->matC, m, cSpec.cols, cSpec.ld, dC,
+                                     ACL_FLOAT, orderC);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return false);
+    return true;
+}
+
+static bool PrepareFp32Workspace(SpmmTestResources *res, aclsparseOperation_t opB,
+                                 const void *alphaArg, const void *betaArg,
+                                 aclDataType computeType, aclsparseSpMMAlg_t alg,
+                                 bool usePreprocess, double *msGetBuf,
+                                 double *msPreprocess)
+{
+    TimePoint t0 = Clock::now();
+    size_t bufferSize = 0;
+    aclsparseStatus_t sparseRet = aclsparseSpMMGetBufferSize(res->handle,
+        ACL_SPARSE_OP_NON_TRANSPOSE, opB, alphaArg, res->matA, res->matB, betaArg,
+        res->matC, computeType, alg, &bufferSize);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return false);
+    *msGetBuf = ElapsedMs(t0, Clock::now());
+    std::printf("Workspace bytes: %zu\n", bufferSize);
+    const aclError aclRet = aclrtMalloc(&res->dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    if (!usePreprocess) return true;
+    t0 = Clock::now();
+    sparseRet = aclsparseSpMMPreprocess(res->handle, ACL_SPARSE_OP_NON_TRANSPOSE, opB,
+        alphaArg, res->matA, res->matB, betaArg, res->matC, computeType, alg, res->dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return false);
+    *msPreprocess = ElapsedMs(t0, Clock::now());
+    return true;
+}
+
+static bool ExecuteFp32(aclrtStream stream, SpmmTestResources &res,
+                        aclsparseOperation_t opB, const void *alphaArg, const void *betaArg,
+                        aclsparseSpMMAlg_t alg, bool repeated, double *msSpmm)
+{
+    const TimePoint t0 = Clock::now();
+    aclsparseStatus_t sparseRet = aclsparseSpMM(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE, opB,
+        alphaArg, res.matA, res.matB, betaArg, res.matC, ACL_FLOAT, alg, res.dBuffer);
+    if (sparseRet != ACL_SPARSE_STATUS_SUCCESS) {
+        if (repeated) LOG_PRINT("repeat aclsparseSpMM failed. ERROR: %d\n", sparseRet);
+        return false;
+    }
+    const aclError aclRet = aclrtSynchronizeStream(stream);
+    if (aclRet != ACL_SUCCESS) {
+        if (repeated) {
+            LOG_PRINT("repeat synchronize failed. ERROR: %d\n", aclRet);
+        } else {
+            LOG_PRINT("[ERROR] aclsparseSpMM: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
+        }
+        return false;
+    }
+    *msSpmm += ElapsedMs(t0, Clock::now());
+    return true;
+}
+
+static bool RepeatFp32Execution(aclrtStream stream, SpmmTestResources &res,
+                                aclsparseOperation_t opB, const void *alphaArg,
+                                const void *betaArg, aclsparseSpMMAlg_t alg, float *dC,
+                                const std::vector<float> &hC, int32_t repeatCount,
+                                double *msSpmm)
+{
+    if (!ExecuteFp32(stream, res, opB, alphaArg, betaArg, alg, false, msSpmm)) return false;
+    for (int32_t repeat = 1; repeat < std::max(1, repeatCount); ++repeat) {
+        const aclError aclRet = aclrtMemcpy(dC, sizeof(float) * hC.size(), hC.data(),
+                                             sizeof(float) * hC.size(), ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS,
+                  LOG_PRINT("aclrtMemcpy repeat C failed. ERROR: %d\n", aclRet); return false);
+        if (!ExecuteFp32(stream, res, opB, alphaArg, betaArg, alg, true, msSpmm)) return false;
+    }
+    if (repeatCount > 1) std::printf("[FP32] repeated execution count=%d PASS\n", repeatCount);
+    return true;
+}
+
 static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
                             int32_t m, int32_t k, int32_t n, int32_t nnz,
                             const std::vector<int32_t> &hRowOff,
@@ -438,7 +696,14 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
                             float alpha, float beta,
                             aclsparseOperation_t opB,
                             aclsparseOrder_t orderB,
-                            aclsparseOrder_t orderC)
+                            aclsparseOrder_t orderC,
+                            int32_t bLdPadding,
+                            int32_t cLdPadding,
+                            bool usePreprocess = true,
+                            bool deviceScalars = false,
+                            int32_t indexBase = 0,
+                            int32_t repeatCount = 1,
+                            aclsparseSpMMAlg_t alg = ACL_SPARSE_SPMM_CSR_ALG1)
 {
     TimePoint t0, t1;
     double msDataGen = 0, msCpuRef = 0, msDevAlloc = 0, msH2D = 0;
@@ -447,31 +712,29 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
     const bool bRowMajor = (orderB == ACL_SPARSE_ORDER_ROW);
     const bool cRowMajor = (orderC == ACL_SPARSE_ORDER_ROW);
     const bool opBTranspose = (opB == ACL_SPARSE_OP_TRANSPOSE);
-    const int32_t ldb = bRowMajor ? n : k;
-    const int32_t ldc = cRowMajor ? n : m;
+    const int32_t bRows = opBTranspose ? n : k;
+    const int32_t bCols = opBTranspose ? k : n;
+    const DenseStorageSpec bSpec = MakeDenseStorageSpec(bRows, bCols, orderB, bLdPadding);
+    const DenseStorageSpec cSpec = MakeDenseStorageSpec(m, n, orderC, cLdPadding);
+    const int32_t ldb = bSpec.ld;
+    const int32_t ldc = cSpec.ld;
 
     const char *opBStr = opBTranspose ? "T" : "N";
     const char *obStr = bRowMajor ? "R" : "C";
     const char *ocStr = cRowMajor ? "R" : "C";
-    std::printf("\n====== SPMM FP32 Test [opB=%s, B=%s, C=%s] ======\n", opBStr, obStr, ocStr);
+    std::printf("\n====== SPMM FP32 Test [opB=%s, B=%s, C=%s, ldb=%d, ldc=%d] ======\n",
+                opBStr, obStr, ocStr, ldb, ldc);
 
     t0 = Clock::now();
-    std::vector<float> hB(static_cast<size_t>(k) * ldb);
-    for (size_t i = 0; i < hB.size(); ++i) {
-        hB[i] = -5.0f + 10.0f * static_cast<float>(i % 10001) / 10000.0f;
-    }
-    std::vector<float> hC(static_cast<size_t>(m) * ldc, 0.0f);
-    if (beta != 0.0f) {
-        for (size_t i = 0; i < hC.size(); ++i) {
-            hC[i] = -5.0f + 10.0f * static_cast<float>(i % 10001) / 10000.0f;
-        }
-    }
+    std::vector<float> hB;
+    std::vector<float> hC;
+    BuildFp32DenseInputs(bSpec, cSpec, orderB, orderC, beta, &hB, &hC);
     std::vector<float> hCRef(hC);
     t1 = Clock::now();
     msDataGen = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    SpmmCpuFp32(m, n, hRowOff, hColInd, hValsFp32, hB, ldb, bRowMajor, opBTranspose, &hCRef, ldc, cRowMajor, alpha, beta);
+    SpmmCpuFp32(m, n, hRowOff, hColInd, hValsFp32, hB, ldb, bRowMajor, opBTranspose, &hCRef, ldc, cRowMajor, alpha, beta, indexBase);
     t1 = Clock::now();
     msCpuRef = ElapsedMs(t0, t1);
 
@@ -482,95 +745,36 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
     float   *dVals   = nullptr;
     float   *dB      = nullptr;
     float   *dC      = nullptr;
-    aclError aclRet = aclrtMalloc((void **)&res.dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
-    dRowOff = static_cast<int32_t *>(res.dRowOff);
-    aclRet = aclrtMalloc((void **)&res.dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
-    dColInd = static_cast<int32_t *>(res.dColInd);
-    aclRet = aclrtMalloc((void **)&res.dVals, sizeof(float) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
-    dVals = static_cast<float *>(res.dVals);
-    aclRet = aclrtMalloc((void **)&res.dB, sizeof(float) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
-    dB = static_cast<float *>(res.dB);
-    aclRet = aclrtMalloc((void **)&res.dC, sizeof(float) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
-    dC = static_cast<float *>(res.dC);
+    if (!AllocateFp32Resources(m, nnz, bSpec, cSpec, deviceScalars, &res,
+                               &dRowOff, &dColInd, &dVals, &dB, &dC)) return FailVerify();
     t1 = Clock::now();
     msDevAlloc = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    aclRet = aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(), sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dVals, sizeof(float) * nnz, hValsFp32.data(), sizeof(float) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dB, sizeof(float) * k * ldb, hB.data(), sizeof(float) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dC, sizeof(float) * m * ldc, hC.data(), sizeof(float) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    if (!UploadFp32Resources(m, nnz, bSpec, cSpec, hRowOff, hColInd, hValsFp32, hB, hC,
+                             alpha, beta, deviceScalars, res, dRowOff, dColInd, dVals, dB, dC)) {
+        return FailVerify();
+    }
     t1 = Clock::now();
     msH2D = ElapsedMs(t0, t1);
 
-    aclsparseStatus_t sparseRet = aclsparseCreate(&res.handle);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return FailVerify());
-    sparseRet = aclsparseSetStream(res.handle, stream);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet); return FailVerify());
+    const void *alphaArg = deviceScalars ? static_cast<const void *>(res.dAlpha)
+                                         : static_cast<const void *>(&alpha);
+    const void *betaArg = deviceScalars ? static_cast<const void *>(res.dBeta)
+                                        : static_cast<const void *>(&beta);
+    if (!CreateFp32Descriptors(stream, m, k, nnz, bSpec, cSpec, orderB, orderC,
+                               indexBase, deviceScalars, &res, dRowOff, dColInd, dVals, dB, dC)) {
+        return FailVerify();
+    }
 
-    sparseRet = aclsparseCreateCsr(&res.matA, m, k, nnz, dRowOff, dColInd, dVals,
-                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                   ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
-
-    sparseRet = aclsparseCreateDnMat(&res.matB, k, n, ldb, dB, ACL_FLOAT, orderB);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
-    sparseRet = aclsparseCreateDnMat(&res.matC, m, n, ldc, dC, ACL_FLOAT, orderC);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    if (!PrepareFp32Workspace(&res, opB, alphaArg, betaArg, ACL_FLOAT, alg, usePreprocess,
+                              &msGetBuf, &msPreprocess) ||
+        !RepeatFp32Execution(stream, res, opB, alphaArg, betaArg, alg, dC, hC, repeatCount,
+                             &msSpmm)) return FailVerify();
 
     t0 = Clock::now();
-    size_t bufferSize = 0;
-    sparseRet = aclsparseSpMMGetBufferSize(res.handle,
-        ACL_SPARSE_OP_NON_TRANSPOSE, opB,
-        &alpha, res.matA, res.matB, &beta, res.matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
-    t1 = Clock::now();
-    msGetBuf = ElapsedMs(t0, t1);
-    std::printf("Workspace bytes: %zu\n", bufferSize);
-
-    aclRet = aclrtMalloc(&res.dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
-
-    t0 = Clock::now();
-    sparseRet = aclsparseSpMMPreprocess(res.handle,
-        ACL_SPARSE_OP_NON_TRANSPOSE, opB,
-        &alpha, res.matA, res.matB, &beta, res.matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, res.dBuffer);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
-    t1 = Clock::now();
-    msPreprocess = ElapsedMs(t0, t1);
-
-    t0 = Clock::now();
-    sparseRet = aclsparseSpMM(res.handle,
-        ACL_SPARSE_OP_NON_TRANSPOSE, opB,
-        &alpha, res.matA, res.matB, &beta, res.matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, res.dBuffer);
-    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
-    aclRet = aclrtSynchronizeStream(stream);
-    CHECK_RET(aclRet == ACL_SUCCESS,
-              LOG_PRINT("[ERROR] aclsparseSpMM: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
-              return FailVerify());
-    t1 = Clock::now();
-    msSpmm = ElapsedMs(t0, t1);
-
-    t0 = Clock::now();
-    aclRet = aclrtMemcpy(hC.data(), sizeof(float) * m * ldc, dC, sizeof(float) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST);
+    const aclError aclRet = aclrtMemcpy(hC.data(), sizeof(float) * cSpec.elementCount, dC,
+                                        sizeof(float) * cSpec.elementCount, ACL_MEMCPY_DEVICE_TO_HOST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msD2H = ElapsedMs(t0, t1);
@@ -578,6 +782,9 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
     t0 = Clock::now();
     VerifyResult vr = VerifyFloat(hC, hCRef, m, n, ldc, cRowMajor, "FP32",
                           1.0 / (1 << 13), 10.0 / (1 << 13));
+    if (bLdPadding != 0 || cLdPadding != 0) {
+        vr.pass = VerifyFloatPaddingUnchanged(hC, hCRef, cSpec, orderC) && vr.pass;
+    }
     t1 = Clock::now();
     msVerify = ElapsedMs(t0, t1);
 
@@ -608,8 +815,12 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     const bool bRowMajor = (orderB == ACL_SPARSE_ORDER_ROW);
     const bool cRowMajor = (orderC == ACL_SPARSE_ORDER_ROW);
     const bool opBTranspose = (opB == ACL_SPARSE_OP_TRANSPOSE);
-    const int32_t ldb = bRowMajor ? n : k;
-    const int32_t ldc = cRowMajor ? n : m;
+    const int32_t bRows = opBTranspose ? n : k;
+    const int32_t bCols = opBTranspose ? k : n;
+    const DenseStorageSpec bSpec = MakeDenseStorageSpec(bRows, bCols, orderB);
+    const DenseStorageSpec cSpec = MakeDenseStorageSpec(m, n, orderC);
+    const int32_t ldb = bSpec.ld;
+    const int32_t ldc = cSpec.ld;
 
     const char *opBStr = opBTranspose ? "T" : "N";
     const char *obStr = bRowMajor ? "R" : "C";
@@ -617,11 +828,11 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     std::printf("\n====== SPMM FP16 Test [opB=%s, B=%s, C=%s] ======\n", opBStr, obStr, ocStr);
 
     t0 = Clock::now();
-    std::vector<float> hBFp32(static_cast<size_t>(k) * ldb);
+    std::vector<float> hBFp32(bSpec.elementCount);
     for (size_t i = 0; i < hBFp32.size(); ++i) {
         hBFp32[i] = -5.0f + 10.0f * static_cast<float>(i % 10001) / 10000.0f;
     }
-    std::vector<float> hCRefFp32(static_cast<size_t>(m) * ldc, 0.0f);
+    std::vector<float> hCRefFp32(cSpec.elementCount, 0.0f);
     if (beta != 0.0f) {
         for (size_t i = 0; i < hCRefFp32.size(); ++i) {
             hCRefFp32[i] = -5.0f + 10.0f * static_cast<float>(i % 10001) / 10000.0f;
@@ -632,11 +843,11 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     for (int32_t i = 0; i < nnz; ++i) {
         hValsFp16[i] = Fp32ToFp16Bits(hValsFp32[i]);
     }
-    std::vector<uint16_t> hBFp16(static_cast<size_t>(k) * ldb);
+    std::vector<uint16_t> hBFp16(bSpec.elementCount);
     for (size_t i = 0; i < hBFp16.size(); ++i) {
         hBFp16[i] = Fp32ToFp16Bits(hBFp32[i]);
     }
-    std::vector<uint16_t> hCFp16(static_cast<size_t>(m) * ldc);
+    std::vector<uint16_t> hCFp16(cSpec.elementCount);
     for (size_t i = 0; i < hCFp16.size(); ++i) {
         hCFp16[i] = Fp32ToFp16Bits(hCRefFp32[i]);
     }
@@ -648,11 +859,11 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     for (int32_t i = 0; i < nnz; ++i) {
         hValsFp16RoundTrip[i] = Fp16BitsToFp32(hValsFp16[i]);
     }
-    std::vector<float> hBFp16RoundTrip(static_cast<size_t>(k) * ldb);
+    std::vector<float> hBFp16RoundTrip(bSpec.elementCount);
     for (size_t i = 0; i < hBFp16RoundTrip.size(); ++i) {
         hBFp16RoundTrip[i] = Fp16BitsToFp32(hBFp16[i]);
     }
-    std::vector<float> hCRefFp16RoundTrip(static_cast<size_t>(m) * ldc);
+    std::vector<float> hCRefFp16RoundTrip(cSpec.elementCount);
     for (size_t i = 0; i < hCRefFp16RoundTrip.size(); ++i) {
         hCRefFp16RoundTrip[i] = Fp16BitsToFp32(hCFp16[i]);
     }
@@ -682,10 +893,10 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     aclRet = aclrtMalloc(&res.dVals, sizeof(uint16_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dVals = res.dVals;
-    aclRet = aclrtMalloc(&res.dB, sizeof(uint16_t) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST);
+    aclRet = aclrtMalloc(&res.dB, sizeof(uint16_t) * bSpec.elementCount, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dB = res.dB;
-    aclRet = aclrtMalloc(&res.dC, sizeof(uint16_t) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST);
+    aclRet = aclrtMalloc(&res.dC, sizeof(uint16_t) * cSpec.elementCount, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dC = res.dC;
     t1 = Clock::now();
@@ -698,9 +909,11 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     aclRet = aclrtMemcpy(dVals, sizeof(uint16_t) * nnz, hValsFp16.data(), sizeof(uint16_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dB, sizeof(uint16_t) * k * ldb, hBFp16.data(), sizeof(uint16_t) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE);
+    aclRet = aclrtMemcpy(dB, sizeof(uint16_t) * bSpec.elementCount, hBFp16.data(),
+                         sizeof(uint16_t) * bSpec.elementCount, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dC, sizeof(uint16_t) * m * ldc, hCFp16.data(), sizeof(uint16_t) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE);
+    aclRet = aclrtMemcpy(dC, sizeof(uint16_t) * cSpec.elementCount, hCFp16.data(),
+                         sizeof(uint16_t) * cSpec.elementCount, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msH2D = ElapsedMs(t0, t1);
@@ -719,7 +932,7 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
               LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet);
               return FailVerify());
 
-    sparseRet = aclsparseCreateDnMat(&res.matB, k, n, ldb, dB, ACL_FLOAT16, orderB);
+    sparseRet = aclsparseCreateDnMat(&res.matB, bSpec.rows, bSpec.cols, ldb, dB, ACL_FLOAT16, orderB);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     sparseRet = aclsparseCreateDnMat(&res.matC, m, n, ldc, dC, ACL_FLOAT16, orderC);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
@@ -761,13 +974,14 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     msSpmm = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    aclRet = aclrtMemcpy(hCFp16.data(), sizeof(uint16_t) * m * ldc, dC, sizeof(uint16_t) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST);
+    aclRet = aclrtMemcpy(hCFp16.data(), sizeof(uint16_t) * cSpec.elementCount, dC,
+                         sizeof(uint16_t) * cSpec.elementCount, ACL_MEMCPY_DEVICE_TO_HOST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msD2H = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    std::vector<float> hCFp32FromFp16(static_cast<size_t>(m) * ldc);
+    std::vector<float> hCFp32FromFp16(cSpec.elementCount);
     for (size_t i = 0; i < hCFp32FromFp16.size(); ++i) {
         hCFp32FromFp16[i] = Fp16BitsToFp32(hCFp16[i]);
     }
@@ -792,7 +1006,8 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
                             int32_t alpha, int32_t beta,
                             aclsparseOperation_t opB,
                             aclsparseOrder_t orderB,
-                            aclsparseOrder_t orderC)
+                            aclsparseOrder_t orderC,
+                            int8_t fixedInput = 0)
 {
     TimePoint t0, t1;
     double msDataGen = 0, msCpuRef = 0, msDevAlloc = 0, msH2D = 0;
@@ -801,8 +1016,12 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     const bool bRowMajor = (orderB == ACL_SPARSE_ORDER_ROW);
     const bool cRowMajor = (orderC == ACL_SPARSE_ORDER_ROW);
     const bool opBTranspose = (opB == ACL_SPARSE_OP_TRANSPOSE);
-    const int32_t ldb = bRowMajor ? n : k;
-    const int32_t ldc = cRowMajor ? n : m;
+    const int32_t bRows = opBTranspose ? n : k;
+    const int32_t bCols = opBTranspose ? k : n;
+    const DenseStorageSpec bSpec = MakeDenseStorageSpec(bRows, bCols, orderB);
+    const DenseStorageSpec cSpec = MakeDenseStorageSpec(m, n, orderC);
+    const int32_t ldb = bSpec.ld;
+    const int32_t ldc = cSpec.ld;
 
     const char *opBStr = opBTranspose ? "T" : "N";
     const char *obStr = bRowMajor ? "R" : "C";
@@ -812,16 +1031,17 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     t0 = Clock::now();
     std::vector<int8_t> hValsInt8(static_cast<size_t>(nnz));
     for (int32_t i = 0; i < nnz; ++i) {
-        hValsInt8[i] = static_cast<int8_t>((i % 11) - 5);
+        hValsInt8[i] = (fixedInput == 0) ? static_cast<int8_t>((i % 11) - 5) : fixedInput;
     }
-    std::vector<int8_t> hBInt8(static_cast<size_t>(k) * ldb);
+    std::vector<int8_t> hBInt8(bSpec.elementCount);
     for (size_t i = 0; i < hBInt8.size(); ++i) {
-        hBInt8[i] = static_cast<int8_t>((i % 11) - 5);
+        hBInt8[i] = (fixedInput == 0) ? static_cast<int8_t>((i % 11) - 5) : fixedInput;
     }
-    std::vector<int32_t> hCInt32(static_cast<size_t>(m) * ldc, 0);
+    std::vector<int32_t> hCInt32(cSpec.elementCount, 0);
     if (beta != 0) {
         for (size_t i = 0; i < hCInt32.size(); ++i) {
-            hCInt32[i] = static_cast<int32_t>((i % 11) - 5);
+            hCInt32[i] = (fixedInput == 0) ? static_cast<int32_t>((i % 11) - 5)
+                                           : static_cast<int32_t>(fixedInput);
         }
     }
     std::vector<int32_t> hCRefInt32(hCInt32);
@@ -843,16 +1063,20 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     aclError aclRet = aclrtMalloc((void **)&res.dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dRowOff = static_cast<int32_t *>(res.dRowOff);
-    aclRet = aclrtMalloc((void **)&res.dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    aclRet = aclrtMalloc((void **)&res.dColInd,
+                         sizeof(int32_t) * static_cast<size_t>(std::max(1, nnz)),
+                         ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dColInd = static_cast<int32_t *>(res.dColInd);
-    aclRet = aclrtMalloc((void **)&res.dVals, sizeof(int8_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    aclRet = aclrtMalloc((void **)&res.dVals,
+                         sizeof(int8_t) * static_cast<size_t>(std::max(1, nnz)),
+                         ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dVals = static_cast<int8_t *>(res.dVals);
-    aclRet = aclrtMalloc((void **)&res.dB, sizeof(int8_t) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST);
+    aclRet = aclrtMalloc((void **)&res.dB, sizeof(int8_t) * bSpec.elementCount, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dB = static_cast<int8_t *>(res.dB);
-    aclRet = aclrtMalloc((void **)&res.dC, sizeof(int32_t) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST);
+    aclRet = aclrtMalloc((void **)&res.dC, sizeof(int32_t) * cSpec.elementCount, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     dC = static_cast<int32_t *>(res.dC);
     t1 = Clock::now();
@@ -861,13 +1085,17 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     t0 = Clock::now();
     aclRet = aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(), sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    if (nnz > 0) {
+        aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+        aclRet = aclrtMemcpy(dVals, sizeof(int8_t) * nnz, hValsInt8.data(), sizeof(int8_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    }
+    aclRet = aclrtMemcpy(dB, sizeof(int8_t) * bSpec.elementCount, hBInt8.data(),
+                         sizeof(int8_t) * bSpec.elementCount, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dVals, sizeof(int8_t) * nnz, hValsInt8.data(), sizeof(int8_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dB, sizeof(int8_t) * k * ldb, hBInt8.data(), sizeof(int8_t) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
-    aclRet = aclrtMemcpy(dC, sizeof(int32_t) * m * ldc, hCInt32.data(), sizeof(int32_t) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE);
+    aclRet = aclrtMemcpy(dC, sizeof(int32_t) * cSpec.elementCount, hCInt32.data(),
+                         sizeof(int32_t) * cSpec.elementCount, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msH2D = ElapsedMs(t0, t1);
@@ -886,7 +1114,7 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
               LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet);
               return FailVerify());
 
-    sparseRet = aclsparseCreateDnMat(&res.matB, k, n, ldb, dB, ACL_INT8, orderB);
+    sparseRet = aclsparseCreateDnMat(&res.matB, bSpec.rows, bSpec.cols, ldb, dB, ACL_INT8, orderB);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     sparseRet = aclsparseCreateDnMat(&res.matC, m, n, ldc, dC, ACL_INT32, orderC);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
@@ -928,7 +1156,8 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     msSpmm = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    aclRet = aclrtMemcpy(hCInt32.data(), sizeof(int32_t) * m * ldc, dC, sizeof(int32_t) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST);
+    aclRet = aclrtMemcpy(hCInt32.data(), sizeof(int32_t) * cSpec.elementCount, dC,
+                         sizeof(int32_t) * cSpec.elementCount, ACL_MEMCPY_DEVICE_TO_HOST);
     CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msD2H = ElapsedMs(t0, t1);
@@ -951,42 +1180,130 @@ struct SpmmFp32CaseConfig {
     int32_t m;
     int32_t k;
     int32_t n;
-    int32_t nnzTarget; // 0 -> m * k / 10
+    int32_t nnzTarget; // 0 -> m * k / 10, negative -> empty CSR
     float alpha;
     float beta;
     aclsparseOperation_t opB;
     aclsparseOrder_t orderB;
     aclsparseOrder_t orderC;
+    int32_t bLdPadding;
+    int32_t cLdPadding;
     unsigned seed;
+    bool usePreprocess = true;
+    bool deviceScalars = false;
+    int32_t indexBase = 0;
+    int32_t repeatCount = 1;
+    bool skewedRows = false;
+    aclsparseSpMMAlg_t alg = ACL_SPARSE_SPMM_CSR_ALG1;
 };
 
 static bool RunOneFp32Case(int32_t deviceId, aclrtStream stream, const SpmmFp32CaseConfig &cfg)
 {
     std::srand(cfg.seed);
-    const int32_t nnzTarget = (cfg.nnzTarget > 0) ? cfg.nnzTarget : cfg.m * cfg.k / 10;
+    const int32_t nnzTarget = (cfg.nnzTarget < 0) ? 0 :
+        ((cfg.nnzTarget > 0) ? cfg.nnzTarget : cfg.m * cfg.k / 10);
     std::vector<int32_t> hRowOff;
     std::vector<int32_t> hColInd;
     std::vector<float> hValsFp32;
-    GenerateRandomCsr(cfg.m, cfg.k, nnzTarget, &hRowOff, &hColInd, &hValsFp32);
-    const int32_t actualNnz = hRowOff.back();
+    if (cfg.skewedRows) {
+        GenerateSkewedCsr(cfg.m, cfg.k, nnzTarget, &hRowOff, &hColInd, &hValsFp32);
+    } else {
+        GenerateRandomCsr(cfg.m, cfg.k, nnzTarget, &hRowOff, &hColInd, &hValsFp32);
+    }
+    if (cfg.indexBase == 1) {
+        for (auto &v : hRowOff) { ++v; }
+        for (auto &v : hColInd) { ++v; }
+    }
+    const int32_t actualNnz = hRowOff.back() - cfg.indexBase;
     std::printf("\n--- FP32 case: %s (m=%d k=%d n=%d nnz=%d) ---\n",
                 cfg.name, cfg.m, cfg.k, cfg.n, actualNnz);
     VerifyResult r = RunSpmmTestFp32(deviceId, stream, cfg.m, cfg.k, cfg.n, actualNnz,
-        hRowOff, hColInd, hValsFp32, cfg.alpha, cfg.beta, cfg.opB, cfg.orderB, cfg.orderC);
+        hRowOff, hColInd, hValsFp32, cfg.alpha, cfg.beta, cfg.opB, cfg.orderB, cfg.orderC,
+        cfg.bLdPadding, cfg.cLdPadding, cfg.usePreprocess, cfg.deviceScalars,
+        cfg.indexBase, cfg.repeatCount, cfg.alg);
     std::printf("  [%s] %s\n", cfg.name, r.pass ? "PASS" : "FAIL");
     return r.pass;
 }
 
-// ============================================================================
-// Zero-dim guard cases: m/k/n 任一为 0 时 ValidateSpmmInputs 应返回
-// INVALID_VALUE（维度匹配对 0==0 放行，由零维守卫 matA->rows/cols、
-// matC->cols 拒绝）。仅调 GetBufferSize，不执行 kernel。
-// 维度关系: A m×k CSR, B k×n DnMat (ROW), C m×n DnMat (ROW)
-//   AclsparseValidateSpmmCommon 维度匹配: A.cols==B.rows(k), A.rows==C.rows(m), B.cols==C.cols(n)
-// 描述符层约束: aclsparseCreateDnMat 放行 0 维（ld>0、ROW 序 ld>=cols、
-// values 非空）；aclsparseCreateCsr 放行 nnz=0（colInd/values 可 null，
-// rowOffsets 非空以满足校验要求）。
-// ============================================================================
+static void ExpectParameterStatus(const char *name, aclsparseStatus_t got,
+                                  aclsparseStatus_t wanted, bool *pass)
+{
+    const bool ok = got == wanted;
+    std::printf("[PARAM] %s: got=%d expected=%d %s\n",
+                name, got, wanted, ok ? "PASS" : "FAIL");
+    *pass = *pass && ok;
+}
+
+static void CheckBufferSizeParameters(aclsparseHandle_t handle,
+                                      const float &scalar, size_t *size,
+                                      bool *pass)
+{
+    ExpectParameterStatus("null_handle",
+           aclsparseSpMMGetBufferSize(nullptr, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                       ACL_SPARSE_OP_NON_TRANSPOSE,
+                                       &scalar, nullptr, nullptr, &scalar,
+                                       nullptr, ACL_FLOAT,
+                                       ACL_SPARSE_SPMM_CSR_ALG1, size),
+           ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR, pass);
+    ExpectParameterStatus("null_size",
+           aclsparseSpMMGetBufferSize(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                      ACL_SPARSE_OP_NON_TRANSPOSE,
+                                      &scalar, nullptr, nullptr, &scalar,
+                                      nullptr, ACL_FLOAT,
+                                      ACL_SPARSE_SPMM_CSR_ALG1, nullptr),
+           ACL_SPARSE_STATUS_INVALID_VALUE, pass);
+    ExpectParameterStatus("null_alpha",
+           aclsparseSpMMGetBufferSize(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                      ACL_SPARSE_OP_NON_TRANSPOSE,
+                                      nullptr, nullptr, nullptr, &scalar,
+                                      nullptr, ACL_FLOAT,
+                                      ACL_SPARSE_SPMM_CSR_ALG1, size),
+           ACL_SPARSE_STATUS_INVALID_VALUE, pass);
+    ExpectParameterStatus("null_beta",
+           aclsparseSpMMGetBufferSize(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                      ACL_SPARSE_OP_NON_TRANSPOSE,
+                                      &scalar, nullptr, nullptr, nullptr,
+                                      nullptr, ACL_FLOAT,
+                                      ACL_SPARSE_SPMM_CSR_ALG1, size),
+           ACL_SPARSE_STATUS_INVALID_VALUE, pass);
+}
+
+static void CheckExecutionParameters(aclsparseHandle_t handle,
+                                     const float &scalar, bool *pass)
+{
+    ExpectParameterStatus("preprocess_null_alpha",
+           aclsparseSpMMPreprocess(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                   ACL_SPARSE_OP_NON_TRANSPOSE, nullptr,
+                                   nullptr, nullptr, &scalar, nullptr,
+                                   ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1,
+                                   nullptr),
+           ACL_SPARSE_STATUS_INVALID_VALUE, pass);
+    ExpectParameterStatus("spmm_null_beta",
+           aclsparseSpMM(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+                         ACL_SPARSE_OP_NON_TRANSPOSE, &scalar, nullptr,
+                         nullptr, nullptr, nullptr, ACL_FLOAT,
+                         ACL_SPARSE_SPMM_CSR_ALG1, nullptr),
+           ACL_SPARSE_STATUS_INVALID_VALUE, pass);
+}
+
+static bool RunSpmmParameterValidationTests()
+{
+    aclsparseHandle_t handle = nullptr;
+    if (aclsparseCreate(&handle) != ACL_SPARSE_STATUS_SUCCESS) {
+        std::printf("[PARAM] aclsparseCreate failed FAIL\n");
+        return false;
+    }
+    const float scalar = 1.0f;
+    size_t size = 0;
+    bool pass = true;
+    CheckBufferSizeParameters(handle, scalar, &size, &pass);
+    CheckExecutionParameters(handle, scalar, &pass);
+    aclsparseDestroy(handle);
+    std::printf("[PARAM] Overall: %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// Zero dimensions are rejected by Host validation before launching a kernel.
 static bool RunSpmmZeroDimCase(aclrtStream stream, const char *name,
                                int32_t m, int32_t k, int32_t n)
 {
@@ -1046,39 +1363,68 @@ static bool RunSpmmZeroDimCase(aclrtStream stream, const char *name,
     return pass;
 }
 
-int main()
+static const SpmmFp32CaseConfig kFp32Cases[] = {
+    {"N_Brow_Crow", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 42u},
+    {"N_Brow_Ccol", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL, 0, 0, 43u},
+    {"N_Bcol_Crow", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_ROW, 0, 0, 44u},
+    {"N_Bcol_Ccol", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_COL, 0, 0, 45u},
+    {"T_Brow_Crow", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 46u},
+    {"T_Brow_Ccol", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL, 0, 0, 47u},
+    {"T_Bcol_Crow", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_ROW, 0, 0, 48u},
+    {"T_Bcol_Ccol", 37, 23, 11, 170, 1.0f, 0.0f,
+        ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_COL, 0, 0, 49u},
+    {"T_padded_ld_beta", 41, 29, 13, 205, -0.75f, 0.5f,
+        ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_ROW, 3, 5, 50u},
+    {"small_non_square", 7, 5, 3, 14, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 51u},
+    {"legacy_baseline_row_N_beta0", 256, 256, 64, 0, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 42u},
+    {"legacy_opB_transpose", 256, 256, 64, 0, 1.0f, 0.0f,
+        ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 43u},
+    {"legacy_B_C_col_major", 256, 256, 64, 0, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_COL, 0, 0, 44u},
+    {"legacy_beta_nonzero", 256, 256, 64, 0, 1.0f, 0.5f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 45u},
+    {"legacy_small_shape", 32, 32, 16, 80, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 46u},
+    {"device_scalars_without_preprocess", 19, 13, 7, 61, -1.25f, 0.75f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_ROW, 2, 3, 52u,
+        false, true},
+    {"one_based_csr", 17, 11, 5, 44, 0.5f, -0.25f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL, 0, 0, 53u,
+        true, false, 1},
+    {"alpha_zero_beta_zero_empty_csr", 3, 4, 2, -1, 0.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 54u},
+    {"alpha_zero_beta_one", 9, 7, 3, 18, 0.0f, 1.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_COL, 1, 2, 55u},
+    {"empty_csr_beta", 5, 6, 4, -1, 0.0f, 0.5f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_ROW, 0, 0, 56u,
+        false, false, 0, 2},
+    {"preprocess_workspace_reuse", 23, 17, 9, 82, 0.75f, -0.25f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL, 2, 3, 57u,
+        true, false, 0, 3},
+    {"unit_shape", 1, 1, 1, 1, 1.0f, 0.5f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 58u},
+    {"skewed_row_lengths", 16, 64, 7, 79, -0.5f, 0.25f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL, 1, 2, 59u,
+        true, false, 0, 1, true},
+    {"csr_alg2_row_major", 31, 37, 16, 173, 1.0f, 1.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 60u,
+        true, false, 0, 2, false, ACL_SPARSE_SPMM_CSR_ALG2},
+    {"csr_alg3_deterministic", 31, 37, 16, 173, 1.0f, 0.0f,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 0, 0, 61u,
+        true, false, 0, 3, false, ACL_SPARSE_SPMM_CSR_ALG3},
+};
+
+static bool RunBaselineTypeCases(int32_t deviceId, aclrtStream stream)
 {
-    int32_t deviceId = 0;
-    aclrtStream stream = nullptr;
-    int ret = Init(deviceId, &stream);
-    CHECK_RET(ret == ACL_SUCCESS, return EXIT_FAILURE);
-
-    static const SpmmFp32CaseConfig kFp32Cases[] = {
-        {"baseline_row_N_beta0", 256, 256, 64, 0, 1.0f, 0.0f,
-            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 42u},
-        {"opB_transpose", 256, 256, 64, 0, 1.0f, 0.0f,
-            ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 43u},
-        {"B_C_col_major", 256, 256, 64, 0, 1.0f, 0.0f,
-            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_COL, 44u},
-        {"beta_nonzero", 256, 256, 64, 0, 1.0f, 0.5f,
-            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 45u},
-        {"small_shape", 32, 32, 16, 80, 1.0f, 0.0f,
-            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 46u},
-    };
-
-    std::printf("\n========== SPMM FP32 cases (%zu configs) ==========\n", sizeof(kFp32Cases) / sizeof(kFp32Cases[0]));
-    bool allFp32Pass = true;
-    for (const auto &cfg : kFp32Cases) {
-        allFp32Pass = RunOneFp32Case(deviceId, stream, cfg) && allFp32Pass;
-    }
-
-    std::printf("\n========== SPMM zero-dim guard cases ==========\n");
-    bool allZeroDimPass = true;
-    allZeroDimPass = RunSpmmZeroDimCase(stream, "zero_dim_m0", 0, 16, 8) && allZeroDimPass;
-    allZeroDimPass = RunSpmmZeroDimCase(stream, "zero_dim_k0", 8, 0, 8) && allZeroDimPass;
-    allZeroDimPass = RunSpmmZeroDimCase(stream, "zero_dim_n0", 8, 16, 0) && allZeroDimPass;
-    std::printf("  ZeroDim: %s\n", allZeroDimPass ? "PASS" : "FAIL");
-
     // One functional case per remaining dtype (FP16 / INT8), baseline layout
     constexpr int32_t kM = 256;
     constexpr int32_t kK = 256;
@@ -1104,17 +1450,72 @@ int main()
     VerifyResult rInt8 = RunSpmmTestInt8(deviceId, stream, kM, kK, kN, actualNnz,
         hRowOff, hColInd, 1, 0, opB, orderB, orderC);
 
-    std::printf("\n========== Results ==========\n");
-    std::printf("  FP32 (%zu cases): %s\n", sizeof(kFp32Cases) / sizeof(kFp32Cases[0]),
-                allFp32Pass ? "PASS" : "FAIL");
-    std::printf("  ZeroDim (3 cases): %s\n", allZeroDimPass ? "PASS" : "FAIL");
-    std::printf("  FP16: %s  INT8: %s\n",
-                rFp16.pass ? "PASS" : "FAIL",
-                rInt8.pass ? "PASS" : "FAIL");
+    // Exact scalar and saturation boundaries for the INT8 -> INT32 path.
+    std::vector<int32_t> hSmallRowOff{0, 1};
+    std::vector<int32_t> hSmallColInd{0};
+    VerifyResult rInt8LargeScalar = RunSpmmTestInt8(
+        deviceId, stream, 1, 1, 1, 1, hSmallRowOff, hSmallColInd,
+        16777217, 0, opB, orderB, orderC, 1);
 
-    bool allPass = allFp32Pass && allZeroDimPass && rFp16.pass && rInt8.pass;
-    std::printf("  Overall: %s\n", allPass ? "PASS" : "FAIL");
+    std::srand(58);
+    std::vector<int32_t> hSaturateRowOff;
+    std::vector<int32_t> hSaturateColInd;
+    std::vector<float> hUnusedVals;
+    GenerateRandomCsr(1, 256, 256, &hSaturateRowOff, &hSaturateColInd, &hUnusedVals);
+    VerifyResult rInt8Saturation = RunSpmmTestInt8(
+        deviceId, stream, 1, 256, 1, 256, hSaturateRowOff, hSaturateColInd,
+        2147483647, 0, opB, orderB, orderC, 127);
 
-    Finalize(deviceId, stream);
-    return allPass ? EXIT_SUCCESS : EXIT_FAILURE;
+    return rFp16.pass && rInt8.pass && rInt8LargeScalar.pass && rInt8Saturation.pass;
+}
+
+namespace {
+
+class SpmmEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override
+    {
+        ASSERT_EQ(aclInit(nullptr), ACL_SUCCESS);
+        ASSERT_EQ(aclrtSetDevice(0), ACL_SUCCESS);
+    }
+
+    void TearDown() override
+    {
+        EXPECT_EQ(aclrtResetDevice(0), ACL_SUCCESS);
+        EXPECT_EQ(aclFinalize(), ACL_SUCCESS);
+    }
+};
+
+::testing::Environment *const kSpmmEnvironment =
+    ::testing::AddGlobalTestEnvironment(new SpmmEnvironment);
+
+} // namespace
+
+using spmm_test::SpmmDeviceTest;
+
+class Fp32SpmmTest : public SpmmDeviceTest,
+                     public ::testing::WithParamInterface<SpmmFp32CaseConfig> {};
+
+TEST_P(Fp32SpmmTest, MatchesGolden)
+{
+    ASSERT_TRUE(RunOneFp32Case(0, stream_, GetParam()));
+}
+
+INSTANTIATE_TEST_SUITE_P(LayoutsAndScalars, Fp32SpmmTest, ::testing::ValuesIn(kFp32Cases));
+
+TEST_F(SpmmDeviceTest, ParameterValidation)
+{
+    ASSERT_TRUE(RunSpmmParameterValidationTests());
+}
+
+TEST_F(SpmmDeviceTest, NativeZeroDimensions)
+{
+    EXPECT_TRUE(RunSpmmZeroDimCase(stream_, "zero_dim_m0", 0, 16, 8));
+    EXPECT_TRUE(RunSpmmZeroDimCase(stream_, "zero_dim_k0", 8, 0, 8));
+    EXPECT_TRUE(RunSpmmZeroDimCase(stream_, "zero_dim_n0", 8, 16, 0));
+}
+
+TEST_F(SpmmDeviceTest, BaselineFp16AndInt8)
+{
+    ASSERT_TRUE(RunBaselineTypeCases(0, stream_));
 }
