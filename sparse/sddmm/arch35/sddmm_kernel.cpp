@@ -17,7 +17,7 @@
 //   FP16: X(fp16) * Y(fp16) -> C(fp16),  ScalarT=float  (accumulate in fp32)
 //
 // Pattern: __global__ kernel (SIMD) + TPipe/TBuf/LocalTensor + low-level AscendC API.
-// Launch:  sddmm_custom_fp32/fp16<<<blockDim, l2ctrl, stream>>>(GM tensors, workspaceGM, tilingGM)
+// Launch:  sddmm_custom_fp32/fp16<<<blockDim, l2ctrl, stream>>>(GM tensors, workspaceGM, tiling)
 //
 // For each nonzero element p (row i, col j=colInd[p]) of the CSR matrix C:
 //   result = alpha * (X[i,:] . Y[j,:]) + beta * C_values[p]
@@ -42,30 +42,41 @@ using namespace AscendC;
 
 namespace {
 
-constexpr int32_t kReduceTmpBytes = 32 * 1024;  // 32KB ReduceSum temp buffer
 constexpr float kFp16Max = 65504.0f;
-constexpr int32_t kStridedChunk = 1024; // strided DataCopyPad batch chunk size (elements)
-constexpr int32_t kStridedElemBytes = 32; // per-element byte stride in stridedBuf (32B padding)
+using SddmmBudget::kReduceTmpBytes;
+using SddmmBudget::kStridedChunk;
+using SddmmBudget::kStridedElemBytes;
 
-__aicore__ inline SddmmTilingData LoadSddmmTilingData(GM_ADDR tilingGM)
+template <typename T>
+__aicore__ inline void LoadSddmmDeviceScalars(SddmmTilingData& td, TPipe& pipe)
 {
-    __gm__ SddmmTilingData *gmTiling = reinterpret_cast<__gm__ SddmmTilingData *>(tilingGM);
-    SddmmTilingData td;
-    td.m   = gmTiling->m;
-    td.n   = gmTiling->n;
-    td.k   = gmTiling->k;
-    td.ldx = gmTiling->ldx;
-    td.ldy = gmTiling->ldy;
-    td.kTile = gmTiling->kTile;
-    td.nTile = gmTiling->nTile;
-    td.reorderOffset  = gmTiling->reorderOffset;
-    td.binEdgeOffset = gmTiling->binEdgeOffset;
-    td.opX = gmTiling->opX;
-    td.opY = gmTiling->opY;
-    td.orderPair = gmTiling->orderPair;
-    td.dataType = gmTiling->dataType;
-    td.alphaHost = gmTiling->alphaHost;
-    td.betaHost = gmTiling->betaHost;
+    TBuf<TPosition::VECIN> buffer;
+    constexpr uint32_t slot = SddmmBudget::kScalarSlotBytes;
+    pipe.InitBuffer(buffer, 2 * slot);
+    auto local = buffer.Get<T>();
+    GlobalTensor<T> alpha, beta;
+    alpha.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(td.alphaDevice), 1);
+    beta.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(td.betaDevice), 1);
+    const DataCopyExtParams copy{1, sizeof(T), 0, 0, 0};
+    const DataCopyPadExtParams<T> pad{false, 0, 0, 0};
+    DataCopyPad(local, alpha, copy, pad);
+    DataCopyPad(local[slot / sizeof(T)], beta, copy, pad);
+    const auto event = static_cast<event_t>(pipe.FetchEventID(HardEvent::MTE2_S));
+    SetFlag<HardEvent::MTE2_S>(event);
+    WaitFlag<HardEvent::MTE2_S>(event);
+    td.alphaHost = static_cast<float>(local.GetValue(0));
+    td.betaHost = static_cast<float>(local.GetValue(slot / sizeof(T)));
+}
+
+__aicore__ inline SddmmTilingData LoadSddmmTilingData(SddmmTilingData td, TPipe& pipe)
+{
+    if (td.alphaDevice != 0) {
+        if (td.scalarType == SDDMM_DTYPE_FP16) {
+            LoadSddmmDeviceScalars<half>(td, pipe);
+        } else {
+            LoadSddmmDeviceScalars<float>(td, pipe);
+        }
+    }
     return td;
 }
 
@@ -78,28 +89,24 @@ __aicore__ inline SddmmTilingData LoadSddmmTilingData(GM_ADDR tilingGM)
 // SIMD model: each __global__ kernel instance runs on one AIV core.
 // No thread-level parallelism; sequential traversal of CSR rows and nonzeros.
 // ============================================================================
-template<typename ValT, typename ScalarT>
+template <typename ValT, typename ScalarT>
 class KernelSddmmSimd {
     static constexpr bool kIsFp16 = std::is_same_v<ValT, half>;
 
 public:
     __aicore__ inline KernelSddmmSimd() {}
 
-    __aicore__ inline void Init(
-        GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
-        GM_ADDR matX, GM_ADDR matY,
-        GM_ADDR workspaceGM, GM_ADDR tilingGM, TPipe *pipe)
+    __aicore__ inline void Init(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues, GM_ADDR matX, GM_ADDR matY,
+                                GM_ADDR workspaceGM, SddmmTilingData tiling, TPipe* pipe)
     {
         pipe_ = pipe;
-        td_ = LoadSddmmTilingData(tilingGM);
+        td_ = LoadSddmmTilingData(tiling, *pipe);
 
         // Raw __gm__ pointers for scalar index reads (rowOff, reorder, binEdge)
-        rowOffRaw_ = reinterpret_cast<__gm__ int32_t *>(csrRowOffsets);
-        wsBase_ = reinterpret_cast<__gm__ uint8_t *>(workspaceGM);
-        reorderRaw_ = reinterpret_cast<__gm__ int32_t *>(
-            wsBase_ + static_cast<uint64_t>(td_.reorderOffset));
-        binEdgeRaw_ = reinterpret_cast<__gm__ int32_t *>(
-            wsBase_ + static_cast<uint64_t>(td_.binEdgeOffset));
+        rowOffRaw_ = reinterpret_cast<__gm__ int32_t*>(csrRowOffsets);
+        wsBase_ = reinterpret_cast<__gm__ uint8_t*>(workspaceGM);
+        reorderRaw_ = reinterpret_cast<__gm__ int32_t*>(wsBase_ + static_cast<uint64_t>(td_.reorderOffset));
+        binEdgeRaw_ = reinterpret_cast<__gm__ int32_t*>(wsBase_ + static_cast<uint64_t>(td_.binEdgeOffset));
 
         // Compute nnz from rowOff[m]
         int32_t nnz = rowOffRaw_[td_.m];
@@ -131,7 +138,7 @@ public:
         pipe_->InitBuffer(yQue_, 2, kTileBytes);
         pipe_->InitBuffer(mulBuf_, kTileFp32Bytes);
         pipe_->InitBuffer(reduceTmpBuf_, static_cast<uint32_t>(kReduceTmpBytes));
-        pipe_->InitBuffer(dotTmpBuf_, 32U);  // 1 float, 32B aligned
+        pipe_->InitBuffer(dotTmpBuf_, 32U); // 1 float, 32B aligned
 
         // Strided GM->UB optimization buffers (always allocated, see design §2.2)
         pipe_->InitBuffer(stridedBuf_, static_cast<uint32_t>(kStridedChunk * kStridedElemBytes));
@@ -155,23 +162,22 @@ public:
     // Set up GlobalTensor buffers for DataCopyPad sources. Sizing follows the
     // actual access pattern (contiguous vs strided) so the dominant dimension
     // (m or k) is covered; under-sizing causes out-of-bounds GM access.
-    __aicore__ inline void InitGlobalTensors(GM_ADDR csrColInd, GM_ADDR csrValues,
-                                              GM_ADDR matX, GM_ADDR matY, int32_t nnz)
+    __aicore__ inline void InitGlobalTensors(GM_ADDR csrColInd, GM_ADDR csrValues, GM_ADDR matX, GM_ADDR matY,
+                                             int32_t nnz)
     {
-        colIndGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(csrColInd),
-                                   static_cast<uint64_t>(nnz > 0 ? nnz : 1));
-        csrValuesGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ValT *>(csrValues),
-                                      static_cast<uint64_t>(nnz > 0 ? nnz : 1));
+        colIndGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(csrColInd),
+                                  static_cast<uint64_t>(nnz > 0 ? nnz : 1));
+        csrValuesGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ValT*>(csrValues),
+                                     static_cast<uint64_t>(nnz > 0 ? nnz : 1));
 
         // X buffer size must cover the actual access pattern:
         //   contiguous (X[row*ldx+kk]): spans m rows of length ldx -> m*ldx
         //   strided (X[kk*ldx+row]): spans k rows of length ldx -> k*ldx
         // Using m*ldx for strided under-sizes the buffer when k>m and causes
         // out-of-bounds GM access. Size by the dominant dimension.
-        const uint64_t xElemCount = xContiguous_
-            ? static_cast<uint64_t>(td_.m) * static_cast<uint64_t>(td_.ldx)
-            : static_cast<uint64_t>(td_.k) * static_cast<uint64_t>(td_.ldx);
-        matXGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ValT *>(matX), xElemCount);
+        const uint64_t xElemCount = xContiguous_ ? static_cast<uint64_t>(td_.m) * static_cast<uint64_t>(td_.ldx) :
+                                                   static_cast<uint64_t>(td_.k) * static_cast<uint64_t>(td_.ldx);
+        matXGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ValT*>(matX), xElemCount);
 
         // Y buffer size must cover the actual access pattern:
         //   contiguous (NON_TRANSPOSE+colMajor or TRANSPOSE+rowMajor): Y[col*ldy+kk]
@@ -180,10 +186,9 @@ public:
         //       -> spans k rows of length ldy -> k*ldy
         // Using n*ldy for strided access under-sizes the buffer when k>n.
         const bool yContiguous = (opY_ == 0) ? (!yRowMajor_) : yRowMajor_;
-        const uint64_t yElemCount = yContiguous
-            ? static_cast<uint64_t>(td_.n) * static_cast<uint64_t>(td_.ldy)
-            : static_cast<uint64_t>(td_.k) * static_cast<uint64_t>(td_.ldy);
-        matYGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ValT *>(matY), yElemCount);
+        const uint64_t yElemCount = yContiguous ? static_cast<uint64_t>(td_.n) * static_cast<uint64_t>(td_.ldy) :
+                                                  static_cast<uint64_t>(td_.k) * static_cast<uint64_t>(td_.ldy);
+        matYGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ValT*>(matY), yElemCount);
     }
 
     __aicore__ inline void Process()
@@ -225,9 +230,8 @@ public:
     }
 
 private:
-    __aicore__ inline void ProcessBatch(
-        int32_t row, int32_t pStart, int32_t batchSize,
-        ScalarT alpha, ScalarT beta, bool betaZero)
+    __aicore__ inline void ProcessBatch(int32_t row, int32_t pStart, int32_t batchSize, ScalarT alpha, ScalarT beta,
+                                        bool betaZero)
     {
         auto accBuf = accBuf_.Get<float>();
         auto colIndBuf = colIndBuf_.Get<int32_t>();
@@ -256,8 +260,8 @@ private:
 
     // Prefetch next Y fragment for double-buffering. Handles both intra-tile
     // (next j within same K-tile) and cross-tile (first j of next K-tile) cases.
-    __aicore__ inline void PrefetchNextY(LocalTensor<int32_t> &colIndBuf, int32_t j,
-                                          int32_t batchSize, int32_t kBase, int32_t actualKTile)
+    __aicore__ inline void PrefetchNextY(LocalTensor<int32_t>& colIndBuf, int32_t j, int32_t batchSize, int32_t kBase,
+                                         int32_t actualKTile)
     {
         const int32_t nextJ = j + 1;
         const bool hasMoreY = (nextJ < batchSize) || (kBase + kTile_ < k_);
@@ -284,8 +288,8 @@ private:
 
     // Element-wise multiply for one K-tile: FP16 path casts to FP32 before Mul;
     // FP32 path multiplies directly.
-    __aicore__ inline void ComputeMulStep(LocalTensor<ValT> &xIn, LocalTensor<ValT> &yIn,
-                                           LocalTensor<float> &mulBuf, int32_t actualKTile)
+    __aicore__ inline void ComputeMulStep(LocalTensor<ValT>& xIn, LocalTensor<ValT>& yIn, LocalTensor<float>& mulBuf,
+                                          int32_t actualKTile)
     {
         if constexpr (kIsFp16) {
             auto yFp32Buf = yFp32Buf_.Get<float>();
@@ -316,9 +320,8 @@ private:
     // X is double-buffered at K-tile level: prefetch X[k+1] overlaps with
     // j-loop computation of X[k]. Y is double-buffered at j level: prefetch
     // Y[k,j+1] overlaps with Mul/ReduceSum of Y[k,j].
-    __aicore__ inline void ProcessDotProduct(int32_t row, int32_t batchSize,
-                                              LocalTensor<float> &accBuf,
-                                              LocalTensor<int32_t> &colIndBuf)
+    __aicore__ inline void ProcessDotProduct(int32_t row, int32_t batchSize, LocalTensor<float>& accBuf,
+                                             LocalTensor<int32_t>& colIndBuf)
     {
         if (k_ <= 0) {
             return;
@@ -383,10 +386,8 @@ private:
     }
 
     // alpha/beta scaling: result = alpha * acc + (beta != 0 ? beta * C : 0)
-    __aicore__ inline void ProcessScaling(int32_t pStart, int32_t batchSize,
-                                           ScalarT alpha, ScalarT beta, bool betaZero,
-                                           LocalTensor<float> &accBuf,
-                                           LocalTensor<float> &resultBuf)
+    __aicore__ inline void ProcessScaling(int32_t pStart, int32_t batchSize, ScalarT alpha, ScalarT beta, bool betaZero,
+                                          LocalTensor<float>& accBuf, LocalTensor<float>& resultBuf)
     {
         // Batch scaling: result = alpha * acc
         Muls<float>(resultBuf, accBuf, alpha, batchSize);
@@ -422,8 +423,7 @@ private:
     }
 
     // FP16 saturation + Cast + writeback (FP16) or direct writeback (FP32).
-    __aicore__ inline void ProcessWriteback(int32_t pStart, int32_t batchSize,
-                                             LocalTensor<float> &resultBuf)
+    __aicore__ inline void ProcessWriteback(int32_t pStart, int32_t batchSize, LocalTensor<float>& resultBuf)
     {
         if constexpr (kIsFp16) {
             auto outBuf = outBuf_.Get<half>();
@@ -463,9 +463,8 @@ private:
     // Strided GM->UB load helper: DataCopyPad strided into stridedBuf (each element
     // padded to 32B), then Gather compactly into dst. Shared by X/Y strided paths.
     // gmBase: GM source base element index; elemStride: element stride (ldx/ldy).
-    __aicore__ inline void StridedLoadGather(LocalTensor<ValT> &dst, int32_t dstOffset,
-                                              const GlobalTensor<ValT> &gm, uint64_t gmBase,
-                                              int32_t elemStride, int32_t count)
+    __aicore__ inline void StridedLoadGather(LocalTensor<ValT>& dst, int32_t dstOffset, const GlobalTensor<ValT>& gm,
+                                             uint64_t gmBase, int32_t elemStride, int32_t count)
     {
         auto stridedBuf = stridedBuf_.Get<ValT>();
         auto offsetInt = offsetBuf_.Get<int32_t>();
@@ -475,8 +474,8 @@ private:
             const int32_t cEnd = (cBase + kStridedChunk < count) ? (cBase + kStridedChunk) : count;
             const int32_t cSize = cEnd - cBase;
             uint64_t chunkGmBase = gmBase + static_cast<uint64_t>(cBase) * static_cast<uint64_t>(elemStride);
-            DataCopyExtParams cp{static_cast<uint16_t>(cSize), static_cast<uint32_t>(sizeof(ValT)),
-                                  srcStrideBytes, 0, 0};
+            DataCopyExtParams cp{static_cast<uint16_t>(cSize), static_cast<uint32_t>(sizeof(ValT)), srcStrideBytes, 0,
+                                 0};
             DataCopyPadExtParams<ValT> pad{false, 0, 0, 0};
             DataCopyPad(stridedBuf, gm[chunkGmBase], cp, pad);
             // MTE2->V: DataCopyPad writes stridedBuf (MTE2), Gather reads it (V)
@@ -497,21 +496,18 @@ private:
     //   TRANSPOSE     + col-major -> contiguous (X[row*ldx + kBase])
     // The destination tensor is obtained from xQue_.AllocTensor() by the caller;
     // synchronization for the contiguous (MTE2) path is handled by xQue_.EnQue/DeQue.
-    __aicore__ inline void LoadXFragment(LocalTensor<ValT> &xBuf, int32_t row,
-                                          int32_t kBase, int32_t actualKTile)
+    __aicore__ inline void LoadXFragment(LocalTensor<ValT>& xBuf, int32_t row, int32_t kBase, int32_t actualKTile)
     {
         if (xContiguous_) {
             // Contiguous: X[row*ldx + kBase : +actualKTile]
-            uint64_t offset = static_cast<uint64_t>(row) * static_cast<uint64_t>(ldx_) +
-                              static_cast<uint64_t>(kBase);
+            uint64_t offset = static_cast<uint64_t>(row) * static_cast<uint64_t>(ldx_) + static_cast<uint64_t>(kBase);
             DataCopyExtParams cp{1, static_cast<uint32_t>(actualKTile * sizeof(ValT)), 0, 0, 0};
             DataCopyPadExtParams<ValT> pad{false, 0, 0, 0};
             DataCopyPad(xBuf, matXGm_[offset], cp, pad);
             // Sync handled by outer xQue_.EnQue/DeQue (MTE2->V)
         } else {
             // Strided: X[kk*ldx + row] for kk in [kBase, kEnd)
-            uint64_t gmBase = static_cast<uint64_t>(kBase) * static_cast<uint64_t>(ldx_) +
-                              static_cast<uint64_t>(row);
+            uint64_t gmBase = static_cast<uint64_t>(kBase) * static_cast<uint64_t>(ldx_) + static_cast<uint64_t>(row);
             StridedLoadGather(xBuf, 0, matXGm_, gmBase, ldx_, actualKTile);
             // Last PipeBarrier<PIPE_V> in StridedLoadGather ensures V completion
             // before outer EnQue
@@ -521,8 +517,7 @@ private:
     // Load Y row fragment Y[kBase:kEnd, col] (NON_TRANSPOSE) or Y[col, kBase:kEnd] (TRANSPOSE) into UB.
     // The destination tensor is obtained from yQue_.AllocTensor() by the caller;
     // synchronization for the contiguous (MTE2) path is handled by yQue_.EnQue/DeQue.
-    __aicore__ inline void LoadYFragment(LocalTensor<ValT> &yBuf, int32_t col,
-                                          int32_t kBase, int32_t actualKTile)
+    __aicore__ inline void LoadYFragment(LocalTensor<ValT>& yBuf, int32_t col, int32_t kBase, int32_t actualKTile)
     {
         // Determine if Y access is contiguous
         // NON_TRANSPOSE: Y[kk, col] -> contiguous if !yRowMajor (Y[col*ldy+kk])
@@ -531,8 +526,7 @@ private:
 
         if (yContiguous) {
             // Contiguous access: base = col*ldy + kBase
-            uint64_t offset = static_cast<uint64_t>(col) * static_cast<uint64_t>(ldy_) +
-                              static_cast<uint64_t>(kBase);
+            uint64_t offset = static_cast<uint64_t>(col) * static_cast<uint64_t>(ldy_) + static_cast<uint64_t>(kBase);
             DataCopyExtParams cp{1, static_cast<uint32_t>(actualKTile * sizeof(ValT)), 0, 0, 0};
             DataCopyPadExtParams<ValT> pad{false, 0, 0, 0};
             DataCopyPad(yBuf, matYGm_[offset], cp, pad);
@@ -540,14 +534,13 @@ private:
         } else {
             // Strided access (NON_TRANSPOSE+colMajor or TRANSPOSE+rowMajor):
             // both share the index formula Y[kk*ldy + col].
-            uint64_t gmBase = static_cast<uint64_t>(kBase) * static_cast<uint64_t>(ldy_) +
-                              static_cast<uint64_t>(col);
+            uint64_t gmBase = static_cast<uint64_t>(kBase) * static_cast<uint64_t>(ldy_) + static_cast<uint64_t>(col);
             StridedLoadGather(yBuf, 0, matYGm_, gmBase, ldy_, actualKTile);
         }
     }
 
 private:
-    TPipe *pipe_{nullptr};
+    TPipe* pipe_{nullptr};
     SddmmTilingData td_{};
 
     // GlobalTensor for DataCopyPad sources
@@ -557,10 +550,10 @@ private:
     GlobalTensor<ValT> matYGm_;
 
     // Raw __gm__ pointers for scalar index reads
-    __gm__ int32_t *rowOffRaw_{nullptr};
-    __gm__ int32_t *reorderRaw_{nullptr};
-    __gm__ int32_t *binEdgeRaw_{nullptr};
-    __gm__ uint8_t *wsBase_{nullptr};
+    __gm__ int32_t* rowOffRaw_{nullptr};
+    __gm__ int32_t* reorderRaw_{nullptr};
+    __gm__ int32_t* binEdgeRaw_{nullptr};
+    __gm__ uint8_t* wsBase_{nullptr};
 
     // UB buffers (K-dimension)
     TQue<TPosition::VECIN, 1> xQue_;
@@ -604,68 +597,46 @@ private:
 // ============================================================================
 
 template <typename OutT, typename AccT>
-__aicore__ inline void SddmmKernelEntry(
-    GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
-    GM_ADDR matX, GM_ADDR matY, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+__aicore__ inline void SddmmKernelEntry(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues, GM_ADDR matX,
+                                        GM_ADDR matY, GM_ADDR workspaceGM, SddmmTilingData tiling)
 {
     TPipe pipe;
     KernelSddmmSimd<OutT, AccT> op;
-    op.Init(csrRowOffsets, csrColInd, csrValues, matX, matY, workspaceGM, tilingGM, &pipe);
+    op.Init(csrRowOffsets, csrColInd, csrValues, matX, matY, workspaceGM, tiling, &pipe);
     op.Process();
 }
 
-extern "C" __global__ __aicore__ void sddmm_custom_fp32(
-    GM_ADDR csrRowOffsets,
-    GM_ADDR csrColInd,
-    GM_ADDR csrValues,
-    GM_ADDR matX,
-    GM_ADDR matY,
-    GM_ADDR workspaceGM,
-    GM_ADDR tilingGM)
+extern "C" __global__ __aicore__ void sddmm_custom_fp32(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
+                                                        GM_ADDR matX, GM_ADDR matY, GM_ADDR workspaceGM,
+                                                        SddmmTilingData tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    SddmmKernelEntry<float, float>(csrRowOffsets, csrColInd, csrValues,
-                                   matX, matY, workspaceGM, tilingGM);
+    SddmmKernelEntry<float, float>(csrRowOffsets, csrColInd, csrValues, matX, matY, workspaceGM, tiling);
 }
 
-extern "C" __global__ __aicore__ void sddmm_custom_fp16(
-    GM_ADDR csrRowOffsets,
-    GM_ADDR csrColInd,
-    GM_ADDR csrValues,
-    GM_ADDR matX,
-    GM_ADDR matY,
-    GM_ADDR workspaceGM,
-    GM_ADDR tilingGM)
+extern "C" __global__ __aicore__ void sddmm_custom_fp16(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
+                                                        GM_ADDR matX, GM_ADDR matY, GM_ADDR workspaceGM,
+                                                        SddmmTilingData tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    SddmmKernelEntry<half, float>(csrRowOffsets, csrColInd, csrValues,
-                                  matX, matY, workspaceGM, tilingGM);
+    SddmmKernelEntry<half, float>(csrRowOffsets, csrColInd, csrValues, matX, matY, workspaceGM, tiling);
 }
 
 // ============================================================================
 // Host-side launch dispatcher — dataType/blockDim passed from sddmm_host.cpp.
 // ============================================================================
-extern "C" aclsparseStatus_t sddmm_kernel_launch(
-    GM_ADDR csrRowOffsets,
-    GM_ADDR csrColInd,
-    GM_ADDR csrValues,
-    GM_ADDR matX,
-    GM_ADDR matY,
-    GM_ADDR workspaceGM,
-    GM_ADDR tilingGM,
-    int32_t dataType,
-    uint32_t blockDim,
-    void *stream)
+extern "C" aclsparseStatus_t sddmm_kernel_launch(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
+                                                 GM_ADDR matX, GM_ADDR matY, GM_ADDR workspaceGM,
+                                                 const SddmmTilingData& tiling, int32_t dataType, uint32_t blockDim,
+                                                 void* stream)
 {
     if (dataType == SDDMM_DTYPE_FP32) {
-        sddmm_custom_fp32<<<blockDim, nullptr, stream>>>(
-            csrRowOffsets, csrColInd, csrValues,
-            matX, matY, workspaceGM, tilingGM);
+        sddmm_custom_fp32<<<blockDim, nullptr, stream>>>(csrRowOffsets, csrColInd, csrValues, matX, matY, workspaceGM,
+                                                         tiling);
         return ACL_SPARSE_STATUS_SUCCESS;
     } else if (dataType == SDDMM_DTYPE_FP16) {
-        sddmm_custom_fp16<<<blockDim, nullptr, stream>>>(
-            csrRowOffsets, csrColInd, csrValues,
-            matX, matY, workspaceGM, tilingGM);
+        sddmm_custom_fp16<<<blockDim, nullptr, stream>>>(csrRowOffsets, csrColInd, csrValues, matX, matY, workspaceGM,
+                                                         tiling);
         return ACL_SPARSE_STATUS_SUCCESS;
     } else {
         OP_LOGE("aclsparseSDDMM", "unsupported dataType: %d", dataType);

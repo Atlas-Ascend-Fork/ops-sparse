@@ -206,8 +206,10 @@ aclsparseStatus_t aclsparseSDDMM(
 
 - 同 aclsparseSDDMMBufferSize 的约束
 - handle、buffer 不可为 nullptr
-- 调用前须先调用 `aclsparseSDDMMPreprocess` 进行预处理；若传入的 buffer 与 Preprocess 阶段标记的 activeBuffer 一致，则仅刷新可变字段（alpha/beta/opY/orderPair），否则重建全部 tiling 数据
-- Kernel 异步启动，host 侧不会调用 `aclrtSynchronizeStream`，调用者需自行同步后再读取 C 的 values 结果
+- 调用前须先调用 `aclsparseSDDMMPreprocess` 进行预处理；若传入的 buffer 与 Preprocess 阶段标记的 activeBuffer 一致，则复用模式元数据并按值传入本次可变字段，否则重建模式元数据
+- arch35 Execute 对已准备的 workspace 按值传入本次几何和 Host 标量，不读回或刷新 Device tiling；DEVICE 标量由 Kernel 在 handle stream 上读取。首次准备或失配重建仍包含同步元数据传输。
+- arch22 为维持“模式变化即时返回 INVALID_VALUE 且 C 不变”的契约，等待独立校验事件；实数 CSR 数值 Kernel 可与该等待重叠，且检查全部批次的门控标志。其余路径仍等待校验前缀和 DEVICE 标量回传。
+- 数值计算异步启动，调用者需自行同步后再读取 C。校验事件等待不等价于整个接口完全非阻塞。
 
 #### 支持的稀疏格式
 

@@ -5,10 +5,10 @@
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
-
 #ifndef TEST_SDDMM_SDDMM_ARCH35_SDDMM_NPU_WRAPPER_H_
 #define TEST_SDDMM_SDDMM_ARCH35_SDDMM_NPU_WRAPPER_H_
 
@@ -21,7 +21,7 @@
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
 #include "descriptor_manager.h"
-#include "sddmm_golden.h"  // shares MakeSddmmSparsity + FP16 bit helpers with golden
+#include "sddmm_golden.h" // shares MakeSddmmSparsity + FP16 bit helpers with golden
 
 namespace sparse_test {
 
@@ -31,7 +31,7 @@ namespace sparse_test {
 // ============================================================================
 
 struct SddmmNpuResult {
-    std::vector<double> valuesOut;  // size = nnz, FP64
+    std::vector<double> valuesOut; // size = nnz, FP64
     size_t bufferSize = 0;
 
     // Individual API return codes for debugging / exception-path assertions.
@@ -47,29 +47,45 @@ struct SddmmNpuResult {
 // pulls in the full ACL header set.
 // ============================================================================
 
-inline aclDataType ParseDtype(const std::string& s) {
-    if (s == "ACL_FLOAT16") return ACL_FLOAT16;
-    if (s == "ACL_FLOAT") return ACL_FLOAT;
+inline aclDataType ParseDtype(const std::string& s)
+{
+    if (s == "ACL_FLOAT16") {
+        return ACL_FLOAT16;
+    }
+    if (s == "ACL_FLOAT") {
+        return ACL_FLOAT;
+    }
     return ACL_FLOAT;
 }
 
-inline aclsparseOperation_t ParseOperation(const std::string& s) {
-    if (s == "ACL_SPARSE_OP_TRANSPOSE") return ACL_SPARSE_OP_TRANSPOSE;
-    if (s == "ACL_SPARSE_OP_CONJUGATE_TRANSPOSE") return ACL_SPARSE_OP_CONJUGATE_TRANSPOSE;
+inline aclsparseOperation_t ParseOperation(const std::string& s)
+{
+    if (s == "ACL_SPARSE_OP_TRANSPOSE") {
+        return ACL_SPARSE_OP_TRANSPOSE;
+    }
+    if (s == "ACL_SPARSE_OP_CONJUGATE_TRANSPOSE") {
+        return ACL_SPARSE_OP_CONJUGATE_TRANSPOSE;
+    }
     return ACL_SPARSE_OP_NON_TRANSPOSE;
 }
 
 // Parse dense matrix memory layout. Defaults to row-major for any unrecognised
 // string (keeps existing ROW-only CSV rows unchanged).
-inline aclsparseOrder_t ParseOrder(const std::string& s) {
-    if (s == "ACL_SPARSE_ORDER_COL") return ACL_SPARSE_ORDER_COL;
+inline aclsparseOrder_t ParseOrder(const std::string& s)
+{
+    if (s == "ACL_SPARSE_ORDER_COL") {
+        return ACL_SPARSE_ORDER_COL;
+    }
     return ACL_SPARSE_ORDER_ROW;
 }
 
 // aclsparseSDDMMAlg_t / ACL_SPARSE_SDDMM_ALG_DEFAULT are declared by the
 // operator implementation in cann_ops_sparse.h (requirement §2.2).
-inline aclsparseSDDMMAlg_t ParseSddmmAlg(const std::string& s) {
-    if (s == "ACL_SPARSE_SDDMM_ALG_DEFAULT") return ACL_SPARSE_SDDMM_ALG_DEFAULT;
+inline aclsparseSDDMMAlg_t ParseSddmmAlg(const std::string& s)
+{
+    if (s == "ACL_SPARSE_SDDMM_ALG_DEFAULT") {
+        return ACL_SPARSE_SDDMM_ALG_DEFAULT;
+    }
     return ACL_SPARSE_SDDMM_ALG_DEFAULT;
 }
 
@@ -93,10 +109,9 @@ inline aclsparseSDDMMAlg_t ParseSddmmAlg(const std::string& s) {
 // Per ACL convention, the pointer type matches computeType:
 //   ACL_FLOAT   -> float (4 bytes)
 //   ACL_FLOAT16 -> half  (2 bytes)
-inline void PrepareSddmmScalars(float alpha, float beta, aclDataType computeType,
-                                 float& alphaHost, float& betaHost,
-                                 uint16_t& alphaFp16, uint16_t& betaFp16,
-                                 const void*& alphaPtr, const void*& betaPtr) {
+inline void PrepareSddmmScalars(float alpha, float beta, aclDataType computeType, float& alphaHost, float& betaHost,
+                                uint16_t& alphaFp16, uint16_t& betaFp16, const void*& alphaPtr, const void*& betaPtr)
+{
     alphaHost = alpha;
     betaHost = beta;
     alphaPtr = &alphaHost;
@@ -122,14 +137,11 @@ inline void PrepareSddmmScalars(float alpha, float beta, aclDataType computeType
 //   NON_TRANSPOSE: Y is k×n (rows=k, cols=n)  -> computes X·Y
 //   TRANSPOSE:     Y is n×k (rows=n, cols=k)  -> computes X·Y^T
 template <typename T>
-inline void CreateSddmmDescriptors(
-    int64_t m, int64_t n, int64_t k,
-    aclsparseOperation_t opX, aclsparseOperation_t opY,
-    aclsparseOrder_t orderX, aclsparseOrder_t orderY,
-    aclDataType dtype, int64_t nnz,
-    void* dXRaw, void* dYRaw,
-    void* dRowOffRaw, void* dColIndRaw, void* dValsRaw,
-    DnMatManager& matX, DnMatManager& matY, SpMatManager& matC) {
+inline void CreateSddmmDescriptors(int64_t m, int64_t n, int64_t k, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                   aclsparseOrder_t orderX, aclsparseOrder_t orderY, aclDataType dtype, int64_t nnz,
+                                   void* dXRaw, void* dYRaw, void* dRowOffRaw, void* dColIndRaw, void* dValsRaw,
+                                   DnMatManager& matX, DnMatManager& matY, SpMatManager& matC)
+{
     const bool xTransposed = (opX == ACL_SPARSE_OP_TRANSPOSE);
     const int64_t xRows = xTransposed ? k : m;
     const int64_t xCols = xTransposed ? m : k;
@@ -141,14 +153,14 @@ inline void CreateSddmmDescriptors(
     const int64_t yLd = (orderY == ACL_SPARSE_ORDER_ROW) ? yCols : yRows;
     matY = DnMatManager::createConst(yRows, yCols, yLd, dYRaw, dtype, orderY);
     // C: m×n CSR, values updated in place (non-const).
-    matC = SpMatManager::createCsr(m, n, nnz, dRowOffRaw, dColIndRaw, dValsRaw,
-                                    ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                    ACL_SPARSE_INDEX_BASE_ZERO, dtype);
+    matC = SpMatManager::createCsr(m, n, nnz, dRowOffRaw, dColIndRaw, dValsRaw, ACL_SPARSE_INDEX_32I,
+                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype);
 }
 
 // Read back updated C values (CSR values array, in place) and convert to FP64.
 template <typename T>
-inline void ReadBackSddmmValues(DeviceBuffer& dVals, int64_t nnz, SddmmNpuResult& result) {
+inline void ReadBackSddmmValues(DeviceBuffer& dVals, int64_t nnz, SddmmNpuResult& result)
+{
     if (nnz <= 0) {
         return;
     }
@@ -157,11 +169,10 @@ inline void ReadBackSddmmValues(DeviceBuffer& dVals, int64_t nnz, SddmmNpuResult
     result.valuesOut.resize(static_cast<size_t>(nnz));
     for (int64_t i = 0; i < nnz; i++) {
         if constexpr (std::is_same_v<T, float>) {
-            result.valuesOut[static_cast<size_t>(i)] =
-                static_cast<double>(hValsOut[static_cast<size_t>(i)]);
+            result.valuesOut[static_cast<size_t>(i)] = static_cast<double>(hValsOut[static_cast<size_t>(i)]);
         } else {
-            result.valuesOut[static_cast<size_t>(i)] =
-                static_cast<double>(Fp16BitsToFp32(hValsOut[static_cast<size_t>(i)]));
+            result.valuesOut[static_cast<size_t>(i)] = static_cast<double>(
+                Fp16BitsToFp32(hValsOut[static_cast<size_t>(i)]));
         }
     }
 }
@@ -171,21 +182,16 @@ inline void ReadBackSddmmValues(DeviceBuffer& dVals, int64_t nnz, SddmmNpuResult
 // stage's return code in `result` and returns false. The workspace buffer is
 // allocated internally and freed when this function returns (the kernel has
 // been synced before return, so the workspace is no longer needed).
-inline bool RunSddmmStages(HandleManager& handle,
-                            aclsparseOperation_t opX, aclsparseOperation_t opY,
-                            const void* alphaPtr, const void* betaPtr,
-                            DnMatManager& matX, DnMatManager& matY,
-                            SpMatManager& matC,
-                            aclDataType computeType, aclsparseSDDMMAlg_t alg,
-                            aclrtStream stream, SddmmNpuResult& result) {
+inline bool RunSddmmStages(HandleManager& handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                           const void* alphaPtr, const void* betaPtr, DnMatManager& matX, DnMatManager& matY,
+                           SpMatManager& matC, aclDataType computeType, aclsparseSDDMMAlg_t alg, aclrtStream stream,
+                           SddmmNpuResult& result)
+{
     // --- Stage 1: BufferSize -------------------------------------------------
-    result.bufferSizeRet = aclsparseSDDMMBufferSize(
-        handle.get(), opX, opY, alphaPtr,
-        matX.cget(), matY.cget(), betaPtr, matC.get(),
-        computeType, alg, &result.bufferSize);
+    result.bufferSizeRet = aclsparseSDDMMBufferSize(handle.get(), opX, opY, alphaPtr, matX.cget(), matY.cget(), betaPtr,
+                                                    matC.get(), computeType, alg, &result.bufferSize);
     if (result.bufferSizeRet != ACL_SPARSE_STATUS_SUCCESS) {
-        std::cerr << "[SDDMM NPU] aclsparseSDDMMBufferSize failed: "
-                  << result.bufferSizeRet << std::endl;
+        std::cerr << "[SDDMM NPU] aclsparseSDDMMBufferSize failed: " << result.bufferSizeRet << std::endl;
         return false;
     }
 
@@ -194,24 +200,18 @@ inline bool RunSddmmStages(HandleManager& handle,
     if (result.bufferSize > 0) {
         dBuffer = DeviceBuffer::alloc(result.bufferSize);
     }
-    result.preprocessRet = aclsparseSDDMMPreprocess(
-        handle.get(), opX, opY, alphaPtr,
-        matX.cget(), matY.cget(), betaPtr, matC.get(),
-        computeType, alg, dBuffer.get());
+    result.preprocessRet = aclsparseSDDMMPreprocess(handle.get(), opX, opY, alphaPtr, matX.cget(), matY.cget(), betaPtr,
+                                                    matC.get(), computeType, alg, dBuffer.get());
     if (result.preprocessRet != ACL_SPARSE_STATUS_SUCCESS) {
-        std::cerr << "[SDDMM NPU] aclsparseSDDMMPreprocess failed: "
-                  << result.preprocessRet << std::endl;
+        std::cerr << "[SDDMM NPU] aclsparseSDDMMPreprocess failed: " << result.preprocessRet << std::endl;
         return false;
     }
 
     // --- Stage 3: Execute ----------------------------------------------------
-    result.executeRet = aclsparseSDDMM(
-        handle.get(), opX, opY, alphaPtr,
-        matX.cget(), matY.cget(), betaPtr, matC.get(),
-        computeType, alg, dBuffer.get());
+    result.executeRet = aclsparseSDDMM(handle.get(), opX, opY, alphaPtr, matX.cget(), matY.cget(), betaPtr, matC.get(),
+                                       computeType, alg, dBuffer.get());
     if (result.executeRet != ACL_SPARSE_STATUS_SUCCESS) {
-        std::cerr << "[SDDMM NPU] aclsparseSDDMM failed: "
-                  << result.executeRet << std::endl;
+        std::cerr << "[SDDMM NPU] aclsparseSDDMM failed: " << result.executeRet << std::endl;
         return false;
     }
 
@@ -225,63 +225,48 @@ inline bool RunSddmmStages(HandleManager& handle,
 }
 
 template <typename T>
-inline SddmmNpuResult SddmmNpu(
-    HandleManager& handle, aclrtStream stream,
-    int64_t m, int64_t n, int64_t k,
-    aclsparseOperation_t opX, aclsparseOperation_t opY,
-    float alpha, float beta,
-    aclDataType dtype, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg,
-    aclsparseOrder_t orderX, aclsparseOrder_t orderY,
-    const std::vector<int32_t>& rowOffsets,
-    const std::vector<int32_t>& colIndices,
-    const std::vector<T>& hCInitValues,
-    const std::vector<T>& hX,
-    const std::vector<T>& hY,
-    int64_t nnz) {
+inline SddmmNpuResult SddmmNpu(HandleManager& handle, aclrtStream stream, int64_t m, int64_t n, int64_t k,
+                               aclsparseOperation_t opX, aclsparseOperation_t opY, float alpha, float beta,
+                               aclDataType dtype, aclDataType computeType, aclsparseSDDMMAlg_t alg,
+                               aclsparseOrder_t orderX, aclsparseOrder_t orderY, const std::vector<int32_t>& rowOffsets,
+                               const std::vector<int32_t>& colIndices, const std::vector<T>& hCInitValues,
+                               const std::vector<T>& hX, const std::vector<T>& hY, int64_t nnz)
+{
     SddmmNpuResult result;
     handle.setStream(stream);
 
     // --- Device buffers ------------------------------------------------------
     // rowOffsets always present (m+1 ints). colInd / values empty when nnz == 0.
-    DeviceBuffer dRowOff = DeviceBuffer::copyFrom(
-        rowOffsets.data(), static_cast<size_t>(m + 1) * sizeof(int32_t));
+    DeviceBuffer dRowOff = DeviceBuffer::copyFrom(rowOffsets.data(), static_cast<size_t>(m + 1) * sizeof(int32_t));
     DeviceBuffer dColInd;
     DeviceBuffer dVals;
     if (nnz > 0) {
-        dColInd = DeviceBuffer::copyFrom(
-            colIndices.data(), static_cast<size_t>(nnz) * sizeof(int32_t));
-        dVals = DeviceBuffer::copyFrom(
-            hCInitValues.data(), static_cast<size_t>(nnz) * sizeof(T));
+        dColInd = DeviceBuffer::copyFrom(colIndices.data(), static_cast<size_t>(nnz) * sizeof(int32_t));
+        dVals = DeviceBuffer::copyFrom(hCInitValues.data(), static_cast<size_t>(nnz) * sizeof(T));
     }
     // Y element count is n*k regardless of opY (n*k == k*n). The flat buffer
     // is the same; only the descriptor shape/ld and the kernel access pattern
     // differ between opY=NON_TRANSPOSE (Y is k×n, ld=n) and opY=TRANSPOSE
     // (Y is n×k, ld=k).
-    DeviceBuffer dX = DeviceBuffer::copyFrom(
-        hX.data(), static_cast<size_t>(m) * static_cast<size_t>(k) * sizeof(T));
-    DeviceBuffer dY = DeviceBuffer::copyFrom(
-        hY.data(), static_cast<size_t>(n) * static_cast<size_t>(k) * sizeof(T));
+    DeviceBuffer dX = DeviceBuffer::copyFrom(hX.data(), static_cast<size_t>(m) * static_cast<size_t>(k) * sizeof(T));
+    DeviceBuffer dY = DeviceBuffer::copyFrom(hY.data(), static_cast<size_t>(n) * static_cast<size_t>(k) * sizeof(T));
 
     // --- Descriptors + scalars -----------------------------------------------
     DnMatManager matX;
     DnMatManager matY;
     SpMatManager matC;
-    CreateSddmmDescriptors<T>(m, n, k, opX, opY, orderX, orderY, dtype, nnz,
-                              dX.raw(), dY.raw(), dRowOff.get(), dColInd.get(),
-                              dVals.get(), matX, matY, matC);
+    CreateSddmmDescriptors<T>(m, n, k, opX, opY, orderX, orderY, dtype, nnz, dX.raw(), dY.raw(), dRowOff.get(),
+                              dColInd.get(), dVals.get(), matX, matY, matC);
     float alphaHost = 0.0f;
     float betaHost = 0.0f;
     uint16_t alphaFp16 = 0;
     uint16_t betaFp16 = 0;
     const void* alphaPtr = nullptr;
     const void* betaPtr = nullptr;
-    PrepareSddmmScalars(alpha, beta, computeType, alphaHost, betaHost,
-                        alphaFp16, betaFp16, alphaPtr, betaPtr);
+    PrepareSddmmScalars(alpha, beta, computeType, alphaHost, betaHost, alphaFp16, betaFp16, alphaPtr, betaPtr);
 
     // --- Three-stage workflow + sync -----------------------------------------
-    if (!RunSddmmStages(handle, opX, opY, alphaPtr, betaPtr,
-                        matX, matY, matC, computeType, alg, stream, result)) {
+    if (!RunSddmmStages(handle, opX, opY, alphaPtr, betaPtr, matX, matY, matC, computeType, alg, stream, result)) {
         return result;
     }
 
@@ -290,6 +275,6 @@ inline SddmmNpuResult SddmmNpu(
     return result;
 }
 
-}  // namespace sparse_test
+} // namespace sparse_test
 
-#endif  // TEST_SDDMM_SDDMM_ARCH35_SDDMM_NPU_WRAPPER_H_
+#endif // TEST_SDDMM_SDDMM_ARCH35_SDDMM_NPU_WRAPPER_H_

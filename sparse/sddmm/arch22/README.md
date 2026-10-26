@@ -1,47 +1,63 @@
-# SDDMM算子 (arch22)
+# SDDMM（Atlas A2/A3）
 
-## 算子概述
+## 功能
 
-SDDMM（Sampled Dense-Dense Matrix Multiplication）实现两个稠密矩阵相乘后按稀疏矩阵模式采样的运算，对标 cuSPARSE `cusparseSDDMM`。
+SDDMM 按 CSR 或 BSR 的既有稀疏位置计算 `alpha * op(X) * op(Y) + beta * C`。
+结果原地更新 C 的数值，稀疏索引和稠密输入保持只读。
 
-```
-C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
-```
+## 支持范围
 
-## 支持芯片
+| 稀疏格式 | X/Y 类型 | C 数值类型 | 计算类型 |
+| --- | --- | --- | --- |
+| CSR/BSR | float32 | float32 | float32 |
+| CSR/BSR | complex64 | complex64 | complex64 |
+| CSR/BSR | float16 | float16 或 float32 | float32 |
+| BSR | bfloat16 | bfloat16 或 float32 | float32 |
 
-- Ascend 910B（架构 arch22 / DAV_2201）
+- 索引使用 int32，支持从 0 或 1 开始编号。
+- BSR 支持方形块，边长为 2、4、8、16、32、64 或 128；块数值支持行主序和列主序。
+- 稠密矩阵支持行主序、列主序、带填充的 leading dimension 和普通转置。
+- 支持 `ACL_SPARSE_SDDMM_ALG_DEFAULT`，复数标量使用 `aclsparseComplex`。
+- 支持 Host 和 Device 标量，以及空矩阵和 K=0。
+- beta 为零时忽略 C 的原数值。
+- BSR 批次数为 1 至 65535。X/Y 可各自广播，C 的每批可使用独立稀疏结构。
 
-## 接口与参数
+## 接口约定
 
-公共接口定义、参数说明及调用示例见上层 [../README.md](../README.md)。本文件仅补充 arch22 特有的实现约束和说明。
+依次调用 `aclsparseSDDMMBufferSize`、`aclsparseSDDMMPreprocess` 和 `aclsparseSDDMM`。
+workspace 至少为查询大小，首地址按 32 字节对齐。
+数值计算提交到调用方指定的 stream。释放输入、输出或 workspace 前应同步该 stream。
 
-零维输入：X / Y / C 任一维度（rows/cols）为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（host 侧 `SddmmValidateShapes` fail-fast 拒绝，arch35 与 arch22 行为一致）。
+修改稀疏索引地址或内容后，需重新执行 Preprocess。
+仅修改 X/Y 或 C 的数值可复用预处理状态。
+修改形状、布局、操作、类型或批次属性后，需重新预处理。
+同一 C 描述符的调用应串行；独立描述符和 workspace 支持并发调用。
 
-## 精度标准
+逻辑维度和展开索引需处于 int32 范围，复数的双倍列范围也需满足此条件。
+稠密行字节跨度需处于 uint32 范围。workspace 上限为 64 MiB。
+超出支持范围时返回错误，调用方应保证实际分配大小符合查询结果。
 
-采用 MIXED_TOLERANCE 模式：逐元素 `|actual - golden| ≤ max(atol + rtol * |golden|, maxAbsErrLimit)`，整体 `matchedRatio ≥ 0.99`。
+Torch CSR 接口支持 int32 和 int64 索引，并拒绝超出 int32 范围的索引。
+`torch.sparse.sampled_addmm` 返回独立结果；直接接口和 prepared 接口原地更新数值。
+直接接口支持共轭和负号视图。prepared 接口重复执行时使用原始绑定的最新数值。
+修改绑定张量的存储、形状或步长后应重新 prepare。
 
-| 数据类型 | rtol | atol | maxAbsErrLimit fixedValue |
-|----------|------|------|---------------------------|
-| FLOAT32  | 2⁻¹⁰ | 2⁻²³ | 1e-2 |
-| FLOAT16  | 2⁻⁹  | 2⁻⁹  | 1e-1 |
+## 精度
 
-FP16 路径在 FP32 中完成点积累加，写回前饱和截断到 [−65504, 65504]。
+float16 和 bfloat16 输入使用 float32 累加。complex64 的实部和虚部分别按 float32 验证。
+正式测试使用 CPU 高精度参考结果，并按输出类型比较。
 
-## Ascend 910B (arch22) 实现说明
+| 输出类型 | 相对容差 | 绝对容差 |
+| --- | --- | --- |
+| float16 | 2^-9 | 2^-9 |
+| bfloat16 | 2^-6 | 2^-6 |
+| float32/complex64 分量 | 2^-10 | 2^-16 |
 
-FP32 主路径按非零元分块的向量化归约组织计算：
+回归覆盖不同索引基准、布局、转置、批次广播、复数标量、数值更新和高动态范围复数输入。
+有限 alpha/beta 超出 float32 分量范围时，Torch 接口报告转换溢出；NaN/Inf 保留原生转换语义。
 
-1. 每行将 X 对应行载入 UB 一次
-2. 至多 `jTile` 个非零元的 Y 列连续暂存为 UB 中 `jTile × kPitch` 矩阵，连续列合并为一次多块 DMA
-3. `src0RepStride=0` 广播 X 行做 `Mul`，`WholeReduceSum` 折叠为点积
-4. `y = alpha * acc + beta * C` 全部在向量流水完成
+## 主线实现兼容
 
-连续和跨步的 Y 列分别实例化 FP32 内核。跨步列按 `kPitch` 批量收集，尾块也保持相同的对齐步长。`K > 4088` 时使用完整行缓存或分块点积；是否按非零元分区由实际归约维度 K 决定。逐非零元路径直接融合 CSR 更新，不依赖固定长度的点积结果数组，因此支持长稀疏行。`alpha == 0` 时省去点积，执行向量 `y = beta * C`。
-
-FP16 路径在 FP32 精度下计算。K 不超过 4088 且每行至少有 8 个非零元时，每段最多 512 个点积结果在向量流水完成缩放、CSR 累加、饱和截断与 half 转换；该行的不足 8 个元素的尾段沿用同一路径。其余路径以标量合并点积结果，再精确写回有效 half 字节。所有 DMA、转换、归约及输出缓冲复用均按实际生产者/消费者设置流水同步。
-
-当 K 等于 4088，且全部非零元能在可用 AIV 核上单轮完成时，FP16 可按非零元分区，避免小行数限制并行度。K 大于 4088 的 FP16 仍按行分区，通过分块标量累加完成点积。
-
-测试覆盖连续/跨步布局、转置、长稀疏行、K 的分块边界、FP16 饱和以及向量段尾部；精度判定沿用上表标准。
+统一类型内核保留连续/跨步布局、长稀疏行、K 分块及 FP16 尾段处理。
+分核依据实际归约维度 K；FP16 在单轮可覆盖全部非零元时支持按非零元分核。
+主线新增的长行、分块边界、跨步尾块及饱和回归用例继续参与测试。

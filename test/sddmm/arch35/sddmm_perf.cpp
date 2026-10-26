@@ -64,7 +64,7 @@ struct PerfCase {
     double sparsity_ratio;
     double alpha;
     double beta;
-    aclDataType dtype;      // ACL_FLOAT / ACL_FLOAT16
+    aclDataType dtype; // ACL_FLOAT / ACL_FLOAT16
     std::string dtype_name;
     double value_lo;
     double value_hi;
@@ -113,11 +113,11 @@ struct PerfWorkspace {
 };
 
 template <typename T>
-static void SetupPerfDescriptors(PerfWorkspace<T> *ws, aclrtStream stream, const PerfCase& pc,
-                                 const SddmmCsr& csrC, const std::vector<T>& hCInit,
-                                 const std::vector<T>& hX, const std::vector<T>& hY) {
+static void SetupPerfDescriptors(PerfWorkspace<T>* ws, aclrtStream stream, const PerfCase& pc, const SddmmCsr& csrC,
+                                 const std::vector<T>& hCInit, const std::vector<T>& hX, const std::vector<T>& hY)
+{
     ws->dtype = pc.dtype;
-    ws->computeType = pc.dtype;  // compute type == value type (FP32/FP16)
+    ws->computeType = pc.dtype; // compute type == value type (FP32/FP16)
     ws->alg = ACL_SPARSE_SDDMM_ALG_DEFAULT;
     ws->opX = ACL_SPARSE_OP_NON_TRANSPOSE;
     ws->opY = ACL_SPARSE_OP_NON_TRANSPOSE;
@@ -129,32 +129,27 @@ static void SetupPerfDescriptors(PerfWorkspace<T> *ws, aclrtStream stream, const
     ws->nnz = csrC.nnz;
     ws->handle.setStream(stream);
 
-    ws->dRowOff = DeviceBuffer::copyFrom(csrC.rowOffsets.data(),
-                                         static_cast<size_t>(pc.m + 1) * sizeof(int32_t));
+    ws->dRowOff = DeviceBuffer::copyFrom(csrC.rowOffsets.data(), static_cast<size_t>(pc.m + 1) * sizeof(int32_t));
     if (csrC.nnz > 0) {
-        ws->dColInd = DeviceBuffer::copyFrom(csrC.colIndices.data(),
-                                             static_cast<size_t>(csrC.nnz) * sizeof(int32_t));
-        ws->dVals = DeviceBuffer::copyFrom(hCInit.data(),
-                                           static_cast<size_t>(csrC.nnz) * sizeof(T));
+        ws->dColInd = DeviceBuffer::copyFrom(csrC.colIndices.data(), static_cast<size_t>(csrC.nnz) * sizeof(int32_t));
+        ws->dVals = DeviceBuffer::copyFrom(hCInit.data(), static_cast<size_t>(csrC.nnz) * sizeof(T));
     }
-    ws->dX = DeviceBuffer::copyFrom(hX.data(),
-                                    static_cast<size_t>(pc.m) * static_cast<size_t>(pc.k) * sizeof(T));
-    ws->dY = DeviceBuffer::copyFrom(hY.data(),
-                                    static_cast<size_t>(pc.n) * static_cast<size_t>(pc.k) * sizeof(T));
+    ws->dX = DeviceBuffer::copyFrom(hX.data(), static_cast<size_t>(pc.m) * static_cast<size_t>(pc.k) * sizeof(T));
+    ws->dY = DeviceBuffer::copyFrom(hY.data(), static_cast<size_t>(pc.n) * static_cast<size_t>(pc.k) * sizeof(T));
 
     ws->matX = DnMatManager::createConst(pc.m, pc.k, pc.k, ws->dX.raw(), pc.dtype, ACL_SPARSE_ORDER_ROW);
     ws->matY = DnMatManager::createConst(pc.k, pc.n, pc.n, ws->dY.raw(), pc.dtype, ACL_SPARSE_ORDER_ROW);
-    ws->matC = SpMatManager::createCsr(pc.m, pc.n, csrC.nnz, ws->dRowOff.get(), ws->dColInd.get(),
-                                       ws->dVals.get(), ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                       ACL_SPARSE_INDEX_BASE_ZERO, pc.dtype);
+    ws->matC = SpMatManager::createCsr(pc.m, pc.n, csrC.nnz, ws->dRowOff.get(), ws->dColInd.get(), ws->dVals.get(),
+                                       ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO,
+                                       pc.dtype);
 }
 
 template <typename T>
-static bool SetupPerfBuffers(PerfWorkspace<T> *ws, aclrtStream stream) {
+static bool SetupPerfBuffers(PerfWorkspace<T>* ws, aclrtStream stream)
+{
     size_t bs = 0;
-    auto r1 = aclsparseSDDMMBufferSize(ws->handle.get(), ws->opX, ws->opY, &ws->alphaHost,
-                                       ws->matX.cget(), ws->matY.cget(), &ws->betaHost, ws->matC.get(),
-                                       ws->computeType, ws->alg, &bs);
+    auto r1 = aclsparseSDDMMBufferSize(ws->handle.get(), ws->opX, ws->opY, &ws->alphaHost, ws->matX.cget(),
+                                       ws->matY.cget(), &ws->betaHost, ws->matC.get(), ws->computeType, ws->alg, &bs);
     if (r1 != ACL_SPARSE_STATUS_SUCCESS) {
         ws->err = "BufferSize failed: " + std::to_string(r1);
         return false;
@@ -163,9 +158,9 @@ static bool SetupPerfBuffers(PerfWorkspace<T> *ws, aclrtStream stream) {
     if (bs > 0) {
         ws->dBuffer = DeviceBuffer::alloc(bs);
     }
-    auto r2 = aclsparseSDDMMPreprocess(ws->handle.get(), ws->opX, ws->opY, &ws->alphaHost,
-                                       ws->matX.cget(), ws->matY.cget(), &ws->betaHost, ws->matC.get(),
-                                       ws->computeType, ws->alg, ws->dBuffer.get());
+    auto r2 = aclsparseSDDMMPreprocess(ws->handle.get(), ws->opX, ws->opY, &ws->alphaHost, ws->matX.cget(),
+                                       ws->matY.cget(), &ws->betaHost, ws->matC.get(), ws->computeType, ws->alg,
+                                       ws->dBuffer.get());
     if (r2 != ACL_SPARSE_STATUS_SUCCESS) {
         ws->err = "Preprocess failed: " + std::to_string(r2);
         return false;
@@ -176,11 +171,10 @@ static bool SetupPerfBuffers(PerfWorkspace<T> *ws, aclrtStream stream) {
 }
 
 template <typename T>
-static std::unique_ptr<PerfWorkspace<T>> SetupPerf(aclrtStream stream, const PerfCase& pc,
-                                                   const SddmmCsr& csrC,
-                                                   const std::vector<T>& hCInit,
-                                                   const std::vector<T>& hX,
-                                                   const std::vector<T>& hY) {
+static std::unique_ptr<PerfWorkspace<T>> SetupPerf(aclrtStream stream, const PerfCase& pc, const SddmmCsr& csrC,
+                                                   const std::vector<T>& hCInit, const std::vector<T>& hX,
+                                                   const std::vector<T>& hY)
+{
     auto ws = std::make_unique<PerfWorkspace<T>>();
     ws->ok = false;
     SetupPerfDescriptors<T>(ws.get(), stream, pc, csrC, hCInit, hX, hY);
@@ -191,7 +185,8 @@ static std::unique_ptr<PerfWorkspace<T>> SetupPerf(aclrtStream stream, const Per
 // Time Execute (kernel) over warmup + iters with aclrtEvent. Returns times (us).
 // exec is called once per iteration (must launch the kernel asynchronously).
 template <typename ExecFn>
-static std::vector<double> TimeExecute(aclrtStream stream, ExecFn exec, int warmup, int iters) {
+static std::vector<double> TimeExecute(aclrtStream stream, ExecFn exec, int warmup, int iters)
+{
     std::vector<double> times;
     times.reserve(static_cast<size_t>(iters));
 
@@ -214,7 +209,7 @@ static std::vector<double> TimeExecute(aclrtStream stream, ExecFn exec, int warm
         aclrtSynchronizeStream(stream);
         float ms = 0.0f;
         aclrtEventElapsedTime(&ms, startEv, stopEv);
-        times.push_back(static_cast<double>(ms) * 1000.0);  // us
+        times.push_back(static_cast<double>(ms) * 1000.0); // us
     }
 
     aclrtDestroyEvent(startEv);
@@ -248,23 +243,24 @@ struct AlgoMetrics {
     double bytes;
 };
 
-static AlgoMetrics ComputeAlgoMetrics(const PerfCase& pc, int64_t nnz) {
+static AlgoMetrics ComputeAlgoMetrics(const PerfCase& pc, int64_t nnz)
+{
     AlgoMetrics m;
     m.nnz = nnz;
     double elem = (pc.dtype == ACL_FLOAT) ? 4.0 : 2.0;
     double flops = 2.0 * static_cast<double>(nnz) * static_cast<double>(pc.k);
-    flops += 2.0 * static_cast<double>(nnz);  // alpha-scale + beta fma per nonzero
+    flops += 2.0 * static_cast<double>(nnz); // alpha-scale + beta fma per nonzero
     m.flops = flops;
 
     double bytes = 0.0;
-    bytes += static_cast<double>(pc.m) * static_cast<double>(pc.k) * elem;   // X
-    bytes += static_cast<double>(nnz) * static_cast<double>(pc.k) * elem;    // Y (per-nonzero, dominates)
-    bytes += static_cast<double>(nnz) * 4.0;                                 // colInd
-    bytes += static_cast<double>(pc.m + 1) * 4.0;                            // rowOff
+    bytes += static_cast<double>(pc.m) * static_cast<double>(pc.k) * elem; // X
+    bytes += static_cast<double>(nnz) * static_cast<double>(pc.k) * elem;  // Y (per-nonzero, dominates)
+    bytes += static_cast<double>(nnz) * 4.0;                               // colInd
+    bytes += static_cast<double>(pc.m + 1) * 4.0;                          // rowOff
     if (pc.beta != 0.0) {
-        bytes += static_cast<double>(nnz) * elem;                            // C read
+        bytes += static_cast<double>(nnz) * elem; // C read
     }
-    bytes += static_cast<double>(nnz) * elem;                                // C write
+    bytes += static_cast<double>(nnz) * elem; // C write
     m.bytes = bytes;
     return m;
 }
@@ -280,7 +276,8 @@ static AlgoMetrics ComputeAlgoMetrics(const PerfCase& pc, int64_t nnz) {
 // for utilization computation (msprof aic-metrics is unavailable for custom
 // ops loaded via shared library on this CANN build).
 // ============================================================================
-static int RunBwBench(aclrtStream stream, int warmup, int iters) {
+static int RunBwBench(aclrtStream stream, int warmup, int iters)
+{
     // 1 GiB buffer — large enough to saturate HBM, fits in 123 GiB HBM.
     const size_t sizeMiB = 1024;
     const size_t size = sizeMiB * 1024ULL * 1024ULL;
@@ -315,22 +312,19 @@ static int RunBwBench(aclrtStream stream, int warmup, int iters) {
         aclrtSynchronizeStream(stream);
         float ms = 0.0f;
         aclrtEventElapsedTime(&ms, startEv, stopEv);
-        times.push_back(static_cast<double>(ms));  // ms
+        times.push_back(static_cast<double>(ms)); // ms
     }
     std::sort(times.begin(), times.end());
     double tMin = times.front();
     double tMed = times[times.size() / 2];
     // total HBM traffic = 2*size (read + write), bandwidth = 2*size / time
     double bytesTraffic = 2.0 * static_cast<double>(size);
-    double bwMin = bytesTraffic / (tMin / 1000.0) / 1e9;   // GB/s
+    double bwMin = bytesTraffic / (tMin / 1000.0) / 1e9; // GB/s
     double bwMed = bytesTraffic / (tMed / 1000.0) / 1e9;
 
-    std::cout << "=== HBM Bandwidth Benchmark (aclrtMemcpy D2D, " << sizeMiB
-              << " MiB) ===\n";
-    std::cout << "  copy time: min=" << std::fixed << std::setprecision(3) << tMin
-              << " ms  median=" << tMed << " ms\n";
-    std::cout << "  HBM BW (2*size/time): min=" << bwMin << " GB/s  median=" << bwMed
-              << " GB/s\n";
+    std::cout << "=== HBM Bandwidth Benchmark (aclrtMemcpy D2D, " << sizeMiB << " MiB) ===\n";
+    std::cout << "  copy time: min=" << std::fixed << std::setprecision(3) << tMin << " ms  median=" << tMed << " ms\n";
+    std::cout << "  HBM BW (2*size/time): min=" << bwMin << " GB/s  median=" << bwMed << " GB/s\n";
     std::cout << "  -> use median " << bwMed << " GB/s as practical peak HBM BW\n";
     std::cout << std::defaultfloat;
 
@@ -354,67 +348,82 @@ struct RowOut {
     std::string note;
 };
 
-static std::string Fmt(double v, int width) {
-    if (v <= 0) return std::string("-");
+static std::string Fmt(double v, int width)
+{
+    if (v <= 0) {
+        return std::string("-");
+    }
     std::ostringstream os;
     os << std::fixed << std::setprecision(2) << v;
     std::string s = os.str();
-    if (static_cast<int>(s.length()) > width) s = s.substr(0, width);
+    if (static_cast<int>(s.length()) > width) {
+        s = s.substr(0, width);
+    }
     return s;
 }
 
 struct PerfArgs {
     int warmup = 5;
     int iters = 20;
-    double peakHbmGbps = 0.0;  // 0 = unknown
-    std::string only;          // if non-empty, run only cases whose label contains this substring
-    bool bwbench = false;      // if true, run HBM bandwidth benchmark and exit
+    double peakHbmGbps = 0.0; // 0 = unknown
+    std::string only;         // if non-empty, run only cases whose label contains this substring
+    bool bwbench = false;     // if true, run HBM bandwidth benchmark and exit
 };
 
-static PerfArgs ParsePerfArgs(int argc, char** argv) {
+static PerfArgs ParsePerfArgs(int argc, char** argv)
+{
     PerfArgs args;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto pos = a.find('=');
         if (pos == std::string::npos) {
-            if (a == "--bwbench") { args.bwbench = true; }
+            if (a == "--bwbench") {
+                args.bwbench = true;
+            }
             continue;
         }
         std::string key = a.substr(0, pos);
         std::string val = a.substr(pos + 1);
-        if (key == "--warmup") args.warmup = std::stoi(val);
-        else if (key == "--iters") args.iters = std::stoi(val);
-        else if (key == "--peak") args.peakHbmGbps = std::stod(val);
-        else if (key == "--only") args.only = val;
+        if (key == "--warmup") {
+            args.warmup = std::stoi(val);
+        } else if (key == "--iters") {
+            args.iters = std::stoi(val);
+        } else if (key == "--peak") {
+            args.peakHbmGbps = std::stod(val);
+        } else if (key == "--only") {
+            args.only = val;
+        }
     }
     return args;
 }
 
 template <typename T>
-static void RunPerfTyped(aclrtStream stream, const PerfCase& pc, const SddmmCsr& csrC,
-                         const std::vector<T>& hCInit, const std::vector<T>& hX,
-                         const std::vector<T>& hY, int warmup, int iters, RowOut& row) {
+static void RunPerfTyped(aclrtStream stream, const PerfCase& pc, const SddmmCsr& csrC, const std::vector<T>& hCInit,
+                         const std::vector<T>& hX, const std::vector<T>& hY, int warmup, int iters, RowOut& row)
+{
     auto ws = SetupPerf<T>(stream, pc, csrC, hCInit, hX, hY);
     if (!ws->ok) {
         row.note = "SETUP_FAIL:" + ws->err;
         return;
     }
     auto exec = [&]() {
-        return aclsparseSDDMM(ws->handle.get(), ws->opX, ws->opY, &ws->alphaHost,
-                              ws->matX.cget(), ws->matY.cget(), &ws->betaHost, ws->matC.get(),
-                              ws->computeType, ws->alg, ws->dBuffer.get());
+        return aclsparseSDDMM(ws->handle.get(), ws->opX, ws->opY, &ws->alphaHost, ws->matX.cget(), ws->matY.cget(),
+                              &ws->betaHost, ws->matC.get(), ws->computeType, ws->alg, ws->dBuffer.get());
     };
     auto times = TimeExecute(stream, exec, warmup, iters);
     std::sort(times.begin(), times.end());
     row.tMin = times.front();
     row.tMed = times[times.size() / 2];
-    double sum = 0; for (double t : times) sum += t;
+    double sum = 0;
+    for (double t : times) {
+        sum += t;
+    }
     row.tMean = sum / times.size();
     row.note = "ok";
 }
 
-static RowOut RunOneCase(aclrtStream stream, const PerfCase& pc, int warmup, int iters,
-                         double peakHbmGbps) {
+static RowOut RunOneCase(aclrtStream stream, const PerfCase& pc, int warmup, int iters, double peakHbmGbps)
+{
     RowOut row;
     row.label = pc.label;
     row.dtype_name = pc.dtype_name;
@@ -423,8 +432,7 @@ static RowOut RunOneCase(aclrtStream stream, const PerfCase& pc, int warmup, int
     row.bwUtil = -1;
     row.note = "";
 
-    SddmmCsr csrC = MakeSddmmSparsity(pc.m, pc.n, pc.sparsity_ratio,
-                                      pc.value_lo, pc.value_hi, pc.seed);
+    SddmmCsr csrC = MakeSddmmSparsity(pc.m, pc.n, pc.sparsity_ratio, pc.value_lo, pc.value_hi, pc.seed);
     int64_t nnz = csrC.nnz;
     row.nnz = nnz;
 
@@ -433,15 +441,19 @@ static RowOut RunOneCase(aclrtStream stream, const PerfCase& pc, int warmup, int
     std::uniform_real_distribution<double> dist(pc.value_lo, pc.value_hi);
     std::vector<double> Xf64(static_cast<size_t>(pc.m) * static_cast<size_t>(pc.k));
     std::vector<double> Yf64(static_cast<size_t>(pc.n) * static_cast<size_t>(pc.k));
-    for (size_t i = 0; i < Xf64.size(); i++) Xf64[i] = dist(rngX);
-    for (size_t i = 0; i < Yf64.size(); i++) Yf64[i] = dist(rngY);
+    for (size_t i = 0; i < Xf64.size(); i++) {
+        Xf64[i] = dist(rngX);
+    }
+    for (size_t i = 0; i < Yf64.size(); i++) {
+        Yf64[i] = dist(rngY);
+    }
 
     if (pc.dtype == ACL_FLOAT) {
-        RunPerfTyped<float>(stream, pc, csrC, DoublesToFp32(csrC.values),
-                            DoublesToFp32(Xf64), DoublesToFp32(Yf64), warmup, iters, row);
+        RunPerfTyped<float>(stream, pc, csrC, DoublesToFp32(csrC.values), DoublesToFp32(Xf64), DoublesToFp32(Yf64),
+                            warmup, iters, row);
     } else {
-        RunPerfTyped<uint16_t>(stream, pc, csrC, DoublesToFp16(csrC.values),
-                               DoublesToFp16(Xf64), DoublesToFp16(Yf64), warmup, iters, row);
+        RunPerfTyped<uint16_t>(stream, pc, csrC, DoublesToFp16(csrC.values), DoublesToFp16(Xf64), DoublesToFp16(Yf64),
+                               warmup, iters, row);
     }
 
     auto am = ComputeAlgoMetrics(pc, nnz);
@@ -455,7 +467,8 @@ static RowOut RunOneCase(aclrtStream stream, const PerfCase& pc, int warmup, int
     return row;
 }
 
-static bool InitAclEnv(aclrtStream &stream) {
+static bool InitAclEnv(aclrtStream& stream)
+{
     if (aclInit(nullptr) != ACL_SUCCESS) {
         std::cerr << "aclInit failed" << std::endl;
         return false;
@@ -468,33 +481,35 @@ static bool InitAclEnv(aclrtStream &stream) {
     return true;
 }
 
-static void CleanupAclEnv(aclrtStream stream) {
+static void CleanupAclEnv(aclrtStream stream)
+{
     aclrtDestroyStream(stream);
     aclrtResetDevice(0);
     aclFinalize();
 }
 
-static void PrintHeader(int64_t arch, size_t totalMem, size_t freeMem,
-                        int warmup, int iters, double peakHbmGbps) {
+static void PrintHeader(int64_t arch, size_t totalMem, size_t freeMem, int warmup, int iters, double peakHbmGbps)
+{
     std::cout << "============================================================\n";
     std::cout << "SDDMM Performance Collection (aclsparseSDDMM, Execute stage)\n";
     std::cout << "Device: Ascend arch=" << arch << " (DAV_3510 / Ascend950)\n";
     std::cout << "HBM total=" << (totalMem >> 20) << " MiB  free=" << (freeMem >> 20) << " MiB\n";
     std::cout << "warmup=" << warmup << " iters=" << iters
-              << " peakHbmGbps=" << (peakHbmGbps > 0 ? std::to_string(peakHbmGbps) : std::string("N/A"))
-              << "\n";
+              << " peakHbmGbps=" << (peakHbmGbps > 0 ? std::to_string(peakHbmGbps) : std::string("N/A")) << "\n";
     std::cout << "Timing: aclrtEvent around aclsparseSDDMM (Execute), per-iter sync\n";
     std::cout << "============================================================\n";
 
-    printf("+------------------------+--------+----------+--------+--------+--------+----------+----------+--------+\n");
-    printf("| %-22s | %-6s | %8s | %6s | %6s | %6s | %8s | %8s | %6s |\n",
-           "case", "dtype", "nnz", "min(us)", "med(us)", "mean(u)", "BW(GB/s)", "GFLOPS", "BWutil");
-    printf("+------------------------+--------+----------+--------+--------+--------+----------+----------+--------+\n");
+    printf(
+        "+------------------------+--------+----------+--------+--------+--------+----------+----------+--------+\n");
+    printf("| %-22s | %-6s | %8s | %6s | %6s | %6s | %8s | %8s | %6s |\n", "case", "dtype", "nnz", "min(us)", "med(us)",
+           "mean(u)", "BW(GB/s)", "GFLOPS", "BWutil");
+    printf(
+        "+------------------------+--------+----------+--------+--------+--------+----------+----------+--------+\n");
 }
 
-static void RunAllCases(aclrtStream stream, const std::vector<PerfCase>& cases,
-                        const std::string& only, int warmup, int iters, double peakHbmGbps,
-                        std::vector<RowOut>& rows, std::vector<PerfCase>& filtered_cases) {
+static void RunAllCases(aclrtStream stream, const std::vector<PerfCase>& cases, const std::string& only, int warmup,
+                        int iters, double peakHbmGbps, std::vector<RowOut>& rows, std::vector<PerfCase>& filtered_cases)
+{
     for (const auto& pc : cases) {
         if (!only.empty() && pc.label.find(only) == std::string::npos) {
             continue;
@@ -506,19 +521,17 @@ static void RunAllCases(aclrtStream stream, const std::vector<PerfCase>& cases,
         filtered_cases.push_back(pc);
 
         std::string bwutilStr = (row.bwUtil < 0) ? "N/A" : Fmt(row.bwUtil, 6);
-        printf("| %-22s | %-6s | %8lld | %6s | %6s | %6s | %8s | %8s | %6s |\n",
-               row.label.c_str(), row.dtype_name.c_str(),
-               static_cast<long long>(nnz),
-               Fmt(row.tMin, 6).c_str(), Fmt(row.tMed, 6).c_str(), Fmt(row.tMean, 6).c_str(),
-               Fmt(row.bwGbs, 8).c_str(), Fmt(row.gflops, 8).c_str(),
-               bwutilStr.c_str());
+        printf("| %-22s | %-6s | %8lld | %6s | %6s | %6s | %8s | %8s | %6s |\n", row.label.c_str(),
+               row.dtype_name.c_str(), static_cast<long long>(nnz), Fmt(row.tMin, 6).c_str(), Fmt(row.tMed, 6).c_str(),
+               Fmt(row.tMean, 6).c_str(), Fmt(row.bwGbs, 8).c_str(), Fmt(row.gflops, 8).c_str(), bwutilStr.c_str());
         fflush(stdout);
     }
-    printf("+------------------------+--------+----------+--------+--------+--------+----------+----------+--------+\n");
+    printf(
+        "+------------------------+--------+----------+--------+--------+--------+----------+----------+--------+\n");
 }
 
-static void PrintDetailedBreakdown(const std::vector<PerfCase>& filtered_cases,
-                                   const std::vector<RowOut>& rows) {
+static void PrintDetailedBreakdown(const std::vector<PerfCase>& filtered_cases, const std::vector<RowOut>& rows)
+{
     // Detailed per-case breakdown
     std::cout << "\n=== Detailed breakdown (median time) ===\n";
     for (size_t i = 0; i < filtered_cases.size(); ++i) {
@@ -526,19 +539,15 @@ static void PrintDetailedBreakdown(const std::vector<PerfCase>& filtered_cases,
         const auto& row = rows[i];
         auto am = ComputeAlgoMetrics(pc, row.nnz);
         std::cout << "[" << row.label << "]\n";
-        std::cout << "  m=" << pc.m << " k=" << pc.k << " n=" << pc.n
-                  << " dtype=" << pc.dtype_name
-                  << " alpha=" << pc.alpha << " beta=" << pc.beta
-                  << " ratio=" << pc.sparsity_ratio << "\n";
-        std::cout << "  nnz=" << row.nnz
-                  << " (density=" << std::fixed << std::setprecision(4)
-                  << (pc.n > 0 ? static_cast<double>(row.nnz) / static_cast<double>(pc.m * pc.n) : 0.0)
-                  << ")\n";
+        std::cout << "  m=" << pc.m << " k=" << pc.k << " n=" << pc.n << " dtype=" << pc.dtype_name
+                  << " alpha=" << pc.alpha << " beta=" << pc.beta << " ratio=" << pc.sparsity_ratio << "\n";
+        std::cout << "  nnz=" << row.nnz << " (density=" << std::fixed << std::setprecision(4)
+                  << (pc.n > 0 ? static_cast<double>(row.nnz) / static_cast<double>(pc.m * pc.n) : 0.0) << ")\n";
         std::cout << std::defaultfloat;
-        std::cout << "  FLOPs=" << static_cast<uint64_t>(am.flops)
-                  << "  HBM_bytes=" << static_cast<uint64_t>(am.bytes) << "\n";
-        std::cout << "  time: min=" << std::fixed << std::setprecision(2) << row.tMin
-                  << "us  median=" << row.tMed << "us  mean=" << row.tMean << "us\n";
+        std::cout << "  FLOPs=" << static_cast<uint64_t>(am.flops) << "  HBM_bytes=" << static_cast<uint64_t>(am.bytes)
+                  << "\n";
+        std::cout << "  time: min=" << std::fixed << std::setprecision(2) << row.tMin << "us  median=" << row.tMed
+                  << "us  mean=" << row.tMean << "us\n";
         std::cout << "  achieved BW=" << row.bwGbs << " GB/s  GFLOPS=" << row.gflops;
         if (row.bwUtil >= 0) {
             std::cout << "  BWutil=" << row.bwUtil << "%";
@@ -548,38 +557,35 @@ static void PrintDetailedBreakdown(const std::vector<PerfCase>& filtered_cases,
     }
 }
 
-static void PrintJsonSummary(const std::vector<PerfCase>& filtered_cases,
-                             const std::vector<RowOut>& rows,
-                             double peakHbmGbps, int warmup, int iters) {
+static void PrintJsonSummary(const std::vector<PerfCase>& filtered_cases, const std::vector<RowOut>& rows,
+                             double peakHbmGbps, int warmup, int iters)
+{
     // Machine-readable JSON summary
     std::cout << "=== JSON ===\n";
-    std::cout << "{\"device\":\"Ascend950_dav3510\",\"peak_hbm_gbps\":" << peakHbmGbps
-              << ",\"warmup\":" << warmup << ",\"iters\":" << iters << ",\"cases\":[";
+    std::cout << "{\"device\":\"Ascend950_dav3510\",\"peak_hbm_gbps\":" << peakHbmGbps << ",\"warmup\":" << warmup
+              << ",\"iters\":" << iters << ",\"cases\":[";
     for (size_t i = 0; i < filtered_cases.size(); ++i) {
         const auto& pc = filtered_cases[i];
         const auto& row = rows[i];
         auto am = ComputeAlgoMetrics(pc, row.nnz);
-        if (i) std::cout << ",";
+        if (i) {
+            std::cout << ",";
+        }
         std::cout << "{\"label\":\"" << row.label << "\""
-                  << ",\"m\":" << pc.m << ",\"k\":" << pc.k << ",\"n\":" << pc.n
-                  << ",\"dtype\":\"" << pc.dtype_name << "\""
-                  << ",\"nnz\":" << row.nnz
-                  << ",\"alpha\":" << pc.alpha << ",\"beta\":" << pc.beta
-                  << ",\"ratio\":" << pc.sparsity_ratio
-                  << ",\"flops\":" << static_cast<uint64_t>(am.flops)
-                  << ",\"hbm_bytes\":" << static_cast<uint64_t>(am.bytes)
-                  << ",\"t_min_us\":" << row.tMin
-                  << ",\"t_med_us\":" << row.tMed
-                  << ",\"t_mean_us\":" << row.tMean
-                  << ",\"bw_gbs\":" << row.bwGbs
-                  << ",\"gflops\":" << row.gflops
-                  << ",\"bw_util_pct\":" << row.bwUtil
-                  << ",\"status\":\"" << row.note << "\"}";
+                  << ",\"m\":" << pc.m << ",\"k\":" << pc.k << ",\"n\":" << pc.n << ",\"dtype\":\"" << pc.dtype_name
+                  << "\""
+                  << ",\"nnz\":" << row.nnz << ",\"alpha\":" << pc.alpha << ",\"beta\":" << pc.beta
+                  << ",\"ratio\":" << pc.sparsity_ratio << ",\"flops\":" << static_cast<uint64_t>(am.flops)
+                  << ",\"hbm_bytes\":" << static_cast<uint64_t>(am.bytes) << ",\"t_min_us\":" << row.tMin
+                  << ",\"t_med_us\":" << row.tMed << ",\"t_mean_us\":" << row.tMean << ",\"bw_gbs\":" << row.bwGbs
+                  << ",\"gflops\":" << row.gflops << ",\"bw_util_pct\":" << row.bwUtil << ",\"status\":\"" << row.note
+                  << "\"}";
     }
     std::cout << "]}\n";
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
     PerfArgs args = ParsePerfArgs(argc, argv);
     int warmup = args.warmup;
     int iters = args.iters;
@@ -589,13 +595,13 @@ int main(int argc, char** argv) {
 
     // Representative performance cases (aligned with task 4.1 selection).
     std::vector<PerfCase> cases = {
-        {"case1  128x64x128  FP32 S",   128, 64, 128,   0.5, 1.0, 0.0, ACL_FLOAT,   "FP32", -1.0, 1.0, 1},
-        {"case6  64x32x64    FP16 S",   64,  32, 64,    0.5, 1.0, 0.0, ACL_FLOAT16, "FP16", -0.5, 0.5, 6},
-        {"case4  1024x512x1024 FP16 M", 1024,512, 1024,  0.5, 0.5, 0.5, ACL_FLOAT16, "FP16", -1.0, 1.0, 4},
-        {"case15 640x320x640  FP32 M",  640, 320,640,   0.5, 0.5, 0.5, ACL_FLOAT,   "FP32", -3.0, 3.0, 15},
-        {"case5  2048x1024x2048 FP32 L",2048,1024,2048, 0.5, 1.0, 0.0, ACL_FLOAT,   "FP32", -1.0, 1.0, 5},
-        {"case16 1280x640x1280 FP16 L", 1280,640, 1280,  0.5, 1.0, 0.0, ACL_FLOAT16, "FP16", -1.0, 1.0, 16},
-        {"case20 2048x512x1024 FP32 NF",2048,512, 1024,  0.5, 1.0, 1.0, ACL_FLOAT,   "FP32", -1.0, 1.0, 20},
+        {"case1  128x64x128  FP32 S", 128, 64, 128, 0.5, 1.0, 0.0, ACL_FLOAT, "FP32", -1.0, 1.0, 1},
+        {"case6  64x32x64    FP16 S", 64, 32, 64, 0.5, 1.0, 0.0, ACL_FLOAT16, "FP16", -0.5, 0.5, 6},
+        {"case4  1024x512x1024 FP16 M", 1024, 512, 1024, 0.5, 0.5, 0.5, ACL_FLOAT16, "FP16", -1.0, 1.0, 4},
+        {"case15 640x320x640  FP32 M", 640, 320, 640, 0.5, 0.5, 0.5, ACL_FLOAT, "FP32", -3.0, 3.0, 15},
+        {"case5  2048x1024x2048 FP32 L", 2048, 1024, 2048, 0.5, 1.0, 0.0, ACL_FLOAT, "FP32", -1.0, 1.0, 5},
+        {"case16 1280x640x1280 FP16 L", 1280, 640, 1280, 0.5, 1.0, 0.0, ACL_FLOAT16, "FP16", -1.0, 1.0, 16},
+        {"case20 2048x512x1024 FP32 NF", 2048, 512, 1024, 0.5, 1.0, 1.0, ACL_FLOAT, "FP32", -1.0, 1.0, 20},
     };
 
     aclrtStream stream = nullptr;

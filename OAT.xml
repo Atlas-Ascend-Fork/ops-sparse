@@ -65,7 +65,7 @@
 
         </filefilterlist>
         <licensematcherlist>
-            <licensematcher name="cann License" desc="If the scanning result is InvalidLicense, you can define matching rules here. Note that quotation marks must be escaped.">
+            <licensematcher name="CANN-2.0" desc="If the scanning result is InvalidLicense, you can define matching rules here. Note that quotation marks must be escaped.">
                 <licensetext name="
                     This program is free software, you can redistribute it and/or modify it under the terms and conditions of
                     CANN Open Software License Agreement Version 2.0 (the &quot;License&quot;).

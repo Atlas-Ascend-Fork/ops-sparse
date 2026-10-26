@@ -29,7 +29,7 @@ namespace {
 
 uint64_t NextSpmmWorkspaceOwnerId()
 {
-    static std::atomic<uint64_t> nextOwnerId {1};
+    static std::atomic<uint64_t> nextOwnerId{1};
     return nextOwnerId.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -45,7 +45,7 @@ static int64_t CeilDiv(int64_t value, int64_t divisor)
     return divisor > 0 ? value / divisor + (value % divisor != 0 ? 1 : 0) : 0;
 }
 
-static aclsparseStatus_t ValidateAttributeParams(const void *spMatDescr, const void *data)
+static aclsparseStatus_t ValidateAttributeParams(const void* spMatDescr, const void* data)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -82,6 +82,45 @@ static bool IsValidSparseValueType(aclDataType valueType)
     }
 }
 
+static bool ValidBatchExtent(int count, int64_t stride, uint64_t extent, uint64_t elementBytes)
+{
+    if (elementBytes == 0) {
+        return false;
+    }
+    const uint64_t limit = uint64_t(std::numeric_limits<int64_t>::max()) / elementBytes;
+    if (count < 1 || count > 65535 || stride < 0 || extent > limit) {
+        return false;
+    }
+    if (count == 1) {
+        return stride == 0 || uint64_t(stride) >= extent;
+    }
+    return uint64_t(stride) >= extent && uint64_t(stride) <= (limit - extent) / (count - 1);
+}
+
+static uint64_t SparseValueBytes(aclDataType type)
+{
+    switch (type) {
+        case ACL_FLOAT16:
+        case ACL_BF16:
+        case ACL_INT16:
+        case ACL_UINT16:
+            return 2;
+        case ACL_FLOAT:
+        case ACL_INT32:
+        case ACL_UINT32:
+            return 4;
+        case ACL_DOUBLE:
+        case ACL_COMPLEX64:
+        case ACL_INT64:
+        case ACL_UINT64:
+            return 8;
+        case ACL_COMPLEX128:
+            return 16;
+        default:
+            return 1;
+    }
+}
+
 static bool IsValidElementStride(uint64_t logicalSize, int64_t stride)
 {
     if (stride <= 0) {
@@ -94,9 +133,8 @@ static bool IsValidElementStride(uint64_t logicalSize, int64_t stride)
            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / (logicalSize - 1u);
 }
 
-static aclsparseStatus_t ValidateAttributeAccess(
-    const void *spMatDescr, const void *data,
-    aclsparseSpMatAttribute_t attribute, size_t dataSize)
+static aclsparseStatus_t ValidateAttributeAccess(const void* spMatDescr, const void* data,
+                                                 aclsparseSpMatAttribute_t attribute, size_t dataSize)
 {
     aclsparseStatus_t st = ValidateAttributeParams(spMatDescr, data);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
@@ -146,7 +184,7 @@ static void ResetSpmvActivePlan(aclsparseSpMatDescr_t descr)
 
 extern "C" {
 
-aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_t size, void *values,
+aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t* dnVecDescr, int64_t size, void* values,
                                        aclDataType valueType)
 {
     if (dnVecDescr == nullptr) {
@@ -161,7 +199,7 @@ aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_
     if (!IsValidSparseValueType(valueType)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseDnVecDescr();
+    auto* inner = new (std::nothrow) aclsparseDnVecDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -174,14 +212,14 @@ aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
-    const void *values, aclDataType valueType)
+aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t* dnVecDescr, int64_t size, const void* values,
+                                            aclDataType valueType)
 {
     if (dnVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseDnVecDescr_t tmp = nullptr;
-    aclsparseStatus_t st = aclsparseCreateDnVec(&tmp, size, const_cast<void *>(values), valueType);
+    aclsparseStatus_t st = aclsparseCreateDnVec(&tmp, size, const_cast<void*>(values), valueType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -194,7 +232,7 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr)
     if (dnVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = const_cast<aclsparseDnVecDescr *>(dnVecDescr);
+    auto* inner = const_cast<aclsparseDnVecDescr*>(dnVecDescr);
     if (inner->signature != kDnVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -203,9 +241,9 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_t size,
-    int64_t nnz, void *indices, void *values, aclsparseIndexType_t idxType,
-    aclsparseIndexBase_t idxBase, aclDataType valueType)
+aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz, void* indices,
+                                       void* values, aclsparseIndexType_t idxType, aclsparseIndexBase_t idxBase,
+                                       aclDataType valueType)
 {
     if (spVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -225,7 +263,7 @@ aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_
     if (!IsValidSparseValueType(valueType)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseSpVecDescr();
+    auto* inner = new (std::nothrow) aclsparseSpVecDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -242,16 +280,16 @@ aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t *spVecDescr, int64_t size,
-    int64_t nnz, const void *indices, const void *values, aclsparseIndexType_t idxType,
-    aclsparseIndexBase_t idxBase, aclDataType valueType)
+aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz,
+                                            const void* indices, const void* values, aclsparseIndexType_t idxType,
+                                            aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
     if (spVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseSpVecDescr_t tmp = nullptr;
-    aclsparseStatus_t st = aclsparseCreateSpVec(&tmp, size, nnz,
-        const_cast<void *>(indices), const_cast<void *>(values), idxType, idxBase, valueType);
+    aclsparseStatus_t st = aclsparseCreateSpVec(&tmp, size, nnz, const_cast<void*>(indices), const_cast<void*>(values),
+                                                idxType, idxBase, valueType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -264,7 +302,7 @@ aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr)
     if (spVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = const_cast<aclsparseSpVecDescr *>(spVecDescr);
+    auto* inner = const_cast<aclsparseSpVecDescr*>(spVecDescr);
     if (inner->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -273,9 +311,9 @@ aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t *size,
-    int64_t *nnz, void **indices, void **values, aclsparseIndexType_t *idxType,
-    aclsparseIndexBase_t *idxBase, aclDataType *valueType)
+aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz, void** indices,
+                                    void** values, aclsparseIndexType_t* idxType, aclsparseIndexBase_t* idxBase,
+                                    aclDataType* valueType)
 {
     if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -304,9 +342,9 @@ aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t *s
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t *size,
-    int64_t *nnz, const void **indices, const void **values, aclsparseIndexType_t *idxType,
-    aclsparseIndexBase_t *idxBase, aclDataType *valueType)
+aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz,
+                                         const void** indices, const void** values, aclsparseIndexType_t* idxType,
+                                         aclsparseIndexBase_t* idxBase, aclDataType* valueType)
 {
     if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -335,8 +373,7 @@ aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr,
-    aclsparseIndexBase_t *idxBase)
+aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr, aclsparseIndexBase_t* idxBase)
 {
     if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -347,7 +384,7 @@ aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDes
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void **values)
+aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void** values)
 {
     if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature || values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -356,8 +393,7 @@ aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr,
-    const void **values)
+aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr, const void** values)
 {
     if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature || values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -366,7 +402,7 @@ aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecD
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void *values)
+aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void* values)
 {
     if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -375,8 +411,8 @@ aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t *size,
-                                    void **values, aclDataType *valueType)
+aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t* size, void** values,
+                                    aclDataType* valueType)
 {
     if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -393,8 +429,8 @@ aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t *s
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *size,
-                                         const void **values, aclDataType *valueType)
+aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t* size, const void** values,
+                                         aclDataType* valueType)
 {
     if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -411,7 +447,7 @@ aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void **values)
+aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void** values)
 {
     if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature || values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -420,8 +456,7 @@ aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecDescr,
-                                               const void **values)
+aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecDescr, const void** values)
 {
     if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature || values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -430,7 +465,7 @@ aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecD
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void *values)
+aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void* values)
 {
     if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -449,7 +484,7 @@ aclsparseStatus_t aclsparseDnVecSetStride(aclsparseDnVecDescr_t dnVecDescr, int6
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *stride)
+aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr, int64_t* stride)
 {
     if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature || stride == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -458,9 +493,10 @@ aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    void *csrRowOffsets, void *csrColInd, void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
-    aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType)
+aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                     void* csrRowOffsets, void* csrColInd, void* csrValues,
+                                     aclsparseIndexType_t csrRowOffsetsType, aclsparseIndexType_t csrColIndType,
+                                     aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -471,19 +507,17 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     // Null CSR pointers are allowed at Create for delayed binding (SetPointers /
     // later BufferSize/Execute validate before use). See densetosparse L2_17,
     // sddmm NullCsrPtrs.
-    aclsparseStatus_t idxSt =
-        AclsparseValidateSupportedCsrIndexTypesExtended(csrRowOffsetsType, csrColIndType);
+    aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypesExtended(csrRowOffsetsType, csrColIndType);
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
         return idxSt;
     }
-    if (idxBase != ACL_SPARSE_INDEX_BASE_ZERO &&
-        idxBase != ACL_SPARSE_INDEX_BASE_ONE) {
+    if (idxBase != ACL_SPARSE_INDEX_BASE_ZERO && idxBase != ACL_SPARSE_INDEX_BASE_ONE) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (!IsValidSparseValueType(valueType)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    auto* inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -505,18 +539,120 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols,
-    int64_t nnz, const void *csrRowOffsets, const void *csrColInd, const void *csrValues,
-    aclsparseIndexType_t csrRowOffsetsType, aclsparseIndexType_t csrColIndType,
-    aclsparseIndexBase_t idxBase, aclDataType valueType)
+namespace {
+bool ValidBsrShape(aclsparseSpMatDescr_t* descr, int64_t blockRows, int64_t blockCols, int64_t blockNnz,
+                   int64_t rowBlockSize, int64_t colBlockSize, aclsparseIndexBase_t base, aclsparseOrder_t order)
+{
+    if (!descr || blockRows < 0 || blockCols < 0 || blockNnz < 0 || rowBlockSize != colBlockSize || rowBlockSize < 2 ||
+        rowBlockSize > 128 || (rowBlockSize & (rowBlockSize - 1)) ||
+        (base != ACL_SPARSE_INDEX_BASE_ZERO && base != ACL_SPARSE_INDEX_BASE_ONE) ||
+        (order != ACL_SPARSE_ORDER_ROW && order != ACL_SPARSE_ORDER_COL)) {
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+static bool SupportedBsrTypes(aclsparseIndexType_t ptrType, aclsparseIndexType_t idxType, aclDataType type)
+{
+    if (ptrType != ACL_SPARSE_INDEX_32I || idxType != ACL_SPARSE_INDEX_32I ||
+        (type != ACL_FLOAT && type != ACL_FLOAT16 && type != ACL_BF16 && type != ACL_COMPLEX64)) {
+        return false;
+    }
+    return true;
+}
+
+aclsparseStatus_t aclsparseCreateBsr(aclsparseSpMatDescr_t* descr, int64_t blockRows, int64_t blockCols,
+                                     int64_t blockNnz, int64_t rowBlockSize, int64_t colBlockSize, void* offsets,
+                                     void* columns, void* values, aclsparseIndexType_t ptrType,
+                                     aclsparseIndexType_t idxType, aclsparseIndexBase_t base, aclDataType type,
+                                     aclsparseOrder_t order)
+{
+    if (!ValidBsrShape(descr, blockRows, blockCols, blockNnz, rowBlockSize, colBlockSize, base, order)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (!SupportedBsrTypes(ptrType, idxType, type)) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    const uint64_t bd = rowBlockSize;
+    const uint64_t limit = std::numeric_limits<int64_t>::max();
+    if (uint64_t(blockRows) > limit / bd || uint64_t(blockCols) > limit / bd ||
+        uint64_t(blockNnz) > limit / (bd * bd * SparseValueBytes(type)) || blockRows > INT32_MAX - 1 ||
+        blockCols > INT32_MAX || blockNnz > INT32_MAX - (base == ACL_SPARSE_INDEX_BASE_ONE) || !offsets ||
+        (blockNnz && (!columns || !values)) || (blockNnz && (!blockRows || !blockCols))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* inner = new (std::nothrow) aclsparseSpMatDescr();
+    if (!inner) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    inner->format = ACL_SPARSE_FORMAT_BSR;
+    inner->rows = uint64_t(blockRows) * bd;
+    inner->cols = uint64_t(blockCols) * bd;
+    inner->nnz = blockNnz;
+    inner->blockSize = bd;
+    inner->blockOrder = order;
+    inner->ptrs = offsets;
+    inner->idxs = columns;
+    inner->values = values;
+    inner->ptrType = ptrType;
+    inner->IdxType = idxType;
+    inner->baseType = base;
+    inner->valueType = type;
+    *descr = inner;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateConstBsr(aclsparseConstSpMatDescr_t* descr, int64_t blockRows, int64_t blockCols,
+                                          int64_t blockNnz, int64_t rowBlockSize, int64_t colBlockSize,
+                                          const void* offsets, const void* columns, const void* values,
+                                          aclsparseIndexType_t ptrType, aclsparseIndexType_t idxType,
+                                          aclsparseIndexBase_t base, aclDataType type, aclsparseOrder_t order)
+{
+    if (!descr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    aclsparseSpMatDescr_t mutableDescr = nullptr;
+    const auto status = aclsparseCreateBsr(&mutableDescr, blockRows, blockCols, blockNnz, rowBlockSize, colBlockSize,
+                                           const_cast<void*>(offsets), const_cast<void*>(columns),
+                                           const_cast<void*>(values), ptrType, idxType, base, type, order);
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        *descr = mutableDescr;
+    }
+    return status;
+}
+
+aclsparseStatus_t aclsparseBsrSetStridedBatch(aclsparseSpMatDescr_t descr, int count, int64_t offsets, int64_t columns,
+                                              int64_t values)
+{
+    if (!descr || descr->signature != kSpMatSignature || descr->format != ACL_SPARSE_FORMAT_BSR ||
+        !ValidBatchExtent(count, offsets, descr->rows / descr->blockSize + 1, 4) ||
+        !ValidBatchExtent(count, columns, descr->nnz, 4) ||
+        !ValidBatchExtent(count, values, descr->nnz * descr->blockSize * descr->blockSize,
+                          SparseValueBytes(descr->valueType))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    descr->batchCount = count;
+    descr->offsetsBatchStride = offsets;
+    descr->columnsBatchStride = columns;
+    descr->valuesBatchStride = values;
+    descr->sddmmState.reset();
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                          int64_t nnz, const void* csrRowOffsets, const void* csrColInd,
+                                          const void* csrValues, aclsparseIndexType_t csrRowOffsetsType,
+                                          aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase,
+                                          aclDataType valueType)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseSpMatDescr_t tmp = nullptr;
-    aclsparseStatus_t st = aclsparseCreateCsr(&tmp, rows, cols, nnz,
-        const_cast<void *>(csrRowOffsets), const_cast<void *>(csrColInd),
-        const_cast<void *>(csrValues), csrRowOffsetsType, csrColIndType, idxBase, valueType);
+    aclsparseStatus_t st = aclsparseCreateCsr(&tmp, rows, cols, nnz, const_cast<void*>(csrRowOffsets),
+                                              const_cast<void*>(csrColInd), const_cast<void*>(csrValues),
+                                              csrRowOffsetsType, csrColIndType, idxBase, valueType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -528,8 +664,8 @@ aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr
 ///
 /// rows/cols/ellCols 都可能留下尾块，容量按补齐后的块网格计算，使每个 slot 恒占
 /// ellBlockSize^2 个标量；几何整除时与 rows*ellCols 一致。
-static aclsparseStatus_t BlockedEllCapacity(int64_t rows, int64_t cols,
-    int64_t blockSize, int64_t ellCols, int64_t *indexCount, int64_t *valueCount)
+static aclsparseStatus_t BlockedEllCapacity(int64_t rows, int64_t cols, int64_t blockSize, int64_t ellCols,
+                                            int64_t* indexCount, int64_t* valueCount)
 {
     if (blockSize == 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -542,8 +678,7 @@ static aclsparseStatus_t BlockedEllCapacity(int64_t rows, int64_t cols,
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     const int64_t limit = std::numeric_limits<int64_t>::max();
-    if ((blockRows != 0 && slots > limit / blockRows) ||
-        blockSize > limit / blockSize) {
+    if ((blockRows != 0 && slots > limit / blockRows) || blockSize > limit / blockSize) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *indexCount = blockRows * slots;
@@ -555,17 +690,15 @@ static aclsparseStatus_t BlockedEllCapacity(int64_t rows, int64_t cols,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateBlockedEll(
-    aclsparseSpMatDescr_t *descr, int64_t rows, int64_t cols,
-    int64_t ellBlockSize, int64_t ellCols, void *ellColInd, void *ellValue,
-    aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
-    aclDataType valueType)
+aclsparseStatus_t aclsparseCreateBlockedEll(aclsparseSpMatDescr_t* descr, int64_t rows, int64_t cols,
+                                            int64_t ellBlockSize, int64_t ellCols, void* ellColInd, void* ellValue,
+                                            aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
+                                            aclDataType valueType)
 {
     if (descr == nullptr || rows < 0 || cols < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (ellBlockSize <= 0 || ellCols < 0 ||
-        (indexType != ACL_SPARSE_INDEX_32I && indexType != ACL_SPARSE_INDEX_64I) ||
+    if (ellBlockSize <= 0 || ellCols < 0 || (indexType != ACL_SPARSE_INDEX_32I && indexType != ACL_SPARSE_INDEX_64I) ||
         (indexBase != ACL_SPARSE_INDEX_BASE_ZERO && indexBase != ACL_SPARSE_INDEX_BASE_ONE)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -574,16 +707,14 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
     // ValidateBell() 中要求整除，arch35 支持列尾块。
     int64_t indexCount = 0;
     int64_t valueCount = 0;
-    const aclsparseStatus_t capacity = BlockedEllCapacity(
-        rows, cols, ellBlockSize, ellCols, &indexCount, &valueCount);
+    const aclsparseStatus_t capacity = BlockedEllCapacity(rows, cols, ellBlockSize, ellCols, &indexCount, &valueCount);
     if (capacity != ACL_SPARSE_STATUS_SUCCESS) {
         return capacity;
     }
-    if ((indexCount > 0 && ellColInd == nullptr) ||
-        (valueCount > 0 && ellValue == nullptr)) {
+    if ((indexCount > 0 && ellColInd == nullptr) || (valueCount > 0 && ellValue == nullptr)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    auto* inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -605,13 +736,16 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
-    aclsparseFormat_t format, void *offsets, void *indices, void *values)
+static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr, aclsparseFormat_t format, void* offsets,
+                                               void* indices, void* values)
 {
     if (descr == nullptr || descr->signature != kSpMatSignature || descr->format != format ||
         (offsets == nullptr && descr->rows > 0 && descr->cols > 0) ||
         (descr->nnz > 0 && (indices == nullptr || values == nullptr))) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (descr->ptrs != offsets || descr->idxs != indices) {
+        descr->sddmmState.reset();
     }
     if (descr->ptrs != offsets || descr->idxs != indices || descr->values != values) {
         ResetSpmvActivePlan(descr);
@@ -632,19 +766,16 @@ static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr,
-    void *rowOffsets, void *colIndices, void *values)
+aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr, void* rowOffsets, void* colIndices, void* values)
 {
-    return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSR, rowOffsets,
-        colIndices, values);
+    return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSR, rowOffsets, colIndices, values);
 }
 
-aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
-    int64_t rowOffsetsStride, int64_t colIndStride, int64_t valuesStride)
+aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr, int64_t rowOffsetsStride, int64_t colIndStride,
+                                         int64_t valuesStride)
 {
     if (descr == nullptr || descr->format != ACL_SPARSE_FORMAT_CSR ||
-        !IsValidElementStride(descr->rows + 1u, rowOffsetsStride) ||
-        !IsValidElementStride(descr->nnz, colIndStride) ||
+        !IsValidElementStride(descr->rows + 1u, rowOffsetsStride) || !IsValidElementStride(descr->nnz, colIndStride) ||
         !IsValidElementStride(descr->nnz, valuesStride)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -660,8 +791,8 @@ aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr,
-    int64_t *rowOffsetsStride, int64_t *colIndStride, int64_t *valuesStride)
+aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr, int64_t* rowOffsetsStride,
+                                         int64_t* colIndStride, int64_t* valuesStride)
 {
     if (descr == nullptr || descr->format != ACL_SPARSE_FORMAT_CSR || rowOffsetsStride == nullptr ||
         colIndStride == nullptr || valuesStride == nullptr) {
@@ -673,24 +804,18 @@ aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,
-    void *colOffsets, void *rowIndices, void *values)
+aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr, void* colOffsets, void* rowIndices, void* values)
 {
-    return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSC, colOffsets,
-        rowIndices, values);
+    return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSC, colOffsets, rowIndices, values);
 }
 
-aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr,
-    void *rowIndices, void *colIndices, void *values)
+aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr, void* rowIndices, void* colIndices, void* values)
 {
-    if (descr == nullptr || descr->signature != kSpMatSignature ||
-        descr->format != ACL_SPARSE_FORMAT_COO ||
-        (descr->nnz > 0 &&
-         (rowIndices == nullptr || colIndices == nullptr || values == nullptr))) {
+    if (descr == nullptr || descr->signature != kSpMatSignature || descr->format != ACL_SPARSE_FORMAT_COO ||
+        (descr->nnz > 0 && (rowIndices == nullptr || colIndices == nullptr || values == nullptr))) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (descr->rowInds != rowIndices || descr->colInds != colIndices ||
-        descr->values != values) {
+    if (descr->rowInds != rowIndices || descr->colInds != colIndices || descr->values != values) {
         ResetSpmvActivePlan(descr);
     }
     descr->rowInds = rowIndices;
@@ -706,7 +831,7 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr)
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    auto *inner = const_cast<aclsparseSpMatDescr *>(spMatDescr);
+    auto* inner = const_cast<aclsparseSpMatDescr*>(spMatDescr);
     if (inner->signature != kSpMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -715,8 +840,7 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr,
-    aclsparseFormat_t *format)
+aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr, aclsparseFormat_t* format)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -727,7 +851,7 @@ aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void **values)
+aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void** values)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -738,8 +862,7 @@ aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr,
-    const void **values)
+aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr, const void** values)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -750,7 +873,7 @@ aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatD
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void *values)
+aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void* values)
 {
     if (spMatDescr == nullptr || spMatDescr->signature != kSpMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -763,8 +886,8 @@ aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
-    int64_t *rows, int64_t *cols, int64_t *nnz)
+aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
+                                        int64_t* nnz)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -781,9 +904,8 @@ aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
-    int64_t rows, int64_t cols, int64_t ld, void *values,
-    aclDataType valueType, aclsparseOrder_t order)
+aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t* dnMatDescr, int64_t rows, int64_t cols, int64_t ld,
+                                       void* values, aclDataType valueType, aclsparseOrder_t order)
 {
     if (dnMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -793,11 +915,10 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     // 稀疏侧 offsets/indices 走 I32：超出 INT32_MAX 的维度在创建期拒绝。
-    if (rows > static_cast<int64_t>(INT32_MAX) ||
-        cols > static_cast<int64_t>(INT32_MAX)) {
+    if (rows > static_cast<int64_t>(INT32_MAX) || cols > static_cast<int64_t>(INT32_MAX)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (ld <= 0) {
+    if (ld < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (rows > 0 && cols > 0 && values == nullptr) {
@@ -816,7 +937,7 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (order == ACL_SPARSE_ORDER_COL && ld < rows) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseDnMatDescr();
+    auto* inner = new (std::nothrow) aclsparseDnMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -836,7 +957,7 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr)
     if (dnMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = const_cast<aclsparseDnMatDescr *>(dnMatDescr);
+    auto* inner = const_cast<aclsparseDnMatDescr*>(dnMatDescr);
     if (inner->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -845,9 +966,8 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t *rows, int64_t *cols,
-                                    int64_t *ld, void **values, aclDataType *valueType,
-                                    aclsparseOrder_t *order)
+aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols, int64_t* ld,
+                                    void** values, aclDataType* valueType, aclsparseOrder_t* order)
 {
     if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -873,9 +993,9 @@ aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t *r
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t *rows,
-                                         int64_t *cols, int64_t *ld, const void **values,
-                                         aclDataType *valueType, aclsparseOrder_t *order)
+aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols,
+                                         int64_t* ld, const void** values, aclDataType* valueType,
+                                         aclsparseOrder_t* order)
 {
     if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -901,7 +1021,7 @@ aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void **values)
+aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void** values)
 {
     if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -912,8 +1032,7 @@ aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr,
-                                               const void **values)
+aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr, const void** values)
 {
     if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -924,7 +1043,7 @@ aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatD
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void *values)
+aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void* values)
 {
     if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -933,16 +1052,45 @@ aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
-    int64_t rows, int64_t cols, int64_t ld, const void *values,
-    aclDataType valueType, aclsparseOrder_t order)
+aclsparseStatus_t aclsparseDnMatGetStridedBatch(aclsparseConstDnMatDescr_t descr, int* count, int64_t* stride)
+{
+    if (!descr || descr->signature != kDnMatSignature || !count || !stride) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *count = descr->batchCount;
+    *stride = descr->batchStride;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnMatSetStridedBatch(aclsparseDnMatDescr_t descr, int count, int64_t stride)
+{
+    if (!descr || descr->signature != kDnMatSignature) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const uint64_t major = descr->order == ACL_SPARSE_ORDER_ROW ? descr->rows : descr->cols;
+    const uint64_t minor = descr->order == ACL_SPARSE_ORDER_ROW ? descr->cols : descr->rows;
+    const uint64_t limit = std::numeric_limits<int64_t>::max();
+    if (minor > limit || (major > 1 && uint64_t(descr->ld) > (limit - minor) / (major - 1))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const uint64_t extent = major && minor ? (major - 1) * uint64_t(descr->ld) + minor : 0;
+    if (!ValidBatchExtent(count, stride, extent, SparseValueBytes(descr->valueType))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    descr->batchCount = count;
+    descr->batchStride = stride;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t* dnMatDescr, int64_t rows, int64_t cols,
+                                            int64_t ld, const void* values, aclDataType valueType,
+                                            aclsparseOrder_t order)
 {
     if (dnMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseDnMatDescr_t tmp = nullptr;
-    aclsparseStatus_t st = aclsparseCreateDnMat(&tmp, rows, cols, ld,
-        const_cast<void *>(values), valueType, order);
+    aclsparseStatus_t st = aclsparseCreateDnMat(&tmp, rows, cols, ld, const_cast<void*>(values), valueType, order);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -950,16 +1098,15 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpMatSetAttribute(
-    aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
-    const void *data, size_t dataSize)
+aclsparseStatus_t aclsparseSpMatSetAttribute(aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+                                             const void* data, size_t dataSize)
 {
     aclsparseStatus_t st = ValidateAttributeAccess(spMatDescr, data, attribute, dataSize);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
     if (attribute == ACL_SPARSE_SPMAT_FILL_MODE) {
-        aclsparseFillMode_t fm = *static_cast<const aclsparseFillMode_t *>(data);
+        aclsparseFillMode_t fm = *static_cast<const aclsparseFillMode_t*>(data);
         if (fm != ACL_SPARSE_FILL_MODE_LOWER && fm != ACL_SPARSE_FILL_MODE_UPPER) {
             return ACL_SPARSE_STATUS_INVALID_VALUE;
         }
@@ -967,7 +1114,7 @@ aclsparseStatus_t aclsparseSpMatSetAttribute(
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     if (attribute == ACL_SPARSE_SPMAT_DIAG_TYPE) {
-        aclsparseDiagType_t dt = *static_cast<const aclsparseDiagType_t *>(data);
+        aclsparseDiagType_t dt = *static_cast<const aclsparseDiagType_t*>(data);
         if (dt != ACL_SPARSE_DIAG_TYPE_NON_UNIT && dt != ACL_SPARSE_DIAG_TYPE_UNIT) {
             return ACL_SPARSE_STATUS_INVALID_VALUE;
         }
@@ -977,30 +1124,27 @@ aclsparseStatus_t aclsparseSpMatSetAttribute(
     return ACL_SPARSE_STATUS_INVALID_VALUE;
 }
 
-aclsparseStatus_t aclsparseSpMatGetAttribute(
-    aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
-    void *data, size_t dataSize)
+aclsparseStatus_t aclsparseSpMatGetAttribute(aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+                                             void* data, size_t dataSize)
 {
     aclsparseStatus_t st = ValidateAttributeAccess(spMatDescr, data, attribute, dataSize);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
     if (attribute == ACL_SPARSE_SPMAT_FILL_MODE) {
-        *static_cast<aclsparseFillMode_t *>(data) = spMatDescr->fillMode;
+        *static_cast<aclsparseFillMode_t*>(data) = spMatDescr->fillMode;
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     if (attribute == ACL_SPARSE_SPMAT_DIAG_TYPE) {
-        *static_cast<aclsparseDiagType_t *>(data) = spMatDescr->diagType;
+        *static_cast<aclsparseDiagType_t*>(data) = spMatDescr->diagType;
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     return ACL_SPARSE_STATUS_INVALID_VALUE;
 }
 
-aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz,
-    void *cooRowInd, void *cooColInd, void *cooValues,
-    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType)
+aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                     void* cooRowInd, void* cooColInd, void* cooValues, aclsparseIndexType_t cooIdxType,
+                                     aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
     aclsparseStatus_t st = ValidateSpMatCreateParams(spMatDescr, rows, cols, nnz);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
@@ -1009,7 +1153,7 @@ aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
     if (cooIdxType != ACL_SPARSE_INDEX_32I && cooIdxType != ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    auto* inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -1034,19 +1178,18 @@ aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz,
-    const void *cooRowInd, const void *cooColInd, const void *cooValues,
-    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType)
+aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                          int64_t nnz, const void* cooRowInd, const void* cooColInd,
+                                          const void* cooValues, aclsparseIndexType_t cooIdxType,
+                                          aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseSpMatDescr_t tmp = nullptr;
-    aclsparseStatus_t st = aclsparseCreateCoo(&tmp, rows, cols, nnz,
-        const_cast<void *>(cooRowInd), const_cast<void *>(cooColInd),
-        const_cast<void *>(cooValues), cooIdxType, idxBase, valueType);
+    aclsparseStatus_t st = aclsparseCreateCoo(&tmp, rows, cols, nnz, const_cast<void*>(cooRowInd),
+                                              const_cast<void*>(cooColInd), const_cast<void*>(cooValues), cooIdxType,
+                                              idxBase, valueType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -1054,11 +1197,10 @@ aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
-    void *sellSlicePtr, void *sellColInd, void *sellValues,
-    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType)
+aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                           int64_t sliceNnz, int64_t numSlices, void* sellSlicePtr, void* sellColInd,
+                                           void* sellValues, aclsparseIndexType_t sellIdxType,
+                                           aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
     aclsparseStatus_t st = ValidateSpMatCreateParams(spMatDescr, rows, cols, nnz);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
@@ -1070,7 +1212,7 @@ aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
     if (sliceNnz < 0 || numSlices < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    auto* inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -1092,19 +1234,19 @@ aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
-    const void *sellSlicePtr, const void *sellColInd, const void *sellValues,
-    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType)
+aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                                int64_t nnz, int64_t sliceNnz, int64_t numSlices,
+                                                const void* sellSlicePtr, const void* sellColInd,
+                                                const void* sellValues, aclsparseIndexType_t sellIdxType,
+                                                aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseSpMatDescr_t tmp = nullptr;
     aclsparseStatus_t st = aclsparseCreateSlicedEll(&tmp, rows, cols, nnz, sliceNnz, numSlices,
-        const_cast<void *>(sellSlicePtr), const_cast<void *>(sellColInd),
-        const_cast<void *>(sellValues), sellIdxType, idxBase, valueType);
+                                                    const_cast<void*>(sellSlicePtr), const_cast<void*>(sellColInd),
+                                                    const_cast<void*>(sellValues), sellIdxType, idxBase, valueType);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }

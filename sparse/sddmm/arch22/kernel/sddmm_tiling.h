@@ -9,27 +9,18 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
+#ifndef SDDMM_KERNEL_TILING_H_
+#define SDDMM_KERNEL_TILING_H_
 
-/*!
- * \file sddmm_kernel.h
- * \brief sddmm kernel_launch 声明（Host / Kernel 共用）。
- */
+#include "../sddmm_tiling_fields.h"
 
-#ifndef SDDMM_ARCH22_KERNEL_H_
-#define SDDMM_ARCH22_KERNEL_H_
+struct SddmmKernelTilingData : SddmmTilingFields {};
 
-#include <cstdint>
-#include "sddmm.h"
-#include "cann_ops_sparse.h"
+struct SddmmBsrKernelTiling {
+    uint32_t m, n, k, bd, blocks, first, count, yPitch, group;
+    int32_t base;
+    bool colMajor;
+    float ar, ai, br, bi;
+};
 
-#ifndef GM_ADDR
-#define GM_ADDR uint8_t *
 #endif
-
-extern "C" aclsparseStatus_t sddmm_kernel_launch(
-    GM_ADDR matA, GM_ADDR matB,
-    GM_ADDR csrRowOffsets, GM_ADDR csrColIndices, GM_ADDR csrValues,
-    const SddmmTilingData &tiling,
-    uint32_t numBlocks, void *stream);
-
-#endif // SDDMM_ARCH22_KERNEL_H_

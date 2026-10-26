@@ -10,17 +10,12 @@
  * ----------------------------------------------------------------------------------------------------------
  */
 
-#include "test_common.h"
-#include "sddmm_golden.h"
-#include "sddmm_npu_wrapper.h"
-#include "sddmm_param.h"
-#include "../sddmm_test_layout.h"
+#include "sddmm_test_common.h"
 #include "../../frame/presmoke.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
-#include <random>
 
 using namespace sparse_test;
 
@@ -48,7 +43,24 @@ TEST(VerifierRegressionTest, ComparesIntegralVectorsWithoutFloatNarrowing)
     EXPECT_FALSE(Verifier::verifyVector(output, golden, cfg, "int32-low-bit-mismatch"));
 }
 
-using SddmmArch22Test = SddmmFunctionalTestFixture;
+TEST(SddmmGoldenTest, Fp16DecodeAndRoundTrip)
+{
+    EXPECT_EQ(Fp16BitsToFp32(0x0001), std::ldexp(1.0f, -24));
+    EXPECT_EQ(Fp16BitsToFp32(0x03ff), std::ldexp(1023.0f, -24));
+    EXPECT_EQ(Fp16BitsToFp32(0x0400), std::ldexp(1.0f, -14));
+    EXPECT_EQ(Fp16BitsToFp32(0x7bff), 65504.0f);
+    EXPECT_TRUE(std::signbit(Fp16BitsToFp32(0x8000)));
+    EXPECT_TRUE(std::isinf(Fp16BitsToFp32(0xfc00)));
+    EXPECT_TRUE(std::isnan(Fp16BitsToFp32(0x7e01)));
+    for (uint32_t bits = 0; bits <= 0xffffu; ++bits) {
+        const uint16_t half = static_cast<uint16_t>(bits);
+        const bool nan = (half & 0x7c00u) == 0x7c00u && (half & 0x03ffu) != 0;
+        const uint16_t expected = nan ? static_cast<uint16_t>((half & 0x8000u) | 0x7e00u) : half;
+        EXPECT_EQ(Fp32ToFp16Bits(Fp16BitsToFp32(half)), expected) << "half bits=" << bits;
+    }
+}
+
+using SddmmArch22Test = SddmmParameterizedTest;
 
 namespace {
 
@@ -63,9 +75,8 @@ std::vector<SddmmTestParam> GetSddmmArch22Cases()
         // These rows target K/cache and row-nnz thresholds. Their dimensions
         // are part of the regression contract and must not be normalized.
         const int caseNumber = std::atoi(p.case_name.c_str() + 4);
-        const bool isBoundaryCase = p.case_name == "A22_10" || p.case_name == "A22_11" ||
-                                    p.case_name == "A22_15" || p.case_name == "A22_35" ||
-                                    p.case_name == "A22_48" || p.case_name == "A22_49" ||
+        const bool isBoundaryCase = p.case_name == "A22_10" || p.case_name == "A22_11" || p.case_name == "A22_15" ||
+                                    p.case_name == "A22_35" || p.case_name == "A22_48" || p.case_name == "A22_49" ||
                                     caseNumber >= 54;
         if (!isBoundaryCase) {
             // Preserve CSV rows and their dtype/op/layout/scalar semantics,
@@ -78,9 +89,10 @@ std::vector<SddmmTestParam> GetSddmmArch22Cases()
     return cases;
 }
 
-}  // namespace
+} // namespace
 
-TEST_P(SddmmArch22Test, SddmmFunctional) {
+TEST_P(SddmmArch22Test, SddmmFunctional)
+{
     const auto& p = param_;
 
     aclDataType dtype = ParseDtype(p.dtype);
@@ -94,12 +106,10 @@ TEST_P(SddmmArch22Test, SddmmFunctional) {
     SddmmInputs inputs = GenerateSddmmInputs(p);
     int64_t nnz = inputs.nnz;
 
-    std::vector<double> expectFp64 = ComputeGoldenExpect(p, inputs.csrC, inputs.Xf64,
-                                                          inputs.Yf64, dtype, opX, opY);
+    std::vector<double> expectFp64 = ComputeGoldenExpect(p, inputs.csrC, inputs.Xf64, inputs.Yf64, dtype, opX, opY);
 
-    SddmmNpuResult npuResult = RunNpuSddmm(p, stream_, inputs.csrC, inputs.Xf64,
-                                            inputs.Yf64, dtype, computeType, alg,
-                                            opX, opY, orderX, orderY, nnz);
+    SddmmNpuResult npuResult = RunNpuSddmm(p, stream_, inputs.csrC, inputs.Xf64, inputs.Yf64, dtype, computeType, alg,
+                                           opX, opY, orderX, orderY, nnz);
 
     ASSERT_EQ(npuResult.bufferSizeRet, ACL_SPARSE_STATUS_SUCCESS);
     ASSERT_EQ(npuResult.preprocessRet, ACL_SPARSE_STATUS_SUCCESS);
@@ -107,42 +117,32 @@ TEST_P(SddmmArch22Test, SddmmFunctional) {
 
     if (nnz > 0) {
         ASSERT_EQ(npuResult.valuesOut.size(), static_cast<size_t>(nnz));
-        const bool pass = VerifySddmmPrecisionCore(p.case_name, npuResult, expectFp64, dtype, nnz);
-        EXPECT_TRUE(pass) << "Precision verification failed for " << p.case_name;
+        VerifySddmmPrecision(p.case_name, npuResult, expectFp64, dtype, nnz);
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    SddmmArch22Cases,
-    SddmmArch22Test,
-    testing::ValuesIn(GetSddmmArch22Cases()),
-    [](const testing::TestParamInfo<SddmmTestParam>& info) {
-        return info.param.case_name;
-    }
-);
+INSTANTIATE_TEST_SUITE_P(SddmmArch22Cases, SddmmArch22Test, testing::ValuesIn(GetSddmmArch22Cases()),
+                         [](const testing::TestParamInfo<SddmmTestParam>& info) { return info.param.case_name; });
 
 class SddmmArch22ExceptionTest : public testing::Test {
 public:
-    static void SetUpTestSuite() {
-        env_ = std::make_unique<AclEnvScope>();
-    }
-    static void TearDownTestSuite() {
-        env_.reset();
-    }
+    static void SetUpTestSuite() { env_ = std::make_unique<AclEnvScope>(); }
+    static void TearDownTestSuite() { env_.reset(); }
+
 protected:
     inline static std::unique_ptr<AclEnvScope> env_;
 };
 
-TEST_F(SddmmArch22ExceptionTest, E1_NullHandle) {
+TEST_F(SddmmArch22ExceptionTest, E1_NullHandle)
+{
     size_t bufSize = 0;
-    auto ret = aclsparseSDDMMBufferSize(
-        nullptr, ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        nullptr, nullptr, nullptr, nullptr, nullptr,
-        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    auto ret = aclsparseSDDMMBufferSize(nullptr, ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE, nullptr, nullptr,
+                                        nullptr, nullptr, nullptr, ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
     EXPECT_NE(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
-TEST_F(SddmmArch22ExceptionTest, E2_UnsupportedComputeType) {
+TEST_F(SddmmArch22ExceptionTest, E2_UnsupportedComputeType)
+{
     HandleManager handle;
     handle.setStream(env_->stream());
     float alpha = 1.0f, beta = 0.0f;
@@ -161,18 +161,17 @@ TEST_F(SddmmArch22ExceptionTest, E2_UnsupportedComputeType) {
 
     auto matX = DnMatManager::createConst(m, k, k, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     auto matY = DnMatManager::createConst(n, k, k, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dVals.get(),
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dVals.get(), ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     size_t bufSize = 0;
-    auto ret = aclsparseSDDMMBufferSize(
-        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
-        ACL_INT32, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    auto ret = aclsparseSDDMMBufferSize(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE, &alpha,
+                                        matX.cget(), matY.cget(), &beta, matC.get(), ACL_INT32,
+                                        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_NOT_SUPPORTED);
 }
 
-TEST_F(SddmmArch22ExceptionTest, E3_DimensionMismatch) {
+TEST_F(SddmmArch22ExceptionTest, E3_DimensionMismatch)
+{
     HandleManager handle;
     handle.setStream(env_->stream());
     float alpha = 1.0f, beta = 0.0f;
@@ -191,25 +190,23 @@ TEST_F(SddmmArch22ExceptionTest, E3_DimensionMismatch) {
 
     auto matX = DnMatManager::createConst(m, k + 1, k + 1, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     auto matY = DnMatManager::createConst(n, k, k, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dVals.get(),
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dVals.get(), ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     size_t bufSize = 0;
-    auto ret = aclsparseSDDMMBufferSize(
-        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
-        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    auto ret = aclsparseSDDMMBufferSize(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE, &alpha,
+                                        matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
+                                        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// E4: m=0 -> ACL_SPARSE_STATUS_INVALID_VALUE
-//     零维由 SddmmValidateShapes 守卫拒绝（维度一致性对 0==0 放行），对齐 arch35 MZero/NZero/KZero 行为。
-TEST_F(SddmmArch22ExceptionTest, E4_MZero) {
+// Empty CSR output is valid in the public A2/A3 three-stage contract.
+TEST_F(SddmmArch22ExceptionTest, EmptyRowsBufferSize)
+{
     HandleManager handle;
     handle.setStream(env_->stream());
     float alpha = 1.0f, beta = 0.0f;
     const int64_t m = 0, n = 3, k = 2;
-    // X: 0×2 ROW 序 (ld=2)，0 元素也需非空 values（公共层要求 values 非空）
+    // X has zero rows; its data is not accessed.
     std::vector<float> xDummy(1, 1.0f);
     std::vector<float> yDummy(1, 1.0f);
     DeviceBuffer dX = DeviceBuffer::copyFrom(xDummy.data(), xDummy.size() * sizeof(float));
@@ -220,26 +217,23 @@ TEST_F(SddmmArch22ExceptionTest, E4_MZero) {
 
     auto matX = DnMatManager::createConst(m, k, k, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     auto matY = DnMatManager::createConst(n, k, k, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr,
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     size_t bufSize = 0;
-    auto ret = aclsparseSDDMMBufferSize(
-        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
-        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+    auto ret = aclsparseSDDMMBufferSize(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE, &alpha,
+                                        matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
+                                        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
-// E5: n=0 -> ACL_SPARSE_STATUS_INVALID_VALUE
-//     零维由 SddmmValidateShapes 守卫拒绝（维度一致性对 0==0 放行），对齐 arch35 MZero/NZero/KZero 行为。
-TEST_F(SddmmArch22ExceptionTest, E5_NZero) {
+TEST_F(SddmmArch22ExceptionTest, EmptyColumnsBufferSize)
+{
     HandleManager handle;
     handle.setStream(env_->stream());
     float alpha = 1.0f, beta = 0.0f;
     const int64_t m = 4, n = 0, k = 2;
     std::vector<float> hX(static_cast<size_t>(m) * static_cast<size_t>(k), 1.0f);
-    // Y: 0×2 ROW 序 (ld=2)，0 元素也需非空 values（公共层要求 values 非空）
+    // Y has zero rows; its data is not accessed.
     std::vector<float> yDummy(1, 1.0f);
     DeviceBuffer dX = DeviceBuffer::copyFrom(hX.data(), hX.size() * sizeof(float));
     DeviceBuffer dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
@@ -249,48 +243,43 @@ TEST_F(SddmmArch22ExceptionTest, E5_NZero) {
 
     auto matX = DnMatManager::createConst(m, k, k, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     auto matY = DnMatManager::createConst(n, k, k, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr,
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     size_t bufSize = 0;
-    auto ret = aclsparseSDDMMBufferSize(
-        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
-        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+    auto ret = aclsparseSDDMMBufferSize(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE, &alpha,
+                                        matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
+                                        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
-// E6: k=0 -> ACL_SPARSE_STATUS_INVALID_VALUE
-//     零维由 SddmmValidateShapes 守卫拒绝（维度一致性对 0==0 放行），对齐 arch35 MZero/NZero/KZero 行为。
-TEST_F(SddmmArch22ExceptionTest, E6_KZero) {
+TEST_F(SddmmArch22ExceptionTest, ZeroReductionBufferSize)
+{
     HandleManager handle;
     handle.setStream(env_->stream());
     float alpha = 1.0f, beta = 0.0f;
     const int64_t m = 4, n = 3, k = 0;
-    // X: 4×0 ROW 序 (ld=1)，0 元素也需非空 values（公共层要求 values 非空）
+    // X and Y have zero reduction columns and valid leading dimensions.
     std::vector<float> xDummy(1, 1.0f);
-    // Y: 3×0 ROW 序 (ld=1)，0 元素也需非空 values（公共层要求 values 非空）
     std::vector<float> yDummy(1, 1.0f);
     DeviceBuffer dX = DeviceBuffer::copyFrom(xDummy.data(), xDummy.size() * sizeof(float));
     DeviceBuffer dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
-    // C: 4×3 CSR，nnz=0（k=0 时 nnz 必为 0），rowOffsets 5 个 0
+    // This case uses an empty pattern; SddmmContract also covers nonempty C.
     std::vector<int32_t> rowOff(5, 0);
     DeviceBuffer dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
 
     auto matX = DnMatManager::createConst(m, k, 1, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
     auto matY = DnMatManager::createConst(n, k, 1, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
-    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr,
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     size_t bufSize = 0;
-    auto ret = aclsparseSDDMMBufferSize(
-        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
-        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+    auto ret = aclsparseSDDMMBufferSize(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE, &alpha,
+                                        matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
+                                        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
-TEST_F(SddmmArch22ExceptionTest, E4_UnrepresentableLeadingDimension) {
+TEST_F(SddmmArch22ExceptionTest, E4_UnrepresentableLeadingDimension)
+{
     HandleManager handle;
     handle.setStream(env_->stream());
     float alpha = 1.0f, beta = 0.0f;
@@ -303,18 +292,14 @@ TEST_F(SddmmArch22ExceptionTest, E4_UnrepresentableLeadingDimension) {
     DeviceBuffer dColInd = DeviceBuffer::copyFrom(colInd.data(), sizeof(int32_t));
     DeviceBuffer dValues = DeviceBuffer::copyFrom(values.data(), sizeof(float));
     DeviceBuffer dDense = DeviceBuffer::copyFrom(dense.data(), sizeof(float));
-    auto matX = DnMatManager::createConst(
-        m, k, static_cast<int64_t>(UINT32_MAX) + 1, dDense.raw(), ACL_FLOAT,
-        ACL_SPARSE_ORDER_ROW);
-    auto matY = DnMatManager::createConst(n, k, k, dDense.raw(), ACL_FLOAT,
+    auto matX = DnMatManager::createConst(m, k, static_cast<int64_t>(UINT32_MAX) + 1, dDense.raw(), ACL_FLOAT,
                                           ACL_SPARSE_ORDER_ROW);
-    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dValues.get(),
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    auto matY = DnMatManager::createConst(n, k, k, dDense.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dValues.get(), ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
     size_t bufSize = 0;
-    const auto ret = aclsparseSDDMMBufferSize(
-        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
-        &alpha, matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
-        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    const auto ret = aclsparseSDDMMBufferSize(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
+                                              &alpha, matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
+                                              ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }

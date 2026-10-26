@@ -34,7 +34,7 @@ uint32_t GetSddmmBlockDim()
     static std::once_flag onceFlag;
     std::call_once(onceFlag, [&]() {
 #ifndef __CCE_AICORE__
-        auto *plat = platform_ascendc::PlatformAscendCManager::GetInstance();
+        auto* plat = platform_ascendc::PlatformAscendCManager::GetInstance();
         if (plat != nullptr) {
             const uint32_t aiv = plat->GetCoreNumAiv();
             if (aiv > 0u) {
@@ -64,18 +64,18 @@ struct SddmmPatternSig {
     uint64_t k;
 };
 
-static std::unordered_map<const void *, SddmmPatternSig> &GetSddmmPatternCache()
+static std::unordered_map<const void*, SddmmPatternSig>& GetSddmmPatternCache()
 {
-    static std::unordered_map<const void *, SddmmPatternSig> cache;
+    static std::unordered_map<const void*, SddmmPatternSig> cache;
     return cache;
 }
 
 // Returns true only when buffer is cached AND its recorded pattern matches the
 // current rows/nnz. A cache miss is treated as a pattern change so the caller
 // performs a full rebuild instead of refreshing stale tiling data.
-static bool SddmmPatternMatch(const void *buffer, uint64_t rows, uint64_t nnz, uint64_t k)
+static bool SddmmPatternMatch(const void* buffer, uint64_t rows, uint64_t nnz, uint64_t k)
 {
-    auto &cache = GetSddmmPatternCache();
+    auto& cache = GetSddmmPatternCache();
     auto it = cache.find(buffer);
     if (it == cache.end()) {
         return false;
@@ -83,16 +83,17 @@ static bool SddmmPatternMatch(const void *buffer, uint64_t rows, uint64_t nnz, u
     return it->second.rows == rows && it->second.nnz == nnz && it->second.k == k;
 }
 
-static void SddmmPatternRecord(const void *buffer, uint64_t rows, uint64_t nnz, uint64_t k)
+static void SddmmPatternRecord(const void* buffer, uint64_t rows, uint64_t nnz, uint64_t k)
 {
     GetSddmmPatternCache()[buffer] = SddmmPatternSig{rows, nnz, k};
 }
 
-float ScalarReadF32(const void *p) {
+float ScalarReadF32(const void* p)
+{
     if (p == nullptr) {
         return 0.0f;
     }
-    return *static_cast<const float *>(p);
+    return *static_cast<const float*>(p);
 }
 
 // Convert IEEE-754 half-precision bit pattern (uint16_t) to float.
@@ -101,7 +102,8 @@ float ScalarReadF32(const void *p) {
 //
 // 注意：test/sddmm/sddmm_golden.h 中有同功能实现 Fp16BitsToFp32，
 // 两者算法一致，host.cpp 侧独立保留以便 sparse 库不依赖测试头文件。
-static float SddmmFp16BitsToFp32(uint16_t h) {
+static float SddmmFp16BitsToFp32(uint16_t h)
+{
     uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
     uint32_t exp = (h >> 10) & 0x1Fu;
     uint32_t mant = h & 0x03FFu;
@@ -128,7 +130,8 @@ static float SddmmFp16BitsToFp32(uint16_t h) {
 // Read alpha/beta scalar as float according to ACL computeType convention:
 //   ACL_FLOAT   -> pointer points to float (4 bytes)
 //   ACL_FLOAT16 -> pointer points to half (2 bytes), convert to float
-static float SddmmReadScalarToF32(const void *p, aclDataType computeType) {
+static float SddmmReadScalarToF32(const void* p, aclDataType computeType)
+{
     if (p == nullptr) {
         return 0.0f;
     }
@@ -147,38 +150,37 @@ struct SddmmSupportedDtypeCombo {
     aclDataType computeType;
 };
 
-static bool IsSupportedSddmmDtypeCombo(const aclsparseDnMatDescr *matX,
-                                       const aclsparseDnMatDescr *matY,
-                                       const aclsparseSpMatDescr *matC,
-                                       aclDataType computeType)
+static bool IsSupportedSddmmDtypeCombo(const aclsparseDnMatDescr* matX, const aclsparseDnMatDescr* matY,
+                                       const aclsparseSpMatDescr* matC, aclDataType computeType)
 {
     static const SddmmSupportedDtypeCombo kCombos[] = {
         {ACL_FLOAT, ACL_FLOAT, ACL_FLOAT, ACL_FLOAT},
         {ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT16},
     };
-    for (const auto &combo : kCombos) {
-        if (matX->valueType == combo.matX && matY->valueType == combo.matY &&
-            matC->valueType == combo.matC && computeType == combo.computeType) {
+    for (const auto& combo : kCombos) {
+        if (matX->valueType == combo.matX && matY->valueType == combo.matY && matC->valueType == combo.matC &&
+            computeType == combo.computeType) {
             return true;
         }
     }
     return false;
 }
 
-static bool SddmmDimensionsMatch(const aclsparseDnMatDescr *matX,
-                                  const aclsparseDnMatDescr *matY,
-                                  const aclsparseSpMatDescr *matC,
-                                  aclsparseOperation_t opX,
-                                  aclsparseOperation_t opY)
+static bool SddmmDimensionsMatch(const aclsparseDnMatDescr* matX, const aclsparseDnMatDescr* matY,
+                                 const aclsparseSpMatDescr* matC, aclsparseOperation_t opX, aclsparseOperation_t opY)
 {
     const int64_t m = static_cast<int64_t>(matC->rows);
     const int64_t n = static_cast<int64_t>(matC->cols);
     int64_t k;
     if (opX == ACL_SPARSE_OP_NON_TRANSPOSE) {
-        if (matX->rows != m) { return false; }
+        if (matX->rows != m) {
+            return false;
+        }
         k = matX->cols;
     } else {
-        if (matX->cols != m) { return false; }
+        if (matX->cols != m) {
+            return false;
+        }
         k = matX->rows;
     }
     if (opY == ACL_SPARSE_OP_NON_TRANSPOSE) {
@@ -187,13 +189,9 @@ static bool SddmmDimensionsMatch(const aclsparseDnMatDescr *matX,
     return (matY->rows == n && matY->cols == k);
 }
 
-static bool IsSupportedSddmmAlg(aclsparseSDDMMAlg_t alg)
-{
-    return alg == ACL_SPARSE_SDDMM_ALG_DEFAULT;
-}
+static bool IsSupportedSddmmAlg(aclsparseSDDMMAlg_t alg) { return alg == ACL_SPARSE_SDDMM_ALG_DEFAULT; }
 
-static aclsparseStatus_t ValidateSddmmOperations(aclsparseOperation_t opX,
-                                                 aclsparseOperation_t opY)
+static aclsparseStatus_t ValidateSddmmOperations(aclsparseOperation_t opX, aclsparseOperation_t opY)
 {
     if (opX != ACL_SPARSE_OP_NON_TRANSPOSE && opX != ACL_SPARSE_OP_TRANSPOSE) {
         OP_LOGE("aclsparseSDDMM", "opX must be NON_TRANSPOSE or TRANSPOSE, got %d", static_cast<int>(opX));
@@ -206,9 +204,8 @@ static aclsparseStatus_t ValidateSddmmOperations(aclsparseOperation_t opX,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t ValidateSddmmDescriptors(const aclsparseDnMatDescr *matX,
-                                                    const aclsparseDnMatDescr *matY,
-                                                    const aclsparseSpMatDescr *matC)
+static aclsparseStatus_t ValidateSddmmDescriptors(const aclsparseDnMatDescr* matX, const aclsparseDnMatDescr* matY,
+                                                  const aclsparseSpMatDescr* matC)
 {
     if (matX == nullptr || matY == nullptr || matC == nullptr) {
         OP_LOGE("aclsparseSDDMM", "matX/matY/matC is nullptr");
@@ -220,8 +217,8 @@ static aclsparseStatus_t ValidateSddmmDescriptors(const aclsparseDnMatDescr *mat
     }
     aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypes(matC->ptrType, matC->IdxType);
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
-        OP_LOGE("aclsparseSDDMM", "CSR index type not supported (ptr=%d, idx=%d)",
-                static_cast<int>(matC->ptrType), static_cast<int>(matC->IdxType));
+        OP_LOGE("aclsparseSDDMM", "CSR index type not supported (ptr=%d, idx=%d)", static_cast<int>(matC->ptrType),
+                static_cast<int>(matC->IdxType));
         return idxSt;
     }
     if (matC->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
@@ -231,34 +228,30 @@ static aclsparseStatus_t ValidateSddmmDescriptors(const aclsparseDnMatDescr *mat
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t ValidateSddmmDtypeAndDims(const aclsparseDnMatDescr *matX,
-                                                     const aclsparseDnMatDescr *matY,
-                                                     const aclsparseSpMatDescr *matC,
-                                                     aclsparseOperation_t opX,
-                                                     aclsparseOperation_t opY,
-                                                     aclDataType computeType,
-                                                     aclsparseSDDMMAlg_t alg)
+static aclsparseStatus_t ValidateSddmmDtypeAndDims(const aclsparseDnMatDescr* matX, const aclsparseDnMatDescr* matY,
+                                                   const aclsparseSpMatDescr* matC, aclsparseOperation_t opX,
+                                                   aclsparseOperation_t opY, aclDataType computeType,
+                                                   aclsparseSDDMMAlg_t alg)
 {
     if (!IsSupportedSddmmDtypeCombo(matX, matY, matC, computeType)) {
         OP_LOGE("aclsparseSDDMM", "unsupported dtype combo (X=%d, Y=%d, C=%d, compute=%d)",
-                static_cast<int>(matX->valueType), static_cast<int>(matY->valueType),
-                static_cast<int>(matC->valueType), static_cast<int>(computeType));
+                static_cast<int>(matX->valueType), static_cast<int>(matY->valueType), static_cast<int>(matC->valueType),
+                static_cast<int>(computeType));
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     if (!SddmmDimensionsMatch(matX, matY, matC, opX, opY)) {
-        OP_LOGE("aclsparseSDDMM", "dimension mismatch: X(%ldx%ld) Y(%ldx%ld) C(%lux%lu)",
-                static_cast<long>(matX->rows), static_cast<long>(matX->cols),
-                static_cast<long>(matY->rows), static_cast<long>(matY->cols),
+        OP_LOGE("aclsparseSDDMM", "dimension mismatch: X(%ldx%ld) Y(%ldx%ld) C(%lux%lu)", static_cast<long>(matX->rows),
+                static_cast<long>(matX->cols), static_cast<long>(matY->rows), static_cast<long>(matY->cols),
                 static_cast<unsigned long>(matC->rows), static_cast<unsigned long>(matC->cols));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (matX->rows == 0 || matX->cols == 0 || matY->rows == 0 ||
-        matY->cols == 0 || matC->rows == 0 || matC->cols == 0) {
-        OP_LOGE("aclsparseSDDMM", "zero dimension not supported "
+    if (matX->rows == 0 || matX->cols == 0 || matY->rows == 0 || matY->cols == 0 || matC->rows == 0 ||
+        matC->cols == 0) {
+        OP_LOGE("aclsparseSDDMM",
+                "zero dimension not supported "
                 "(X=%ldx%ld, Y=%ldx%ld, C=%lux%lu)",
-                static_cast<long>(matX->rows), static_cast<long>(matX->cols),
-                static_cast<long>(matY->rows), static_cast<long>(matY->cols),
-                static_cast<unsigned long>(matC->rows),
+                static_cast<long>(matX->rows), static_cast<long>(matX->cols), static_cast<long>(matY->rows),
+                static_cast<long>(matY->cols), static_cast<unsigned long>(matC->rows),
                 static_cast<unsigned long>(matC->cols));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -266,19 +259,15 @@ static aclsparseStatus_t ValidateSddmmDtypeAndDims(const aclsparseDnMatDescr *ma
         OP_LOGE("aclsparseSDDMM", "alg not supported: %d", static_cast<int>(alg));
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (matC->rows > static_cast<uint64_t>(INT32_MAX) ||
-        matC->cols > static_cast<uint64_t>(INT32_MAX) ||
-        matX->rows > static_cast<int64_t>(INT32_MAX) ||
-        matX->cols > static_cast<int64_t>(INT32_MAX) ||
-        matY->rows > static_cast<int64_t>(INT32_MAX) ||
-        matY->cols > static_cast<int64_t>(INT32_MAX)) {
+    if (matC->rows > static_cast<uint64_t>(INT32_MAX) || matC->cols > static_cast<uint64_t>(INT32_MAX) ||
+        matX->rows > static_cast<int64_t>(INT32_MAX) || matX->cols > static_cast<int64_t>(INT32_MAX) ||
+        matY->rows > static_cast<int64_t>(INT32_MAX) || matY->cols > static_cast<int64_t>(INT32_MAX)) {
         OP_LOGE("aclsparseSDDMM", "dimension exceeds INT32_MAX");
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     // ldx/ldy are serialized as int32_t in SddmmTilingData.  Reject values
     // that cannot round-trip instead of silently truncating the GM stride.
-    if (matX->ld > static_cast<int64_t>(INT32_MAX) ||
-        matY->ld > static_cast<int64_t>(INT32_MAX)) {
+    if (matX->ld > static_cast<int64_t>(INT32_MAX) || matY->ld > static_cast<int64_t>(INT32_MAX)) {
         OP_LOGE("aclsparseSDDMM", "dense leading dimension exceeds INT32_MAX (X=%ld, Y=%ld)",
                 static_cast<long>(matX->ld), static_cast<long>(matY->ld));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -286,12 +275,11 @@ static aclsparseStatus_t ValidateSddmmDtypeAndDims(const aclsparseDnMatDescr *ma
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t ValidateSddmmCsrData(const aclsparseSpMatDescr *matC)
+static aclsparseStatus_t ValidateSddmmCsrData(const aclsparseSpMatDescr* matC)
 {
     // S2: nnz must fit int32_t (kernel reads nnz as int32_t).
     if (matC->nnz > static_cast<uint64_t>(INT32_MAX)) {
-        OP_LOGE("aclsparseSDDMM", "matC->nnz (%lu) exceeds INT32_MAX",
-                static_cast<unsigned long>(matC->nnz));
+        OP_LOGE("aclsparseSDDMM", "matC->nnz (%lu) exceeds INT32_MAX", static_cast<unsigned long>(matC->nnz));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     // O1: CSR row pointers (ptrs) must never be null — the kernel always
@@ -311,13 +299,9 @@ static aclsparseStatus_t ValidateSddmmCsrData(const aclsparseSpMatDescr *matC)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t ValidateSddmmInputs(const aclsparseDnMatDescr *matX,
-                                       const aclsparseDnMatDescr *matY,
-                                       const aclsparseSpMatDescr *matC,
-                                       aclsparseOperation_t opX,
-                                       aclsparseOperation_t opY,
-                                       aclDataType computeType,
-                                       aclsparseSDDMMAlg_t alg)
+aclsparseStatus_t ValidateSddmmInputs(const aclsparseDnMatDescr* matX, const aclsparseDnMatDescr* matY,
+                                      const aclsparseSpMatDescr* matC, aclsparseOperation_t opX,
+                                      aclsparseOperation_t opY, aclDataType computeType, aclsparseSDDMMAlg_t alg)
 {
     aclsparseStatus_t st = ValidateSddmmDescriptors(matX, matY, matC);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
@@ -343,21 +327,21 @@ struct WsOffsets {
     int64_t totalBytes;
 };
 
-WsOffsets ComputeWsOffsets(int64_t m, int32_t blockDim) {
+WsOffsets ComputeWsOffsets(int64_t m, int32_t blockDim)
+{
     WsOffsets o;
-    o.tilingOff  = SDDMM_WS_HEADER_BYTES;
+    o.tilingOff = SDDMM_WS_HEADER_BYTES;
     o.reorderOff = sddmm_align_up(o.tilingOff + static_cast<int64_t>(sizeof(SddmmTilingData)), SDDMM_WS_ALIGN);
     o.binEdgeOff = sddmm_align_up(o.reorderOff + static_cast<int64_t>(sizeof(int32_t)) * m, SDDMM_WS_ALIGN);
-    o.totalBytes = sddmm_align_up(o.binEdgeOff + static_cast<int64_t>(sizeof(int32_t)) * (blockDim + 1), SDDMM_WS_ALIGN);
+    o.totalBytes = sddmm_align_up(o.binEdgeOff + static_cast<int64_t>(sizeof(int32_t)) * (blockDim + 1),
+                                  SDDMM_WS_ALIGN);
     return o;
 }
 
 // Greedy bin packing: sort rows by nnz descending, then place each row into the
 // bin with the smallest accumulated load. This balances workload across cores.
-void GreedyRowBinPack(const std::vector<int32_t> &rowNnz,
-                      int32_t binNum,
-                      std::vector<int32_t> *reorder,
-                      std::vector<int32_t> *binEdges)
+void GreedyRowBinPack(const std::vector<int32_t>& rowNnz, int32_t binNum, std::vector<int32_t>* reorder,
+                      std::vector<int32_t>* binEdges)
 {
     const int32_t m = static_cast<int32_t>(rowNnz.size());
 
@@ -365,9 +349,7 @@ void GreedyRowBinPack(const std::vector<int32_t> &rowNnz,
     for (int32_t i = 0; i < m; ++i) {
         order[i] = i;
     }
-    std::sort(order.begin(), order.end(), [&](int32_t a, int32_t b) {
-        return rowNnz[a] > rowNnz[b];
-    });
+    std::sort(order.begin(), order.end(), [&](int32_t a, int32_t b) { return rowNnz[a] > rowNnz[b]; });
 
     std::vector<std::vector<int32_t>> bins(binNum);
     std::vector<int64_t> binLoad(binNum, 0);
@@ -394,20 +376,14 @@ void GreedyRowBinPack(const std::vector<int32_t> &rowNnz,
     }
 }
 
-aclsparseStatus_t BuildGreedyRowReorderFromCsr(const aclsparseSpMatDescr *matDesc,
-    int64_t m,
-    int32_t blockDim,
-    std::vector<int32_t> *reorder,
-    std::vector<int32_t> *binEdges)
+aclsparseStatus_t BuildGreedyRowReorderFromCsr(const aclsparseSpMatDescr* matDesc, int64_t m, int32_t blockDim,
+                                               std::vector<int32_t>* reorder, std::vector<int32_t>* binEdges)
 {
     if (matDesc->ptrType != ACL_SPARSE_INDEX_32I) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     std::vector<int32_t> rowOff(static_cast<size_t>(m) + 1);
-    aclError aclRet = aclrtMemcpy(rowOff.data(),
-                                  sizeof(int32_t) * (m + 1),
-                                  matDesc->ptrs,
-                                  sizeof(int32_t) * (m + 1),
+    aclError aclRet = aclrtMemcpy(rowOff.data(), sizeof(int32_t) * (m + 1), matDesc->ptrs, sizeof(int32_t) * (m + 1),
                                   ACL_MEMCPY_DEVICE_TO_HOST);
     if (aclRet != ACL_ERROR_NONE) {
         OP_LOGE("aclsparseSDDMM", "aclrtMemcpy D2H rowOff failed: %d", static_cast<int>(aclRet));
@@ -421,28 +397,18 @@ aclsparseStatus_t BuildGreedyRowReorderFromCsr(const aclsparseSpMatDescr *matDes
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t WriteReorderToWorkspace(uint8_t *dWorkspaceBase,
-    int64_t reorderOffset,
-    int64_t binEdgeOffset,
-    int64_t m,
-    int32_t blockDim,
-    const std::vector<int32_t> &reorder,
-    const std::vector<int32_t> &binEdges)
+aclsparseStatus_t WriteReorderToWorkspace(uint8_t* dWorkspaceBase, int64_t reorderOffset, int64_t binEdgeOffset,
+                                          int64_t m, int32_t blockDim, const std::vector<int32_t>& reorder,
+                                          const std::vector<int32_t>& binEdges)
 {
-    aclError aclRet = aclrtMemcpy(dWorkspaceBase + reorderOffset,
-                                  sizeof(int32_t) * m,
-                                  reorder.data(),
-                                  sizeof(int32_t) * m,
-                                  ACL_MEMCPY_HOST_TO_DEVICE);
+    aclError aclRet = aclrtMemcpy(dWorkspaceBase + reorderOffset, sizeof(int32_t) * m, reorder.data(),
+                                  sizeof(int32_t) * m, ACL_MEMCPY_HOST_TO_DEVICE);
     if (aclRet != ACL_ERROR_NONE) {
         OP_LOGE("aclsparseSDDMM", "aclrtMemcpy H2D reorder failed: %d", static_cast<int>(aclRet));
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
-    aclRet = aclrtMemcpy(dWorkspaceBase + binEdgeOffset,
-                         sizeof(int32_t) * (blockDim + 1),
-                         binEdges.data(),
-                         sizeof(int32_t) * (blockDim + 1),
-                         ACL_MEMCPY_HOST_TO_DEVICE);
+    aclRet = aclrtMemcpy(dWorkspaceBase + binEdgeOffset, sizeof(int32_t) * (blockDim + 1), binEdges.data(),
+                         sizeof(int32_t) * (blockDim + 1), ACL_MEMCPY_HOST_TO_DEVICE);
     if (aclRet != ACL_ERROR_NONE) {
         OP_LOGE("aclsparseSDDMM", "aclrtMemcpy H2D binEdges failed: %d", static_cast<int>(aclRet));
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
@@ -453,19 +419,20 @@ aclsparseStatus_t WriteReorderToWorkspace(uint8_t *dWorkspaceBase,
 // UB buffer accounting constants (must match kernel sddmm_kernel.cpp):
 //   reduceTmp = 32KB, dotTmp = 32B, stridedBuf = 32KB, offsetBuf = 4KB,
 //   plus alignment slack.
-constexpr int32_t kSddmmUbFixedOverhead = 72 * 1024;   // 32KB reduce + 32B dotTmp + 32KB strided + 4KB offset + slack
-constexpr int32_t kSddmmKTileCap = 4095;               // DataCopyPad blockCount limit (strided)
-constexpr int32_t kSddmmNTileCap = 64;                 // batch scaling upper bound
+constexpr int32_t kSddmmUbFixedOverhead = SddmmBudget::kUbFixedOverhead; // 32KB reduce + 32B dotTmp + 32KB strided +
+                                                                         // 4KB offset + slack
+constexpr int32_t kSddmmKTileCap = 4095;                                 // DataCopyPad blockCount limit (strided)
+constexpr int32_t kSddmmNTileCap = 64;                                   // batch scaling upper bound
 
 // Compute kTile / nTile based on UB capacity (design §2.3 / §3.3).
 //   FP32: per-K = 20 bytes (xQue 2×4 + yQue 2×4 + mulBuf 4, double-buffered)
 //         per-N = 16 bytes (accBuf+cValsBuf+resultBuf+colIndBuf, all float/int32)
 //   FP16: per-K = 20 bytes (xQue 2×2 + yQue 2×2 + mulBuf4 + xFp324 + yFp324)
 //         per-N = 20 bytes (accBuf+resultBuf+colIndBuf float/int32 + cValsBuf+outBuf half + cValsFp32Buf float)
-void ComputeSddmmTilingParams(int32_t k, int32_t dataType, int32_t &kTile, int32_t &nTile)
+void ComputeSddmmTilingParams(int32_t k, int32_t dataType, int32_t& kTile, int32_t& nTile)
 {
     const uint64_t ubSize = GetUbSize();
-    const uint64_t ubAvailable = (ubSize > 0) ? ubSize : 253952ULL;  // fallback 248KB
+    const uint64_t ubAvailable = (ubSize > 0) ? ubSize : 253952ULL; // fallback 248KB
 
     const int32_t nTileFixed = kSddmmNTileCap;
     uint64_t perKElem = 20;
@@ -483,11 +450,15 @@ void ComputeSddmmTilingParams(int32_t k, int32_t dataType, int32_t &kTile, int32
     if (maxKTile > static_cast<uint64_t>(kSddmmKTileCap)) {
         maxKTile = static_cast<uint64_t>(kSddmmKTileCap);
     }
-    if (maxKTile < 1) { maxKTile = 1; }
+    if (maxKTile < 1) {
+        maxKTile = 1;
+    }
 
     const uint64_t kU = static_cast<uint64_t>(k > 0 ? k : 1);
     kTile = static_cast<int32_t>(maxKTile < kU ? maxKTile : kU);
-    if (kTile < 1) { kTile = 1; }
+    if (kTile < 1) {
+        kTile = 1;
+    }
     nTile = nTileFixed;
 }
 
@@ -496,11 +467,11 @@ void ComputeSddmmTilingParams(int32_t k, int32_t dataType, int32_t &kTile, int32
 // ============================================================================
 // Stage 1: BufferSize
 // ============================================================================
-aclsparseStatus_t aclsparseSDDMMBufferSize(
-    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, size_t *size)
+aclsparseStatus_t aclsparseSDDMMBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                           const void* alpha, aclsparseConstDnMatDescr_t matX,
+                                           aclsparseConstDnMatDescr_t matY, const void* beta,
+                                           aclsparseSpMatDescr_t matC, aclDataType computeType, aclsparseSDDMMAlg_t alg,
+                                           size_t* size)
 {
     if (handle == nullptr) {
         OP_LOGE("aclsparseSDDMM", "handle is nullptr");
@@ -514,26 +485,45 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
         OP_LOGE("aclsparseSDDMM", "alpha/beta is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    aclsparseDnMatDescr *matXInner = (aclsparseDnMatDescr *)matX;
-    aclsparseDnMatDescr *matYInner = (aclsparseDnMatDescr *)matY;
-    aclsparseSpMatDescr *matCInner = (aclsparseSpMatDescr *)matC;
-    aclsparseStatus_t st = ValidateSddmmInputs(matXInner, matYInner, matCInner,
-                                               opX, opY, computeType, alg);
+    aclsparseDnMatDescr* matXInner = (aclsparseDnMatDescr*)matX;
+    aclsparseDnMatDescr* matYInner = (aclsparseDnMatDescr*)matY;
+    aclsparseSpMatDescr* matCInner = (aclsparseSpMatDescr*)matC;
+    aclsparseStatus_t st = ValidateSddmmInputs(matXInner, matYInner, matCInner, opX, opY, computeType, alg);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
-    WsOffsets off = ComputeWsOffsets(static_cast<int64_t>(matCInner->rows),
-                                     static_cast<int32_t>(GetSddmmBlockDim()));
+    WsOffsets off = ComputeWsOffsets(static_cast<int64_t>(matCInner->rows), static_cast<int32_t>(GetSddmmBlockDim()));
     *size = static_cast<size_t>(off.totalBytes);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+static SddmmTilingData SddmmHostTiling(const aclsparseDnMatDescr* matXInner, const aclsparseDnMatDescr* matYInner,
+                                       const aclsparseSpMatDescr* matCInner, aclsparseOperation_t opX,
+                                       aclsparseOperation_t opY, const WsOffsets& off)
+{
+    SddmmTilingData td{};
+    td.m = static_cast<int32_t>(matCInner->rows);
+    td.n = static_cast<int32_t>(matCInner->cols);
+    td.k = (opX == ACL_SPARSE_OP_TRANSPOSE) ? static_cast<int32_t>(matXInner->rows) :
+                                              static_cast<int32_t>(matXInner->cols);
+    td.ldx = static_cast<int32_t>(matXInner->ld);
+    td.ldy = static_cast<int32_t>(matYInner->ld);
+    td.reorderOffset = static_cast<int32_t>(off.reorderOff);
+    td.binEdgeOffset = static_cast<int32_t>(off.binEdgeOff);
+    td.opX = (opX == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
+    td.opY = (opY == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
+    td.orderPair = static_cast<int32_t>(matXInner->order) * 2 + static_cast<int32_t>(matYInner->order);
+    td.dataType = SddmmDataTypeFromAcl(matCInner->valueType);
+    ComputeSddmmTilingParams(td.k, td.dataType, td.kTile, td.nTile);
+
+    return td;
+}
+
 // Build reorder/bin/tiling and write into device workspace buffer.
-static aclsparseStatus_t SddmmBuildTilingToBuffer(
-    aclsparseDnMatDescr *matXInner, aclsparseDnMatDescr *matYInner,
-    aclsparseSpMatDescr *matCInner, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, const void *beta, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, void *buffer)
+static aclsparseStatus_t SddmmBuildTilingToBuffer(aclsparseDnMatDescr* matXInner, aclsparseDnMatDescr* matYInner,
+                                                  aclsparseSpMatDescr* matCInner, aclsparseOperation_t opX,
+                                                  aclsparseOperation_t opY, const void* alpha, const void* beta,
+                                                  aclDataType computeType, aclsparseSDDMMAlg_t alg, void* buffer)
 {
     const int64_t m = static_cast<int64_t>(matCInner->rows);
     const int32_t blockDim = static_cast<int32_t>(GetSddmmBlockDim());
@@ -549,37 +539,17 @@ static aclsparseStatus_t SddmmBuildTilingToBuffer(
             return rst;
         }
     }
-    aclsparseStatus_t wst = WriteReorderToWorkspace(static_cast<uint8_t *>(buffer),
-                                                     off.reorderOff, off.binEdgeOff,
-                                                     m, blockDim, reorder, binEdges);
+    aclsparseStatus_t wst = WriteReorderToWorkspace(static_cast<uint8_t*>(buffer), off.reorderOff, off.binEdgeOff, m,
+                                                    blockDim, reorder, binEdges);
     if (wst != ACL_SPARSE_STATUS_SUCCESS) {
         return wst;
     }
 
     // 2) Build TilingData on host, write to device workspace.
-    SddmmTilingData td{};
-    td.m   = static_cast<int32_t>(matCInner->rows);
-    td.n   = static_cast<int32_t>(matCInner->cols);
-    td.k = (opX == ACL_SPARSE_OP_TRANSPOSE)
-        ? static_cast<int32_t>(matXInner->rows)
-        : static_cast<int32_t>(matXInner->cols);
-    td.ldx = static_cast<int32_t>(matXInner->ld);
-    td.ldy = static_cast<int32_t>(matYInner->ld);
-    td.reorderOffset  = static_cast<int32_t>(off.reorderOff);
-    td.binEdgeOffset = static_cast<int32_t>(off.binEdgeOff);
-    td.opX = (opX == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
-    td.opY = (opY == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
-    td.orderPair = static_cast<int32_t>(matXInner->order) * 2 +
-                    static_cast<int32_t>(matYInner->order);
-    td.dataType = SddmmDataTypeFromAcl(matCInner->valueType);
-    td.alphaHost = SddmmReadScalarToF32(alpha, computeType);
-    td.betaHost = SddmmReadScalarToF32(beta, computeType);
-    ComputeSddmmTilingParams(td.k, td.dataType, td.kTile, td.nTile);
+    SddmmTilingData td = SddmmHostTiling(matXInner, matYInner, matCInner, opX, opY, off);
 
-    aclError aclRet = aclrtMemcpy(static_cast<uint8_t *>(buffer) + off.tilingOff,
-                                  sizeof(SddmmTilingData),
-                                  &td, sizeof(SddmmTilingData),
-                                  ACL_MEMCPY_HOST_TO_DEVICE);
+    aclError aclRet = aclrtMemcpy(static_cast<uint8_t*>(buffer) + off.tilingOff, sizeof(SddmmTilingData), &td,
+                                  sizeof(SddmmTilingData), ACL_MEMCPY_HOST_TO_DEVICE);
     if (aclRet != ACL_ERROR_NONE) {
         OP_LOGE("aclsparseSDDMM", "aclrtMemcpy H2D tiling failed: %d", static_cast<int>(aclRet));
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
@@ -589,109 +559,80 @@ static aclsparseStatus_t SddmmBuildTilingToBuffer(
     // The pattern signature is kept in the sddmm-local side-table (not the
     // public descriptor) to avoid modifying the common header.
     matCInner->activeBuffer = buffer;
-    const int64_t kForSig = (opX == ACL_SPARSE_OP_TRANSPOSE)
-        ? matXInner->rows : matXInner->cols;
+    const int64_t kForSig = (opX == ACL_SPARSE_OP_TRANSPOSE) ? matXInner->rows : matXInner->cols;
     SddmmPatternRecord(buffer, matCInner->rows, matCInner->nnz, kForSig);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t SddmmRefreshActiveTiling(
-    void *buffer, const WsOffsets &off,
-    aclsparseDnMatDescr *matX, aclsparseDnMatDescr *matY, aclsparseSpMatDescr *matC,
-    aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, const void *beta,
-    aclDataType computeType)
-{
-    SddmmTilingData td;
-    aclError ret = aclrtMemcpy(&td, sizeof(SddmmTilingData),
-                               static_cast<uint8_t *>(buffer) + off.tilingOff,
-                               sizeof(SddmmTilingData),
-                               ACL_MEMCPY_DEVICE_TO_HOST);
-    if (ret != ACL_ERROR_NONE) {
-        OP_LOGE("aclsparseSDDMM", "aclrtMemcpy D2H tiling failed: %d", static_cast<int>(ret));
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-    td.opX = (opX == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
-    td.opY = (opY == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
-    td.ldx = static_cast<int32_t>(matX->ld);
-    td.ldy = static_cast<int32_t>(matY->ld);
-    td.orderPair = static_cast<int32_t>(matX->order) * 2 +
-                    static_cast<int32_t>(matY->order);
-    td.alphaHost = SddmmReadScalarToF32(alpha, computeType);
-    td.betaHost = SddmmReadScalarToF32(beta, computeType);
-    ret = aclrtMemcpy(static_cast<uint8_t *>(buffer) + off.tilingOff,
-                      sizeof(SddmmTilingData),
-                      &td, sizeof(SddmmTilingData),
-                      ACL_MEMCPY_HOST_TO_DEVICE);
-    if (ret != ACL_ERROR_NONE) {
-        OP_LOGE("aclsparseSDDMM", "aclrtMemcpy H2D tiling refresh failed: %d", static_cast<int>(ret));
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-static aclsparseStatus_t SddmmEnsureTilingReady(
-    aclsparseDnMatDescr *matX, aclsparseDnMatDescr *matY, aclsparseSpMatDescr *matC,
-    aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, const void *beta,
-    aclDataType computeType, aclsparseSDDMMAlg_t alg, void *buffer, const WsOffsets &off)
+static aclsparseStatus_t SddmmEnsureTilingReady(aclsparseDnMatDescr* matX, aclsparseDnMatDescr* matY,
+                                                aclsparseSpMatDescr* matC, aclsparseOperation_t opX,
+                                                aclsparseOperation_t opY, const void* alpha, const void* beta,
+                                                aclDataType computeType, aclsparseSDDMMAlg_t alg, void* buffer,
+                                                const WsOffsets& off)
 {
     // Fast path: same buffer AND same CSR pattern (rows + nnz). Only then can
-    // we safely skip rebuilding reorder/binEdges and just refresh scalar fields.
+    // we safely reuse reorder/binEdges. Mutable geometry/scalars are launch arguments.
     // If the pattern changed (e.g. descriptor reused with different CSR data),
     // fall through to a full rebuild to avoid stale reorder/binEdges. Pattern
     // is verified via the sddmm-local side-table (buffer key); a cache miss
     // also forces a rebuild.
     if (matC->activeBuffer == buffer) {
-        const int64_t kForSig = (opX == ACL_SPARSE_OP_TRANSPOSE)
-            ? matX->rows : matX->cols;
+        const int64_t kForSig = (opX == ACL_SPARSE_OP_TRANSPOSE) ? matX->rows : matX->cols;
         if (SddmmPatternMatch(buffer, matC->rows, matC->nnz, kForSig)) {
-            return SddmmRefreshActiveTiling(buffer, off, matX, matY, matC, opX, opY,
-                                            alpha, beta, computeType);
+            return ACL_SPARSE_STATUS_SUCCESS;
         }
     }
-    return SddmmBuildTilingToBuffer(matX, matY, matC, opX, opY,
-                                    alpha, beta, computeType, alg, buffer);
+    return SddmmBuildTilingToBuffer(matX, matY, matC, opX, opY, alpha, beta, computeType, alg, buffer);
 }
 
-static aclsparseStatus_t SddmmRunKernel(
-    aclsparseSpMatDescr *matC, aclsparseDnMatDescr *matX, aclsparseDnMatDescr *matY,
-    void *buffer, const WsOffsets &off, aclrtStream stream)
+static aclsparseStatus_t SddmmBindScalars(aclsparseHandle_t handle, const void* alpha, const void* beta,
+                                          aclDataType computeType, SddmmTilingData& td)
 {
-    aclsparseStatus_t launchSt = sddmm_kernel_launch(reinterpret_cast<GM_ADDR>(matC->ptrs),
-                        reinterpret_cast<GM_ADDR>(matC->idxs),
-                        reinterpret_cast<GM_ADDR>(matC->values),
-                        reinterpret_cast<GM_ADDR>(matX->values),
-                        reinterpret_cast<GM_ADDR>(matY->values),
-                        reinterpret_cast<GM_ADDR>(buffer),
-                        reinterpret_cast<GM_ADDR>(static_cast<uint8_t *>(buffer) + off.tilingOff),
-                        SddmmDataTypeFromAcl(matC->valueType),
-                        GetSddmmBlockDim(), stream);
-    if (launchSt != ACL_SPARSE_STATUS_SUCCESS) {
-        return launchSt;
+    aclsparsePointerMode_t pointerMode;
+    const auto status = aclsparseGetPointerMode(handle, &pointerMode);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        OP_LOGE("aclsparseSDDMM", "pointer mode query failed: %d", static_cast<int>(status));
+        return status;
+    }
+    td.scalarType = SddmmDataTypeFromAcl(computeType);
+    if (pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
+        td.alphaDevice = reinterpret_cast<uintptr_t>(alpha);
+        td.betaDevice = reinterpret_cast<uintptr_t>(beta);
+    } else if (pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
+        td.alphaHost = SddmmReadScalarToF32(alpha, computeType);
+        td.betaHost = SddmmReadScalarToF32(beta, computeType);
+    } else {
+        OP_LOGE("aclsparseSDDMM", "invalid scalar pointer mode");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t SddmmValidateAndCast(
-    aclsparseHandle_t handle,
-    aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    aclsparseSpMatDescr_t matC, const void *alpha, const void *beta,
-    void *buffer, bool isPreprocess,
-    aclsparseOperation_t opX, aclsparseOperation_t opY,
-    aclDataType computeType, aclsparseSDDMMAlg_t alg,
-    aclsparseDnMatDescr **matXInner, aclsparseDnMatDescr **matYInner,
-    aclsparseSpMatDescr **matCInner)
+static aclsparseStatus_t SddmmRunKernel(aclsparseSpMatDescr* matC, aclsparseDnMatDescr* matX, aclsparseDnMatDescr* matY,
+                                        void* buffer, const SddmmTilingData& td, aclrtStream stream)
+{
+    return sddmm_kernel_launch(reinterpret_cast<GM_ADDR>(matC->ptrs), reinterpret_cast<GM_ADDR>(matC->idxs),
+                               reinterpret_cast<GM_ADDR>(matC->values), reinterpret_cast<GM_ADDR>(matX->values),
+                               reinterpret_cast<GM_ADDR>(matY->values), reinterpret_cast<GM_ADDR>(buffer), td,
+                               SddmmDataTypeFromAcl(matC->valueType), GetSddmmBlockDim(), stream);
+}
+
+static aclsparseStatus_t SddmmValidateAndCast(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matX,
+                                              aclsparseConstDnMatDescr_t matY, aclsparseSpMatDescr_t matC,
+                                              const void* alpha, const void* beta, void* buffer, bool isPreprocess,
+                                              aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                              aclDataType computeType, aclsparseSDDMMAlg_t alg,
+                                              aclsparseDnMatDescr** matXInner, aclsparseDnMatDescr** matYInner,
+                                              aclsparseSpMatDescr** matCInner)
 {
     if (handle == nullptr) {
         OP_LOGE("aclsparseSDDMM", "handle is nullptr");
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
     }
-    *matXInner = (aclsparseDnMatDescr *)matX;
-    *matYInner = (aclsparseDnMatDescr *)matY;
-    *matCInner = (aclsparseSpMatDescr *)matC;
-    aclsparseStatus_t st = ValidateSddmmInputs(*matXInner, *matYInner, *matCInner,
-                                               opX, opY, computeType, alg);
+    *matXInner = (aclsparseDnMatDescr*)matX;
+    *matYInner = (aclsparseDnMatDescr*)matY;
+    *matCInner = (aclsparseSpMatDescr*)matC;
+    aclsparseStatus_t st = ValidateSddmmInputs(*matXInner, *matYInner, *matCInner, opX, opY, computeType, alg);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -713,25 +654,22 @@ static aclsparseStatus_t SddmmValidateAndCast(
 // ============================================================================
 // Stage 2: Preprocess
 // ============================================================================
-aclsparseStatus_t aclsparseSDDMMPreprocess(
-    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, void *buffer)
+aclsparseStatus_t aclsparseSDDMMPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                           const void* alpha, aclsparseConstDnMatDescr_t matX,
+                                           aclsparseConstDnMatDescr_t matY, const void* beta,
+                                           aclsparseSpMatDescr_t matC, aclDataType computeType, aclsparseSDDMMAlg_t alg,
+                                           void* buffer)
 {
-    aclsparseDnMatDescr *matXInner = nullptr;
-    aclsparseDnMatDescr *matYInner = nullptr;
-    aclsparseSpMatDescr *matCInner = nullptr;
-    aclsparseStatus_t st = SddmmValidateAndCast(handle, matX, matY, matC, alpha, beta,
-                                                buffer, true,
-                                                opX, opY, computeType, alg,
-                                                &matXInner, &matYInner, &matCInner);
+    aclsparseDnMatDescr* matXInner = nullptr;
+    aclsparseDnMatDescr* matYInner = nullptr;
+    aclsparseSpMatDescr* matCInner = nullptr;
+    aclsparseStatus_t st = SddmmValidateAndCast(handle, matX, matY, matC, alpha, beta, buffer, true, opX, opY,
+                                                computeType, alg, &matXInner, &matYInner, &matCInner);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
 
-    st = SddmmBuildTilingToBuffer(matXInner, matYInner, matCInner, opX, opY,
-                                  alpha, beta, computeType, alg, buffer);
+    st = SddmmBuildTilingToBuffer(matXInner, matYInner, matCInner, opX, opY, alpha, beta, computeType, alg, buffer);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -743,30 +681,30 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
 // ============================================================================
 // Stage 3: Execute
 // ============================================================================
-aclsparseStatus_t aclsparseSDDMM(
-    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, void *buffer)
+aclsparseStatus_t aclsparseSDDMM(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                 const void* alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
+                                 const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                 aclsparseSDDMMAlg_t alg, void* buffer)
 {
-    aclsparseDnMatDescr *matXInner = nullptr;
-    aclsparseDnMatDescr *matYInner = nullptr;
-    aclsparseSpMatDescr *matCInner = nullptr;
-    aclsparseStatus_t st = SddmmValidateAndCast(handle, matX, matY, matC, alpha, beta,
-                                                buffer, false,
-                                                opX, opY, computeType, alg,
-                                                &matXInner, &matYInner, &matCInner);
+    aclsparseDnMatDescr* matXInner = nullptr;
+    aclsparseDnMatDescr* matYInner = nullptr;
+    aclsparseSpMatDescr* matCInner = nullptr;
+    aclsparseStatus_t st = SddmmValidateAndCast(handle, matX, matY, matC, alpha, beta, buffer, false, opX, opY,
+                                                computeType, alg, &matXInner, &matYInner, &matCInner);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
     aclrtStream stream = nullptr;
     aclsparseGetStream(handle, &stream);
-    WsOffsets off = ComputeWsOffsets(static_cast<int64_t>(matCInner->rows),
-                                     static_cast<int32_t>(GetSddmmBlockDim()));
-    st = SddmmEnsureTilingReady(matXInner, matYInner, matCInner, opX, opY,
-                                alpha, beta, computeType, alg, buffer, off);
+    WsOffsets off = ComputeWsOffsets(static_cast<int64_t>(matCInner->rows), static_cast<int32_t>(GetSddmmBlockDim()));
+    st = SddmmEnsureTilingReady(matXInner, matYInner, matCInner, opX, opY, alpha, beta, computeType, alg, buffer, off);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
-    return SddmmRunKernel(matCInner, matXInner, matYInner, buffer, off, stream);
+    SddmmTilingData td = SddmmHostTiling(matXInner, matYInner, matCInner, opX, opY, off);
+    st = SddmmBindScalars(handle, alpha, beta, computeType, td);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    return SddmmRunKernel(matCInner, matXInner, matYInner, buffer, td, stream);
 }

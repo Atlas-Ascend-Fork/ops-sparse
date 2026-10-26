@@ -29,9 +29,9 @@ extern "C" {
 #endif
 // This type indicates which operations is applied to the related input (e.g. sparse matrix, or vector).
 typedef enum aclsparseOperation_t {
-    ACL_SPARSE_OP_NON_TRANSPOSE = 0,   // The non-transpose operation is selected.
-    ACL_SPARSE_OP_TRANSPOSE,           // The transpose operation is selected.
-    ACL_SPARSE_OP_CONJUGATE_TRANSPOSE  // The conjugate transpose operation is selected.
+    ACL_SPARSE_OP_NON_TRANSPOSE = 0,  // The non-transpose operation is selected.
+    ACL_SPARSE_OP_TRANSPOSE,          // The transpose operation is selected.
+    ACL_SPARSE_OP_CONJUGATE_TRANSPOSE // The conjugate transpose operation is selected.
 } aclsparseOperation_t;
 
 struct aclsparseContext;
@@ -60,8 +60,8 @@ typedef struct aclsparseSpVecDescr const* aclsparseConstSpVecDescr_t;
 
 // Dense matrix data layout (used by B / C of SpMM).
 typedef enum aclsparseOrder_t {
-    ACL_SPARSE_ORDER_ROW = 0,   // Row-major.
-    ACL_SPARSE_ORDER_COL = 1,   // Column-major.
+    ACL_SPARSE_ORDER_ROW = 0, // Row-major.
+    ACL_SPARSE_ORDER_COL = 1, // Column-major.
 } aclsparseOrder_t;
 
 // SpMVOp 算法枚举（对标 Generic API 中 SpMVOp 的算法选项）
@@ -219,7 +219,7 @@ typedef enum aclsparseDirection_t {
 
 // Forward declaration for Legacy matrix descriptor.
 struct aclsparseMatDescr;
-typedef struct aclsparseMatDescr *aclsparseMatDescr_t;
+typedef struct aclsparseMatDescr* aclsparseMatDescr_t;
 
 // Matrix type for Legacy MatDescr.
 typedef enum aclsparseMatrixType_t {
@@ -230,37 +230,29 @@ typedef enum aclsparseMatrixType_t {
 } aclsparseMatrixType_t;
 
 // Diagonal type for Legacy MatDescr.
-typedef enum aclsparseDiagType_t {
-    ACL_SPARSE_DIAG_TYPE_NON_UNIT = 0,
-    ACL_SPARSE_DIAG_TYPE_UNIT
-} aclsparseDiagType_t;
+typedef enum aclsparseDiagType_t { ACL_SPARSE_DIAG_TYPE_NON_UNIT = 0, ACL_SPARSE_DIAG_TYPE_UNIT } aclsparseDiagType_t;
 
 // Fill mode for Legacy MatDescr.
-typedef enum aclsparseFillMode_t {
-    ACL_SPARSE_FILL_MODE_LOWER = 0,
-    ACL_SPARSE_FILL_MODE_UPPER
-} aclsparseFillMode_t;
+typedef enum aclsparseFillMode_t { ACL_SPARSE_FILL_MODE_LOWER = 0, ACL_SPARSE_FILL_MODE_UPPER } aclsparseFillMode_t;
 
 // This type indicates the index type for representing the sparse matrix indices.
 typedef enum aclsparseIndexType_t {
-    ACL_SPARSE_INDEX_32I = 0,  // 32-bit signed integer [0, 2^31 - 1]
-    ACL_SPARSE_INDEX_64I       // 64-bit signed integer [0, 2^63 - 1]
-                               // Per-operator I64 support:
-                               //   SpSV  — fully supported; rowPtr (ptrType) and colInd (idxType) may
-                               //           be mixed: allowed (I32,I32), (I64,I32), (I64,I64).
-                               //           (I32,I64) is rejected (no practical use case).
-                               //   SpMV  — I64 not yet supported (returns NOT_SUPPORTED).
-                               //   SpMM  — I64 supported for rowOffsets (ptrType); colInd (idxType) remains I32 only.
+    ACL_SPARSE_INDEX_32I = 0, // 32-bit signed integer [0, 2^31 - 1]
+    ACL_SPARSE_INDEX_64I      // 64-bit signed integer [0, 2^63 - 1]
+                              // Per-operator I64 support:
+                              //   SpSV  — fully supported; rowPtr (ptrType) and colInd (idxType) may
+                              //           be mixed: allowed (I32,I32), (I64,I32), (I64,I64).
+                              //           (I32,I64) is rejected (no practical use case).
+                              //   SpMV  — I64 not yet supported (returns NOT_SUPPORTED).
+                              //   SpMM  — I64 supported for rowOffsets (ptrType); colInd (idxType) remains I32 only.
 } aclsparseIndexType_t;
 
-typedef enum aclsparseDenseToSparseAlg_t {
-    ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT = 0
-} aclsparseDenseToSparseAlg_t;
+typedef enum aclsparseDenseToSparseAlg_t { ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT = 0 } aclsparseDenseToSparseAlg_t;
 
 // This type indicates if the base of the matrix indices is zero or one.
 typedef enum aclsparseIndexBase_t {
-    ACL_SPARSE_INDEX_BASE_ZERO = 0,  // The base index is zero (C compatibility).
-    ACL_SPARSE_INDEX_BASE_ONE        // The base index is one (Fortran compatibility).
+    ACL_SPARSE_INDEX_BASE_ZERO = 0, // The base index is zero (C compatibility).
+    ACL_SPARSE_INDEX_BASE_ONE       // The base index is one (Fortran compatibility).
 } aclsparseIndexBase_t;
 
 // This type indicates the format of the sparse matrix.
@@ -288,13 +280,14 @@ typedef enum aclsparseFormat_t {
  * @param valueType IN, HOST, 值的数据类型。
  * @return aclsparseStatus_t 返回稀疏操作的状态。
  */
-aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_t size, void *values, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t* dnVecDescr, int64_t size, void* values,
+                                       aclDataType valueType);
 
 /**
  * @brief 创建只读(const)稠密向量描述符。数据指针为 const。
  */
-aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
-    const void *values, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t* dnVecDescr, int64_t size, const void* values,
+                                            aclDataType valueType);
 
 /**
  * @brief 销毁稀疏向量描述符。
@@ -308,33 +301,31 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 // Sparse Vector APIs
 // ============================================================================
 
-aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_t size,
-    int64_t nnz, void *indices, void *values, aclsparseIndexType_t idxType,
-    aclsparseIndexBase_t idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz, void* indices,
+                                       void* values, aclsparseIndexType_t idxType, aclsparseIndexBase_t idxBase,
+                                       aclDataType valueType);
 
-aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t *spVecDescr, int64_t size,
-    int64_t nnz, const void *indices, const void *values, aclsparseIndexType_t idxType,
-    aclsparseIndexBase_t idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz,
+                                            const void* indices, const void* values, aclsparseIndexType_t idxType,
+                                            aclsparseIndexBase_t idxBase, aclDataType valueType);
 
 aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr);
 
-aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t *size,
-    int64_t *nnz, void **indices, void **values, aclsparseIndexType_t *idxType,
-    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz, void** indices,
+                                    void** values, aclsparseIndexType_t* idxType, aclsparseIndexBase_t* idxBase,
+                                    aclDataType* valueType);
 
-aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t *size,
-    int64_t *nnz, const void **indices, const void **values, aclsparseIndexType_t *idxType,
-    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz,
+                                         const void** indices, const void** values, aclsparseIndexType_t* idxType,
+                                         aclsparseIndexBase_t* idxBase, aclDataType* valueType);
 
-aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr,
-    aclsparseIndexBase_t *idxBase);
+aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr, aclsparseIndexBase_t* idxBase);
 
-aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void **values);
+aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void** values);
 
-aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr,
-    const void **values);
+aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr, const void** values);
 
-aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void *values);
+aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void* values);
 
 // ============================================================================
 // Generic API: aclsparseGather
@@ -350,10 +341,8 @@ aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void
  * @param vecX   IN/OUT, HOST, sparse vector descriptor.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseGather(
-    aclsparseHandle_t handle,
-    aclsparseConstDnVecDescr_t vecY,
-    aclsparseSpVecDescr_t vecX);
+aclsparseStatus_t aclsparseGather(aclsparseHandle_t handle, aclsparseConstDnVecDescr_t vecY,
+                                  aclsparseSpVecDescr_t vecX);
 
 /**
  * @brief Gather 裸指针快路径（跳过 DnVec/SpVec 描述符建销）。
@@ -372,11 +361,8 @@ aclsparseStatus_t aclsparseGather(
  * @param idxBase  IN, HOST,  索引基（ZERO=0 / ONE=1）。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseGatherRaw(
-    aclsparseHandle_t handle,
-    const void *y_ptr, int64_t y_len, aclDataType valueType,
-    const void *idx_ptr, void *out_ptr, int64_t nnz,
-    aclsparseIndexBase_t idxBase);
+aclsparseStatus_t aclsparseGatherRaw(aclsparseHandle_t handle, const void* y_ptr, int64_t y_len, aclDataType valueType,
+                                     const void* idx_ptr, void* out_ptr, int64_t nnz, aclsparseIndexBase_t idxBase);
 
 /**
  * @brief 获取稠密向量描述符的全部字段。
@@ -387,14 +373,14 @@ aclsparseStatus_t aclsparseGatherRaw(
  * @param valueType OUT, HOST, 值的数据类型。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t *size,
-                                    void **values, aclDataType *valueType);
+aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t* size, void** values,
+                                    aclDataType* valueType);
 
 /**
  * @brief 获取只读(const)稠密向量描述符的全部字段。
  */
-aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *size,
-                                         const void **values, aclDataType *valueType);
+aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t* size, const void** values,
+                                         aclDataType* valueType);
 
 /**
  * @brief 获取稠密向量描述符的 values 指针。
@@ -403,13 +389,12 @@ aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, 
  * @param values OUT, DEVICE, 向量的值指针。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void **values);
+aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void** values);
 
 /**
  * @brief 获取只读(const)稠密向量描述符的 values 指针。
  */
-aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecDescr,
-                                               const void **values);
+aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecDescr, const void** values);
 
 /**
  * @brief 设置稠密向量描述符的 values 指针。
@@ -418,7 +403,7 @@ aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecD
  * @param values IN, DEVICE, 向量的值指针。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void *values);
+aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void* values);
 
 /**
  * @brief 设置稠密向量的元素步长。
@@ -432,7 +417,7 @@ aclsparseStatus_t aclsparseDnVecSetStride(aclsparseDnVecDescr_t dnVecDescr, int6
 /**
  * @brief 获取稠密向量的元素步长。
  */
-aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *stride);
+aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr, int64_t* stride);
 
 /**
  * @brief 创建稀疏矩阵的CSR格式。
@@ -459,16 +444,36 @@ aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr,
  * @param valueType IN, HOST, 非零元素的数据类型。
  * @return aclsparseStatus_t 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
-aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    void *csrRowOffsets, void *csrColInd, void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
-    aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                     void* csrRowOffsets, void* csrColInd, void* csrValues,
+                                     aclsparseIndexType_t csrRowOffsetsType, aclsparseIndexType_t csrColIndType,
+                                     aclsparseIndexBase_t idxBase, aclDataType valueType);
 
 /**
- * @brief 创建只读(const)CSR 稀疏矩阵描述符。
+ * @brief Create square BSR; block sizes 2/4/8/16/32/64/128, I32, base 0/1.
  */
-aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    const void *csrRowOffsets, const void *csrColInd, const void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
-    aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateBsr(aclsparseSpMatDescr_t* spMatDescr, int64_t blockRows, int64_t blockCols,
+                                     int64_t blockNnz, int64_t rowBlockSize, int64_t colBlockSize, void* bsrRowOffsets,
+                                     void* bsrColInd, void* bsrValues, aclsparseIndexType_t bsrRowOffsetsType,
+                                     aclsparseIndexType_t bsrColIndType, aclsparseIndexBase_t idxBase,
+                                     aclDataType valueType, aclsparseOrder_t order);
+
+aclsparseStatus_t aclsparseCreateConstBsr(aclsparseConstSpMatDescr_t* spMatDescr, int64_t blockRows, int64_t blockCols,
+                                          int64_t blockNnz, int64_t rowBlockSize, int64_t colBlockSize,
+                                          const void* bsrRowOffsets, const void* bsrColInd, const void* bsrValues,
+                                          aclsparseIndexType_t bsrRowOffsetsType, aclsparseIndexType_t bsrColIndType,
+                                          aclsparseIndexBase_t idxBase, aclDataType valueType, aclsparseOrder_t order);
+
+aclsparseStatus_t aclsparseBsrSetStridedBatch(aclsparseSpMatDescr_t spMatDescr, int batchCount,
+                                              int64_t offsetsBatchStride, int64_t columnsBatchStride,
+                                              int64_t valuesBatchStride);
+
+/** @brief Create a read-only CSR descriptor. */
+aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                          int64_t nnz, const void* csrRowOffsets, const void* csrColInd,
+                                          const void* csrValues, aclsparseIndexType_t csrRowOffsetsType,
+                                          aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase,
+                                          aclDataType valueType);
 
 /**
  * @brief 创建一个CSC（Compressed Sparse Column）稀疏矩阵。
@@ -490,9 +495,10 @@ aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr
  * @param valueType IN, HOST, 非零元素值的数据类型。
  * @return aclsparseStatus_t 返回执行状态，成功则为ACL_SPARSE_STATUS_SUCCESS。
  */
-aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    void *cscColOffsets, void *cscRowInd, void *cscValues, aclsparseIndexType_t cscColOffsetsType,
-    aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                     void* cscColOffsets, void* cscRowInd, void* cscValues,
+                                     aclsparseIndexType_t cscColOffsetsType, aclsparseIndexType_t cscRowIndType,
+                                     aclsparseIndexBase_t idxBase, aclDataType valueType);
 
 /**
  * @brief 创建只读(const)CSC 稀疏矩阵描述符。
@@ -501,31 +507,32 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
  *       SpMV 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_NOT_SUPPORTED；
  *       SpMM 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
  */
-aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,
-    aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                          int64_t nnz, const void* cscColOffsets, const void* cscRowInd,
+                                          const void* cscValues, aclsparseIndexType_t cscColOffsetsType,
+                                          aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase,
+                                          aclDataType valueType);
 
-aclsparseStatus_t aclsparseCreateBlockedEll(
-    aclsparseSpMatDescr_t *descr, int64_t rows, int64_t cols,
-    int64_t ellBlockSize, int64_t ellCols, void *ellColInd, void *ellValue,
-    aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
-    aclDataType valueType);
+aclsparseStatus_t aclsparseCreateBlockedEll(aclsparseSpMatDescr_t* descr, int64_t rows, int64_t cols,
+                                            int64_t ellBlockSize, int64_t ellCols, void* ellColInd, void* ellValue,
+                                            aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
+                                            aclDataType valueType);
 
-aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr,
-    void *rowOffsets, void *colIndices, void *values);
+aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr, void* rowOffsets, void* colIndices,
+                                          void* values);
 /**
  * @brief 设置CSR三个一维数组的元素步长。
  *
  * 步长按元素计数，rowOffsetsStride、colIndStride和valuesStride均必须大于0。
  */
-aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
-    int64_t rowOffsetsStride, int64_t colIndStride, int64_t valuesStride);
-aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr,
-    int64_t *rowOffsetsStride, int64_t *colIndStride, int64_t *valuesStride);
-aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,
-    void *colOffsets, void *rowIndices, void *values);
-aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr,
-    void *rowIndices, void *colIndices, void *values);
+aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr, int64_t rowOffsetsStride, int64_t colIndStride,
+                                         int64_t valuesStride);
+aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr, int64_t* rowOffsetsStride,
+                                         int64_t* colIndStride, int64_t* valuesStride);
+aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr, void* colOffsets, void* rowIndices,
+                                          void* values);
+aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr, void* rowIndices, void* colIndices,
+                                          void* values);
 
 /**
  * @brief 销毁稀疏矩阵对象。
@@ -539,18 +546,16 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 // Sparse Matrix Accessor APIs
 // ============================================================================
 
-aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr,
-    aclsparseFormat_t *format);
+aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr, aclsparseFormat_t* format);
 
-aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void **values);
+aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void** values);
 
-aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr,
-    const void **values);
+aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr, const void** values);
 
-aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void *values);
+aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void* values);
 
-aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
-    int64_t *rows, int64_t *cols, int64_t *nnz);
+aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
+                                        int64_t* nnz);
 
 /**
  * @brief 获取稀疏矩阵向量乘法（SpMV）所需的缓冲区大小
@@ -567,9 +572,10 @@ aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
  * @param bufferSize OUT, HOST, 输出所需缓冲区大小
  * @return aclsparseStatus_t 状态码
  */
-aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
-                                                aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
-                                                aclsparseSpMVAlg_t alg, size_t *bufferSize);
+aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
+                                             aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+                                             const void* beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+                                             aclsparseSpMVAlg_t alg, size_t* bufferSize);
 
 /**
  * @brief 对稀疏矩阵进行预处理，以便在后续的 SpMV 计算中使用。
@@ -589,9 +595,10 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparse
  * @param externalBuffer IN, DEVICE, 工作缓冲区
  * @return aclsparseStatus_t 状态码
  */
-aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
-    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY,
-    aclDataType computeType, aclsparseSpMVAlg_t alg, void *externalBuffer);
+aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
+                                          aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+                                          const void* beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+                                          aclsparseSpMVAlg_t alg, void* externalBuffer);
 
 /**
  * @brief 稀疏矩阵向量乘法（SpMV）计算入口
@@ -608,9 +615,10 @@ aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOpe
  * @param externalBuffer IN, DEVICE, 工作缓冲区
  * @return aclsparseStatus_t 状态码
  */
-aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
-                                aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
-                                aclsparseSpMVAlg_t alg, void *externalBuffer);
+aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
+                                aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void* beta,
+                                aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpMVAlg_t alg,
+                                void* externalBuffer);
 
 /**
  * @brief 创建稠密矩阵描述符。
@@ -628,18 +636,17 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
  * @param order      IN, HOST，布局：ACL_SPARSE_ORDER_ROW / ACL_SPARSE_ORDER_COL。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
-    int64_t rows, int64_t cols, int64_t ld, void *values,
-    aclDataType valueType, aclsparseOrder_t order);
+aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t* dnMatDescr, int64_t rows, int64_t cols, int64_t ld,
+                                       void* values, aclDataType valueType, aclsparseOrder_t order);
 
 /**
  * @brief 创建只读(const)稠密矩阵描述符。
  *
  * rows/cols、ld、values、valueType 和 order 的契约与 aclsparseCreateDnMat 相同。
  */
-aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
-    int64_t rows, int64_t cols, int64_t ld, const void *values,
-    aclDataType valueType, aclsparseOrder_t order);
+aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t* dnMatDescr, int64_t rows, int64_t cols,
+                                            int64_t ld, const void* values, aclDataType valueType,
+                                            aclsparseOrder_t order);
 
 /**
  * @brief 销毁稠密矩阵描述符。
@@ -658,16 +665,15 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
  * @param order       OUT, HOST, 内存布局。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t *rows, int64_t *cols,
-                                    int64_t *ld, void **values, aclDataType *valueType,
-                                    aclsparseOrder_t *order);
+aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols, int64_t* ld,
+                                    void** values, aclDataType* valueType, aclsparseOrder_t* order);
 
 /**
  * @brief 获取只读(const)稠密矩阵描述符的全部字段。
  */
-aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t *rows,
-                                         int64_t *cols, int64_t *ld, const void **values,
-                                         aclDataType *valueType, aclsparseOrder_t *order);
+aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols,
+                                         int64_t* ld, const void** values, aclDataType* valueType,
+                                         aclsparseOrder_t* order);
 
 /**
  * @brief 获取稠密矩阵描述符的 values 指针。
@@ -676,13 +682,12 @@ aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, 
  * @param values     OUT, DEVICE, 矩阵数据指针。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void **values);
+aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void** values);
 
 /**
  * @brief 获取只读(const)稠密矩阵描述符的 values 指针。
  */
-aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr,
-                                               const void **values);
+aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr, const void** values);
 
 /**
  * @brief 设置稠密矩阵描述符的 values 指针。
@@ -691,20 +696,21 @@ aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatD
  * @param values     IN, DEVICE, 矩阵数据指针。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void *values);
+aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void* values);
 
-aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(
-    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
-    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
-    size_t *bufferSize);
-aclsparseStatus_t aclsparseDenseToSparseAnalysis(
-    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
-    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
-    void *buffer);
-aclsparseStatus_t aclsparseDenseToSparseConvert(
-    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
-    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseDnMatGetStridedBatch(aclsparseConstDnMatDescr_t dnMatDescr, int* batchCount,
+                                                int64_t* batchStride);
+aclsparseStatus_t aclsparseDnMatSetStridedBatch(aclsparseDnMatDescr_t dnMatDescr, int batchCount, int64_t batchStride);
+
+aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+                                                      aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+                                                      size_t* bufferSize);
+aclsparseStatus_t aclsparseDenseToSparseAnalysis(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+                                                 aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+                                                 void* buffer);
+aclsparseStatus_t aclsparseDenseToSparseConvert(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+                                                aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+                                                void* buffer);
 
 // ============================================================================
 // SparseToDense Generic API
@@ -728,12 +734,9 @@ typedef enum aclsparseSparseToDenseAlg_t {
  * @param bufferSize OUT, HOST, workspace 字节数，当前恒返回 0。
  * @return aclsparseStatus_t 返回执行状态，成功返回 ACL_SPARSE_STATUS_SUCCESS。
  */
-aclsparseStatus_t aclsparseSparseToDense_bufferSize(
-    aclsparseHandle_t handle,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseDnMatDescr_t matB,
-    aclsparseSparseToDenseAlg_t alg,
-    size_t *bufferSize);
+aclsparseStatus_t aclsparseSparseToDense_bufferSize(aclsparseHandle_t handle, aclsparseConstSpMatDescr_t matA,
+                                                    aclsparseDnMatDescr_t matB, aclsparseSparseToDenseAlg_t alg,
+                                                    size_t* bufferSize);
 
 /**
  * @brief 执行 SparseToDense 转换，将稀疏矩阵 matA 写入稠密矩阵 matB。
@@ -749,39 +752,33 @@ aclsparseStatus_t aclsparseSparseToDense_bufferSize(
  * @param buffer IN, DEVICE, workspace；bufferSize == 0 时可传 nullptr。
  * @return aclsparseStatus_t 返回执行状态，成功返回 ACL_SPARSE_STATUS_SUCCESS。
  */
-aclsparseStatus_t aclsparseSparseToDense(
-    aclsparseHandle_t handle,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseDnMatDescr_t matB,
-    aclsparseSparseToDenseAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseSparseToDense(aclsparseHandle_t handle, aclsparseConstSpMatDescr_t matA,
+                                         aclsparseDnMatDescr_t matB, aclsparseSparseToDenseAlg_t alg, void* buffer);
 
 /**
  * @brief 计算 SpMM 所需 workspace 字节数。
  */
-aclsparseStatus_t aclsparseSpMMGetBufferSize(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
-    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
-    aclsparseSpMMAlg_t alg, size_t *size);
+aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                             aclsparseOperation_t opB, const void* alpha,
+                                             aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+                                             const void* beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
+                                             aclsparseSpMMAlg_t alg, size_t* size);
 
 /**
  * @brief 对稀疏矩阵进行预处理，加速后续 SpMM 计算。
  */
-aclsparseStatus_t aclsparseSpMMPreprocess(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
-    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
-    aclsparseSpMMAlg_t alg, void *buffer);
+aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                          const void* alpha, aclsparseConstSpMatDescr_t matA,
+                                          aclsparseConstDnMatDescr_t matB, const void* beta, aclsparseDnMatDescr_t matC,
+                                          aclDataType computeType, aclsparseSpMMAlg_t alg, void* buffer);
 
 /**
  * @brief 稀疏矩阵-稠密矩阵乘法：C = alpha * op(A) * op(B) + beta * C
  */
-aclsparseStatus_t aclsparseSpMM(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
-    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
-    aclsparseSpMMAlg_t alg, void *buffer);
+aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                const void* alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+                                const void* beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
+                                aclsparseSpMMAlg_t alg, void* buffer);
 
 /**
  * @brief 创建 Cube SpMM 稀疏矩阵描述符（BCSR 专用）。
@@ -798,9 +795,8 @@ aclsparseStatus_t aclsparseSpMM(
  * @param numCores  使用的 AICore 数。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseCreateCubeSpmmMat(aclsparseCubeSpmmMatDescr_t *descr,
-    int64_t rows, int64_t cols, int64_t nnz,
-    int64_t blockM, int64_t blockK, int32_t numCores);
+aclsparseStatus_t aclsparseCreateCubeSpmmMat(aclsparseCubeSpmmMatDescr_t* descr, int64_t rows, int64_t cols,
+                                             int64_t nnz, int64_t blockM, int64_t blockK, int32_t numCores);
 
 /**
  * @brief 销毁 Cube SpMM 稀疏矩阵描述符。
@@ -813,12 +809,10 @@ aclsparseStatus_t aclsparseDestroyCubeSpmmMat(aclsparseConstCubeSpmmMatDescr_t d
  * 当前实现不需要 device workspace：tiling 作为 kernel 启动参数随 <<<>>> 下发，
  * 本接口固定返回 0，aclsparseCubeSpmm 的 buffer 可传 nullptr。
  */
-aclsparseStatus_t aclsparseCubeSpmmGetBufferSize(
-    aclsparseHandle_t handle,
-    const void *alpha, aclsparseConstCubeSpmmMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB, const void *beta,
-    aclsparseDnMatDescr_t matC, aclDataType computeType,
-    size_t *size);
+aclsparseStatus_t aclsparseCubeSpmmGetBufferSize(aclsparseHandle_t handle, const void* alpha,
+                                                 aclsparseConstCubeSpmmMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+                                                 const void* beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
+                                                 size_t* size);
 
 /**
  * @brief 对 Cube SpMM 输入进行预处理（COO -> Cube-BCSR）。
@@ -830,11 +824,9 @@ aclsparseStatus_t aclsparseCubeSpmmGetBufferSize(
  * @param cooCols   设备 COO 列索引（int32）。
  * @param cooVals   设备 COO 值（float16，按 uint16_t 传入）。
  */
-aclsparseStatus_t aclsparseCubeSpmmPreprocess(
-    aclsparseHandle_t handle,
-    const void *alpha, aclsparseCubeSpmmMatDescr_t matA,
-    const int32_t *cooRows, const int32_t *cooCols, const uint16_t *cooVals,
-    aclDataType computeType);
+aclsparseStatus_t aclsparseCubeSpmmPreprocess(aclsparseHandle_t handle, const void* alpha,
+                                              aclsparseCubeSpmmMatDescr_t matA, const int32_t* cooRows,
+                                              const int32_t* cooCols, const uint16_t* cooVals, aclDataType computeType);
 
 /**
  * @brief 对 Cube SpMM 的稠密 B 做 padding 对齐。
@@ -852,11 +844,9 @@ aclsparseStatus_t aclsparseCubeSpmmPreprocess(
  * @param nPadOut   输出 padding 后的 N 大小。
  * @param bPadOut   输出 padding 后的 B 设备内存指针（需由调用者 aclrtFree）。
  */
-aclsparseStatus_t aclsparseCubeSpmmPadDenseMatrixB(
-    aclsparseHandle_t handle,
-    int64_t bRows, int64_t bCols, int64_t bLd, const void *bValues,
-    aclDataType bType, aclsparseOrder_t bOrder,
-    int64_t *nPadOut, void **bPadOut);
+aclsparseStatus_t aclsparseCubeSpmmPadDenseMatrixB(aclsparseHandle_t handle, int64_t bRows, int64_t bCols, int64_t bLd,
+                                                   const void* bValues, aclDataType bType, aclsparseOrder_t bOrder,
+                                                   int64_t* nPadOut, void** bPadOut);
 
 /**
  * @brief Cube SpMM 计算：C = alpha * A(BCSR, fp16) * B(fp16) + beta * C。
@@ -865,12 +855,9 @@ aclsparseStatus_t aclsparseCubeSpmmPadDenseMatrixB(
  * 每次调用都会按当前 B/C 维度重建 tiling，并作为 kernel 启动参数随 <<<>>> 下发；
  * 当前实现不使用 workspace，buffer 可传 nullptr。
  */
-aclsparseStatus_t aclsparseCubeSpmm(
-    aclsparseHandle_t handle,
-    const void *alpha, aclsparseConstCubeSpmmMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB, const void *beta,
-    aclsparseDnMatDescr_t matC, aclDataType computeType,
-    void *buffer);
+aclsparseStatus_t aclsparseCubeSpmm(aclsparseHandle_t handle, const void* alpha, aclsparseConstCubeSpmmMatDescr_t matA,
+                                    aclsparseConstDnMatDescr_t matB, const void* beta, aclsparseDnMatDescr_t matC,
+                                    aclDataType computeType, void* buffer);
 
 // ============================================================================
 // SDDMM (Sampled Dense-Dense Matrix Multiplication) Generic API
@@ -888,20 +875,20 @@ typedef enum aclsparseSDDMMAlg_t {
 /**
  * @brief 计算 SDDMM 所需 workspace 字节数。
  */
-aclsparseStatus_t aclsparseSDDMMBufferSize(
-    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, size_t *size);
+aclsparseStatus_t aclsparseSDDMMBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                           const void* alpha, aclsparseConstDnMatDescr_t matX,
+                                           aclsparseConstDnMatDescr_t matY, const void* beta,
+                                           aclsparseSpMatDescr_t matC, aclDataType computeType, aclsparseSDDMMAlg_t alg,
+                                           size_t* size);
 
 /**
  * @brief 对稀疏矩阵进行预处理，加速后续 SDDMM 计算。
  */
-aclsparseStatus_t aclsparseSDDMMPreprocess(
-    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, void *buffer);
+aclsparseStatus_t aclsparseSDDMMPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                           const void* alpha, aclsparseConstDnMatDescr_t matX,
+                                           aclsparseConstDnMatDescr_t matY, const void* beta,
+                                           aclsparseSpMatDescr_t matC, aclDataType computeType, aclsparseSDDMMAlg_t alg,
+                                           void* buffer);
 
 /**
  * @brief 采样稠密-稠密矩阵乘法：C = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
@@ -909,11 +896,10 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
  * @note 线程安全：本接口内部使用 pattern cache 加速重复调用，该 cache 非线程安全。
  *       多 stream 并发调用时，调用者须保证串行访问，或使用独立的 matC 描述符。
  */
-aclsparseStatus_t aclsparseSDDMM(
-    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
-    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
-    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t alg, void *buffer);
+aclsparseStatus_t aclsparseSDDMM(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+                                 const void* alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
+                                 const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                 aclsparseSDDMMAlg_t alg, void* buffer);
 
 // ============================================================================
 // Generic SpSM (Sparse Triangular Solve with Multiple Right-Hand Sides)
@@ -926,9 +912,7 @@ aclsparseStatus_t aclsparseSDDMM(
 // ============================================================================
 
 // SpSM 算法枚举。
-typedef enum aclsparseSpSMAlg_t {
-    ACL_SPARSE_SPSM_ALG_DEFAULT = 0
-} aclsparseSpSMAlg_t;
+typedef enum aclsparseSpSMAlg_t { ACL_SPARSE_SPSM_ALG_DEFAULT = 0 } aclsparseSpSMAlg_t;
 
 /** Numeric update selection; A2/A3 takes a full nnz array in the original entry order. */
 typedef enum aclsparseSpSMUpdate_t {
@@ -954,14 +938,13 @@ typedef enum aclsparseSpSMUpdate_t {
  *       Failed numerical validation preserves the previous plan on arch35.
  *       UNIT ignores supplied diagonal values.
  */
-aclsparseStatus_t aclsparseSpSMUpdateMatrix(aclsparseHandle_t handle,
-    aclsparseSpSMDescr_t spsmDescr, const void *newValues, aclsparseSpSMUpdate_t updatePart);
-
+aclsparseStatus_t aclsparseSpSMUpdateMatrix(aclsparseHandle_t handle, aclsparseSpSMDescr_t spsmDescr,
+                                            const void* newValues, aclsparseSpSMUpdate_t updatePart);
 
 /**
  * @brief 创建 SpSM 描述符 (跨三阶段共享)。
  */
-aclsparseStatus_t aclsparseSpSMCreateDescr(aclsparseSpSMDescr_t *spsmDescr);
+aclsparseStatus_t aclsparseSpSMCreateDescr(aclsparseSpSMDescr_t* spsmDescr);
 
 /**
  * @brief 销毁 SpSM 描述符。
@@ -978,12 +961,11 @@ aclsparseStatus_t aclsparseSpSMDestroyDescr(aclsparseSpSMDescr_t spsmDescr);
  * @note A2/A3: B/C values may be NULL. The size depends on the current device;
  *       query and analyze on the same device. On failure *bufferSize is unchanged.
  */
-aclsparseStatus_t aclsparseSpSMBufferSize(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
-    aclDataType computeType, aclsparseSpSMAlg_t alg,
-    aclsparseSpSMDescr_t spsmDescr, size_t *bufferSize);
+aclsparseStatus_t aclsparseSpSMBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                          const void* alpha, aclsparseConstSpMatDescr_t matA,
+                                          aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
+                                          aclDataType computeType, aclsparseSpSMAlg_t alg,
+                                          aclsparseSpSMDescr_t spsmDescr, size_t* bufferSize);
 
 /**
  * @brief Analyze SpSM and bind descriptors, stream and external workspace.
@@ -1007,12 +989,11 @@ aclsparseStatus_t aclsparseSpSMBufferSize(
  * @note arch35 can use handle workspace when buffer is NULL. Analysis waits for
  *       Device validation and reads back status, not matrix arrays.
  */
-aclsparseStatus_t aclsparseSpSMAnalysis(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
-    aclDataType computeType, aclsparseSpSMAlg_t alg,
-    aclsparseSpSMDescr_t spsmDescr, void *buffer);
+aclsparseStatus_t aclsparseSpSMAnalysis(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                        const void* alpha, aclsparseConstSpMatDescr_t matA,
+                                        aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
+                                        aclDataType computeType, aclsparseSpSMAlg_t alg, aclsparseSpSMDescr_t spsmDescr,
+                                        void* buffer);
 
 /**
  * @brief SpSM 求解阶段: 异步执行三角求解 op(A) * C = alpha * op(B)。
@@ -1026,12 +1007,10 @@ aclsparseStatus_t aclsparseSpSMAnalysis(
  *       valid until the stream completes. A Host-side rejection enqueues nothing
  *       and keeps the plan unchanged. Success means enqueued only.
  */
-aclsparseStatus_t aclsparseSpSM(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
-    aclDataType computeType, aclsparseSpSMAlg_t alg,
-    aclsparseSpSMDescr_t spsmDescr);
+aclsparseStatus_t aclsparseSpSM(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                const void* alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+                                aclsparseDnMatDescr_t matC, aclDataType computeType, aclsparseSpSMAlg_t alg,
+                                aclsparseSpSMDescr_t spsmDescr);
 
 /**
  * @brief 创建 ops-sparse handle
@@ -1045,7 +1024,7 @@ aclsparseStatus_t aclsparseSpSM(
  *         ACL_SPARSE_STATUS_INVALID_VALUE *handle 非空
  *         ACL_SPARSE_STATUS_ALLOC_FAILED 内存分配失败
  */
-aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle);
+aclsparseStatus_t aclsparseCreate(aclsparseHandle_t* handle);
 
 /**
  * @brief 销毁 ops-sparse handle
@@ -1075,7 +1054,7 @@ aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream strea
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE stream 输出参数为空
  */
-aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream);
+aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream* stream);
 
 /**
  * @brief 设置用户 workspace
@@ -1094,7 +1073,7 @@ aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stre
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE workspaceSize 为 0（当 workspace 非空时）
  */
-aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void *workspace, size_t workspaceSize);
+aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void* workspace, size_t workspaceSize);
 
 /**
  * @brief 获取当前活跃 workspace
@@ -1108,7 +1087,7 @@ aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void *workspac
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE 输出参数为空
  */
-aclsparseStatus_t aclsparseGetWorkspace(aclsparseHandle_t handle, void **workspace, size_t *workspaceSize);
+aclsparseStatus_t aclsparseGetWorkspace(aclsparseHandle_t handle, void** workspace, size_t* workspaceSize);
 
 /**
  * @brief 获取 ops-sparse 版本号
@@ -1120,7 +1099,7 @@ aclsparseStatus_t aclsparseGetWorkspace(aclsparseHandle_t handle, void **workspa
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_INVALID_VALUE 参数无效
  */
-aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version);
+aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int* version);
 
 // ============================================================================
 // Pointer Mode
@@ -1132,13 +1111,13 @@ typedef enum aclsparsePointerMode_t {
 } aclsparsePointerMode_t;
 
 aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t mode);
-aclsparseStatus_t aclsparseGetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t *mode);
+aclsparseStatus_t aclsparseGetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t* mode);
 
 // ============================================================================
 // Legacy API: MatDescr management
 // ============================================================================
 
-aclsparseStatus_t aclsparseCreateMatDescr(aclsparseMatDescr_t *descr);
+aclsparseStatus_t aclsparseCreateMatDescr(aclsparseMatDescr_t* descr);
 aclsparseStatus_t aclsparseDestroyMatDescr(aclsparseMatDescr_t descr);
 void aclsparseSetMatType(aclsparseMatDescr_t descr, aclsparseMatrixType_t type);
 void aclsparseSetMatIndexBase(aclsparseMatDescr_t descr, aclsparseIndexBase_t base);
@@ -1169,14 +1148,9 @@ aclsparseFillMode_t aclsparseGetMatFillMode(aclsparseMatDescr_t descr);
  *                           HOST mode -> host memory, DEVICE mode -> device memory.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSnnz(
-    aclsparseHandle_t handle,
-    aclsparseDirection_t dirA,
-    int m, int n,
-    const aclsparseMatDescr_t descrA,
-    const float *A, int lda,
-    int *nnzPerRowColumn,
-    int *nnzTotalDevHostPtr);
+aclsparseStatus_t aclsparseSnnz(aclsparseHandle_t handle, aclsparseDirection_t dirA, int m, int n,
+                                const aclsparseMatDescr_t descrA, const float* A, int lda, int* nnzPerRowColumn,
+                                int* nnzTotalDevHostPtr);
 
 // ============================================================================
 // Legacy API: aclsparseScsrgeam2 — C = alpha * A + beta * B  (CSR, FP32)
@@ -1208,11 +1182,11 @@ aclsparseStatus_t aclsparseSnnz(
  * @return aclsparseStatus_t
  */
 aclsparseStatus_t aclsparseScsrgeam2_bufferSizeExt(
-    aclsparseHandle_t handle, int m, int n, const float *alpha, const aclsparseMatDescr_t descrA, int nnzA,
-    const float *csrSortedValA, const int *csrSortedRowPtrA, const int *csrSortedColIndA, const float *beta,
-    const aclsparseMatDescr_t descrB, int nnzB, const float *csrSortedValB, const int *csrSortedRowPtrB,
-    const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, const float *csrSortedValC,
-    const int *csrSortedRowPtrC, const int *csrSortedColIndC, size_t *pBufferSizeInBytes);
+    aclsparseHandle_t handle, int m, int n, const float* alpha, const aclsparseMatDescr_t descrA, int nnzA,
+    const float* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA, const float* beta,
+    const aclsparseMatDescr_t descrB, int nnzB, const float* csrSortedValB, const int* csrSortedRowPtrB,
+    const int* csrSortedColIndB, const aclsparseMatDescr_t descrC, const float* csrSortedValC,
+    const int* csrSortedRowPtrC, const int* csrSortedColIndC, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Compute the structure of C (rowPtrC and nnzC).
@@ -1237,11 +1211,11 @@ aclsparseStatus_t aclsparseScsrgeam2_bufferSizeExt(
  * @param workspace             IN, DEVICE, workspace (>= (m+1) * sizeof(int)).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcsrgeam2Nnz(
-    aclsparseHandle_t handle, int m, int n, const aclsparseMatDescr_t descrA, int nnzA, const int *csrSortedRowPtrA,
-    const int *csrSortedColIndA, const aclsparseMatDescr_t descrB, int nnzB, const int *csrSortedRowPtrB,
-    const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, int *csrSortedRowPtrC, int *nnzTotalDevHostPtr,
-    void *workspace);
+aclsparseStatus_t aclsparseXcsrgeam2Nnz(aclsparseHandle_t handle, int m, int n, const aclsparseMatDescr_t descrA,
+                                        int nnzA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,
+                                        const aclsparseMatDescr_t descrB, int nnzB, const int* csrSortedRowPtrB,
+                                        const int* csrSortedColIndB, const aclsparseMatDescr_t descrC,
+                                        int* csrSortedRowPtrC, int* nnzTotalDevHostPtr, void* workspace);
 
 /**
  * @brief Compute column indices and values of C: C = alpha * A + beta * B.
@@ -1271,12 +1245,13 @@ aclsparseStatus_t aclsparseXcsrgeam2Nnz(
  * @param pBuffer              IN, DEVICE, workspace (from bufferSizeExt).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseScsrgeam2(
-    aclsparseHandle_t handle, int m, int n, const float *alpha, const aclsparseMatDescr_t descrA, int nnzA,
-    const float *csrSortedValA, const int *csrSortedRowPtrA, const int *csrSortedColIndA, const float *beta,
-    const aclsparseMatDescr_t descrB, int nnzB, const float *csrSortedValB, const int *csrSortedRowPtrB,
-    const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, float *csrSortedValC,
-    int *csrSortedRowPtrC, int *csrSortedColIndC, void *pBuffer);
+aclsparseStatus_t aclsparseScsrgeam2(aclsparseHandle_t handle, int m, int n, const float* alpha,
+                                     const aclsparseMatDescr_t descrA, int nnzA, const float* csrSortedValA,
+                                     const int* csrSortedRowPtrA, const int* csrSortedColIndA, const float* beta,
+                                     const aclsparseMatDescr_t descrB, int nnzB, const float* csrSortedValB,
+                                     const int* csrSortedRowPtrB, const int* csrSortedColIndB,
+                                     const aclsparseMatDescr_t descrC, float* csrSortedValC, int* csrSortedRowPtrC,
+                                     int* csrSortedColIndC, void* pBuffer);
 /**
  * @brief 稀疏向量-稠密向量点积：result = sum(x_values[i] * y[x_indices[i]])
  *
@@ -1289,9 +1264,8 @@ aclsparseStatus_t aclsparseScsrgeam2(
  *                    valueType（x/y 元素类型）可为 ACL_FLOAT 或 ACL_FLOAT16，核函数按 valueType 分发。
  * @return aclsparseStatus_t 返回执行状态。
  */
-aclsparseStatus_t aclsparseSpvv(aclsparseHandle_t handle, aclsparseOperation_t op,
-    aclsparseConstSpVecDescr_t x, aclsparseConstDnVecDescr_t y,
-    void *result, aclDataType computeType);
+aclsparseStatus_t aclsparseSpvv(aclsparseHandle_t handle, aclsparseOperation_t op, aclsparseConstSpVecDescr_t x,
+                                aclsparseConstDnVecDescr_t y, void* result, aclDataType computeType);
 
 // ============================================================================
 // Legacy API: aclsparseSgtsvInterleavedBatch
@@ -1325,10 +1299,8 @@ aclsparseStatus_t aclsparseSpvv(aclsparseHandle_t handle, aclsparseOperation_t o
  * @param pBuffer       IN, DEVICE, workspace buffer (128-byte aligned).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsvInterleavedBatch(
-    aclsparseHandle_t handle, int algo, int m,
-    float *dl, float *d, float *du, float *x,
-    int batchCount, void *pBuffer);
+aclsparseStatus_t aclsparseSgtsvInterleavedBatch(aclsparseHandle_t handle, int algo, int m, float* dl, float* d,
+                                                 float* du, float* x, int batchCount, void* pBuffer);
 
 /**
  * @brief Query workspace buffer size for aclsparseSgtsvInterleavedBatch.
@@ -1344,10 +1316,10 @@ aclsparseStatus_t aclsparseSgtsvInterleavedBatch(
  * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsvInterleavedBatch_bufferSizeExt(
-    aclsparseHandle_t handle, int algo, int m,
-    const float *dl, const float *d, const float *du, const float *x,
-    int batchCount, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseSgtsvInterleavedBatch_bufferSizeExt(aclsparseHandle_t handle, int algo, int m,
+                                                               const float* dl, const float* d, const float* du,
+                                                               const float* x, int batchCount,
+                                                               size_t* pBufferSizeInBytes);
 // Legacy API: aclsparseSgtsv2StridedBatch — Tridiagonal system solve (FP32)
 // ============================================================================
 
@@ -1371,11 +1343,9 @@ aclsparseStatus_t aclsparseSgtsvInterleavedBatch_bufferSizeExt(
  * @param bufferSizeInBytes OUT, HOST, workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsv2StridedBatch_bufferSizeExt(
-    aclsparseHandle_t handle, int m,
-    const float *dl, const float *d, const float *du,
-    const float *x, int batchCount, int batchStride,
-    size_t *bufferSizeInBytes);
+aclsparseStatus_t aclsparseSgtsv2StridedBatch_bufferSizeExt(aclsparseHandle_t handle, int m, const float* dl,
+                                                            const float* d, const float* du, const float* x,
+                                                            int batchCount, int batchStride, size_t* bufferSizeInBytes);
 
 /**
  * @brief Solve batched tridiagonal systems T_i * x_i = b_i using CR algorithm.
@@ -1406,11 +1376,9 @@ aclsparseStatus_t aclsparseSgtsv2StridedBatch_bufferSizeExt(
  * @param pBuffer         IN, DEVICE, workspace (may be NULL when bufferSizeExt returns 0).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsv2StridedBatch(
-    aclsparseHandle_t handle, int m,
-    const float *dl, const float *d, const float *du,
-    float *x, int batchCount, int batchStride,
-    void *pBuffer);
+aclsparseStatus_t aclsparseSgtsv2StridedBatch(aclsparseHandle_t handle, int m, const float* dl, const float* d,
+                                              const float* du, float* x, int batchCount, int batchStride,
+                                              void* pBuffer);
 
 // ============================================================================
 // Legacy API: aclsparseSgtsv2Nopivot
@@ -1447,10 +1415,8 @@ aclsparseStatus_t aclsparseSgtsv2StridedBatch(
  * @param pBuffer       IN, DEVICE, workspace buffer (128-byte aligned), size from bufferSizeExt.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsv2Nopivot(
-    aclsparseHandle_t handle, int m, int n,
-    const float *dl, const float *d, const float *du,
-    float *B, int ldb, void *pBuffer);
+aclsparseStatus_t aclsparseSgtsv2Nopivot(aclsparseHandle_t handle, int m, int n, const float* dl, const float* d,
+                                         const float* du, float* B, int ldb, void* pBuffer);
 
 /**
  * @brief Query workspace buffer size for aclsparseSgtsv2Nopivot.
@@ -1466,10 +1432,9 @@ aclsparseStatus_t aclsparseSgtsv2Nopivot(
  * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsv2Nopivot_bufferSizeExt(
-    aclsparseHandle_t handle, int m, int n,
-    const float *dl, const float *d, const float *du,
-    const float *B, int ldb, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseSgtsv2Nopivot_bufferSizeExt(aclsparseHandle_t handle, int m, int n, const float* dl,
+                                                       const float* d, const float* du, const float* B, int ldb,
+                                                       size_t* pBufferSizeInBytes);
 
 // ============================================================================
 // Legacy API: aclsparseSgtsv2
@@ -1503,10 +1468,8 @@ aclsparseStatus_t aclsparseSgtsv2Nopivot_bufferSizeExt(
  * @param pBuffer       IN, DEVICE, workspace (128-byte aligned), size from bufferSizeExt.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsv2(
-    aclsparseHandle_t handle, int m, int n,
-    const float *dl, const float *d, const float *du,
-    float *B, int ldb, void *pBuffer);
+aclsparseStatus_t aclsparseSgtsv2(aclsparseHandle_t handle, int m, int n, const float* dl, const float* d,
+                                  const float* du, float* B, int ldb, void* pBuffer);
 
 /**
  * @brief Query workspace buffer size for aclsparseSgtsv2.
@@ -1522,10 +1485,8 @@ aclsparseStatus_t aclsparseSgtsv2(
  * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
-    aclsparseHandle_t handle, int m, int n,
-    const float *dl, const float *d, const float *du,
-    const float *B, int ldb, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(aclsparseHandle_t handle, int m, int n, const float* dl, const float* d,
+                                                const float* du, const float* B, int ldb, size_t* pBufferSizeInBytes);
 
 // ============================================================================
 // Legacy API: aclsparseSgpsvInterleavedBatch
@@ -1567,10 +1528,9 @@ aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
  * @param pBuffer       IN, DEVICE, workspace buffer (128-byte aligned), size from bufferSizeExt.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgpsvInterleavedBatch(
-    aclsparseHandle_t handle, int algo, int m,
-    float *ds, float *dl, float *d, float *du, float *dw, float *x,
-    int batchCount, void *pBuffer);
+aclsparseStatus_t aclsparseSgpsvInterleavedBatch(aclsparseHandle_t handle, int algo, int m, float* ds, float* dl,
+                                                 float* d, float* du, float* dw, float* x, int batchCount,
+                                                 void* pBuffer);
 
 /**
  * @brief Query workspace buffer size for aclsparseSgpsvInterleavedBatch.
@@ -1588,10 +1548,10 @@ aclsparseStatus_t aclsparseSgpsvInterleavedBatch(
  * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgpsvInterleavedBatch_bufferSizeExt(
-    aclsparseHandle_t handle, int algo, int m,
-    const float *ds, const float *dl, const float *d, const float *du, const float *dw, const float *x,
-    int batchCount, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseSgpsvInterleavedBatch_bufferSizeExt(aclsparseHandle_t handle, int algo, int m,
+                                                               const float* ds, const float* dl, const float* d,
+                                                               const float* du, const float* dw, const float* x,
+                                                               int batchCount, size_t* pBufferSizeInBytes);
 
 // ============================================================================
 // Legacy API: aclsparseCsr2cscEx2 — CSR to CSC format conversion
@@ -1599,8 +1559,8 @@ aclsparseStatus_t aclsparseSgpsvInterleavedBatch_bufferSizeExt(
 
 // Action type for format conversion: whether to copy values or only structure.
 typedef enum aclsparseAction_t {
-    ACL_SPARSE_ACTION_SYMBOLIC = 0,  // Only compute output structure (colPtr, rowInd).
-    ACL_SPARSE_ACTION_NUMERIC        // Compute structure and copy values.
+    ACL_SPARSE_ACTION_SYMBOLIC = 0, // Only compute output structure (colPtr, rowInd).
+    ACL_SPARSE_ACTION_NUMERIC       // Compute structure and copy values.
 } aclsparseAction_t;
 
 // Algorithm selector for CSR to CSC conversion.
@@ -1629,13 +1589,11 @@ typedef enum aclsparseCsr2CscAlg_t {
  * @param bufferSize   OUT, HOST, required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseCsr2cscEx2_bufferSize(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    const void *csrVal, const int *csrRowPtr, const int *csrColInd,
-    void *cscVal, int *cscColPtr, int *cscRowInd,
-    aclDataType valType, aclsparseAction_t copyValues,
-    aclsparseIndexBase_t idxBase, aclsparseCsr2CscAlg_t alg,
-    size_t *bufferSize);
+aclsparseStatus_t aclsparseCsr2cscEx2_bufferSize(aclsparseHandle_t handle, int m, int n, int nnz, const void* csrVal,
+                                                 const int* csrRowPtr, const int* csrColInd, void* cscVal,
+                                                 int* cscColPtr, int* cscRowInd, aclDataType valType,
+                                                 aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
+                                                 aclsparseCsr2CscAlg_t alg, size_t* bufferSize);
 
 /**
  * @brief Convert a sparse matrix from CSR format to CSC format.
@@ -1662,13 +1620,10 @@ aclsparseStatus_t aclsparseCsr2cscEx2_bufferSize(
  * @param buffer       IN, DEVICE, workspace (size from bufferSize query).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseCsr2cscEx2(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    const void *csrVal, const int *csrRowPtr, const int *csrColInd,
-    void *cscVal, int *cscColPtr, int *cscRowInd,
-    aclDataType valType, aclsparseAction_t copyValues,
-    aclsparseIndexBase_t idxBase, aclsparseCsr2CscAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseCsr2cscEx2(aclsparseHandle_t handle, int m, int n, int nnz, const void* csrVal,
+                                      const int* csrRowPtr, const int* csrColInd, void* cscVal, int* cscColPtr,
+                                      int* cscRowInd, aclDataType valType, aclsparseAction_t copyValues,
+                                      aclsparseIndexBase_t idxBase, aclsparseCsr2CscAlg_t alg, void* buffer);
 
 // ============================================================================
 // Legacy API: aclsparseGebsr2gebsc — GEBSR to GEBSC format conversion
@@ -1701,13 +1656,10 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
  * @param pBufferSizeInBytes OUT, HOST, required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseGebsr2gebsc_bufferSize(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const void *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    aclsparseDirection_t dirA,
-    aclDataType valType,
-    size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseGebsr2gebsc_bufferSize(aclsparseHandle_t handle, int mb, int nb, int nnzb,
+                                                  const void* bsrValA, const int* bsrRowPtrA, const int* bsrColIndA,
+                                                  int rowBlockDimA, int colBlockDimA, aclsparseDirection_t dirA,
+                                                  aclDataType valType, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Convert GEBSR to GEBSC.
@@ -1732,16 +1684,11 @@ aclsparseStatus_t aclsparseGebsr2gebsc_bufferSize(
  * @param pBuffer          IN, DEVICE, workspace (size from bufferSize query).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseGebsr2gebsc(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const void *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    void *bscVal, int *bscColPtr, int *bscRowInd,
-    int rowBlockDimC, int colBlockDimC,
-    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
-    aclsparseDirection_t dirA,
-    aclDataType valType,
-    void *pBuffer);
+aclsparseStatus_t aclsparseGebsr2gebsc(aclsparseHandle_t handle, int mb, int nb, int nnzb, const void* bsrValA,
+                                       const int* bsrRowPtrA, const int* bsrColIndA, int rowBlockDimA, int colBlockDimA,
+                                       void* bscVal, int* bscColPtr, int* bscRowInd, int rowBlockDimC, int colBlockDimC,
+                                       aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
+                                       aclsparseDirection_t dirA, aclDataType valType, void* pBuffer);
 
 // ============================================================================
 // Legacy API: aclsparseXcoosort — COO format in-place stable sort (dual-key)
@@ -1759,10 +1706,8 @@ aclsparseStatus_t aclsparseGebsr2gebsc(
  * @param pBufferSizeInBytes   OUT, HOST,  required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcoosort_bufferSizeExt(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    const int *cooRowsA, const int *cooColsA,
-    size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseXcoosort_bufferSizeExt(aclsparseHandle_t handle, int m, int n, int nnz, const int* cooRowsA,
+                                                  const int* cooColsA, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Stable-sort COO arrays by row (dual-key: row ascending, then col ascending).
@@ -1781,17 +1726,15 @@ aclsparseStatus_t aclsparseXcoosort_bufferSizeExt(
  * @param pBuffer   IN,  DEVICE,  workspace (from bufferSizeExt), no alignment required.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcoosortByRow(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    int *cooRowsA, int *cooColsA, int *P, void *pBuffer);
+aclsparseStatus_t aclsparseXcoosortByRow(aclsparseHandle_t handle, int m, int n, int nnz, int* cooRowsA, int* cooColsA,
+                                         int* P, void* pBuffer);
 
 /**
  * @brief Stable-sort COO arrays by column (dual-key: col ascending, then row ascending).
  *        Same semantics as aclsparseXcoosortByRow but primary key is the column index.
  */
-aclsparseStatus_t aclsparseXcoosortByColumn(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    int *cooRowsA, int *cooColsA, int *P, void *pBuffer);
+aclsparseStatus_t aclsparseXcoosortByColumn(aclsparseHandle_t handle, int m, int n, int nnz, int* cooRowsA,
+                                            int* cooColsA, int* P, void* pBuffer);
 // Generic API: aclsparseSpMVOp — 7 函数
 // ============================================================================
 
@@ -1799,26 +1742,21 @@ aclsparseStatus_t aclsparseXcoosortByColumn(
  * @brief 获取 SpMVOp 所需 workspace 大小（字节数）。
  *        ALG1: 返回 0；ALG2: 返回 reorder 表 + bin_edge 表 + 对齐开销。
  */
-aclsparseStatus_t aclsparseSpMVOp_bufferSize(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnVecDescr_t vecX,
-    aclsparseConstDnVecDescr_t vecY,
-    aclsparseDnVecDescr_t vecZ,
-    aclDataType computeType,
-    aclsparseSpMVOpAlg_t alg,
-    size_t *bufferSize);
+aclsparseStatus_t aclsparseSpMVOp_bufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                             aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+                                             aclsparseConstDnVecDescr_t vecY, aclsparseDnVecDescr_t vecZ,
+                                             aclDataType computeType, aclsparseSpMVOpAlg_t alg, size_t* bufferSize);
 
 /**
  * @brief 创建 SpMVOp 内部描述符并执行预处理。
  *        ALG2: 在 device 上通过 kernel 异步完成排序和 bin_edge 负载均衡切分。
  *        buffer 由调用者在 bufferSize 后分配，保持有效直到 descr 销毁。
  */
-aclsparseStatus_t aclsparseSpMVOp_createDescr(
-    aclsparseHandle_t handle, aclsparseSpMVOpDescr_t *descr, aclsparseOperation_t opA, aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnVecDescr_t vecX, aclsparseConstDnVecDescr_t vecY, aclsparseDnVecDescr_t vecZ,
-    aclDataType computeType, aclsparseSpMVOpAlg_t alg, void *buffer);
+aclsparseStatus_t aclsparseSpMVOp_createDescr(aclsparseHandle_t handle, aclsparseSpMVOpDescr_t* descr,
+                                              aclsparseOperation_t opA, aclsparseConstSpMatDescr_t matA,
+                                              aclsparseConstDnVecDescr_t vecX, aclsparseConstDnVecDescr_t vecY,
+                                              aclsparseDnVecDescr_t vecZ, aclDataType computeType,
+                                              aclsparseSpMVOpAlg_t alg, void* buffer);
 
 /**
  * @brief 销毁 SpMVOp 描述符并释放其管理的 host 资源。
@@ -1832,10 +1770,8 @@ aclsparseStatus_t aclsparseSpMVOp_destroyDescr(aclsparseSpMVOpDescr_t descr);
  */
 aclsparseStatus_t aclsparseSpMVOp_createPlan(
     aclsparseHandle_t handle,
-    aclsparseSpMVOpDescr_t descr,        // 非 const：对标 cuSPARSE，createPlan 可修改 descr
-    aclsparseSpMVOpPlan_t *plan,
-    const void *epilogueLTOBuffer,
-    size_t epilogueLTOBufferSize);
+    aclsparseSpMVOpDescr_t descr, // 非 const：对标 cuSPARSE，createPlan 可修改 descr
+    aclsparseSpMVOpPlan_t* plan, const void* epilogueLTOBuffer, size_t epilogueLTOBufferSize);
 
 /**
  * @brief 销毁 SpMVOp 执行计划。
@@ -1847,25 +1783,17 @@ aclsparseStatus_t aclsparseSpMVOp_destroyPlan(aclsparseSpMVOpPlan_t plan);
  * @brief 将 epilogue 模块中 __constant__ 变量设置为指定数据。
  *        NPU 侧 identity epilogue 不使用此接口，直接返回 SUCCESS。
  */
-aclsparseStatus_t aclsparseSpMVOp_setGlobalUserData(
-    aclsparseHandle_t handle,
-    aclsparseSpMVOpPlan_t plan,
-    const char *epilogueDataName,
-    void *epilogueData,
-    size_t epilogueDataSize);
+aclsparseStatus_t aclsparseSpMVOp_setGlobalUserData(aclsparseHandle_t handle, aclsparseSpMVOpPlan_t plan,
+                                                    const char* epilogueDataName, void* epilogueData,
+                                                    size_t epilogueDataSize);
 
 /**
  * @brief 执行稀疏矩阵向量乘法：Z = alpha * A * X + beta * Y
  *        使用确定性累加（Priest 双重补偿求和）保证 bit-wise 可重复。
  */
-aclsparseStatus_t aclsparseSpMVOp(
-    aclsparseHandle_t handle,
-    aclsparseSpMVOpPlan_t plan,
-    const void *alpha,
-    const void *beta,
-    aclsparseConstDnVecDescr_t vecX,
-    aclsparseConstDnVecDescr_t vecY,
-    aclsparseDnVecDescr_t vecZ);
+aclsparseStatus_t aclsparseSpMVOp(aclsparseHandle_t handle, aclsparseSpMVOpPlan_t plan, const void* alpha,
+                                  const void* beta, aclsparseConstDnVecDescr_t vecX, aclsparseConstDnVecDescr_t vecY,
+                                  aclsparseDnVecDescr_t vecZ);
 
 // ============================================================================
 // Generic API: aclsparseSpMMOp — 7 函数
@@ -1882,10 +1810,10 @@ aclsparseStatus_t aclsparseSpMVOp(
 // SpMMOp 算法枚举（对标 Generic API 中 SpMMOp 的算法选项）
 // 注意：新增枚举值须追加到末尾，保持既有枚举数值不变（ABI 兼容性）。
 typedef enum aclsparseSpMMOpAlg_t {
-    ACL_SPARSE_SPMMOP_ALG_DEFAULT = 0,  // 路由到 ALG1, 无 workspace
-    ACL_SPARSE_SPMMOP_ALG1,             // host-side 静态行切分, 无 workspace, 支持 csrValues 原地更新
-    ACL_SPARSE_SPMMOP_ALG2,             // host-side merge sort (std::stable_sort) + bin_edge 负载均衡, 需 workspace
-    ACL_SPARSE_SPMMOP_ALG1_HIGH_PRECISION  // FP32 Kahan 补偿求和，仅 FP32 生效；workspace 语义同 ALG1
+    ACL_SPARSE_SPMMOP_ALG_DEFAULT = 0, // 路由到 ALG1, 无 workspace
+    ACL_SPARSE_SPMMOP_ALG1,            // host-side 静态行切分, 无 workspace, 支持 csrValues 原地更新
+    ACL_SPARSE_SPMMOP_ALG2,            // host-side merge sort (std::stable_sort) + bin_edge 负载均衡, 需 workspace
+    ACL_SPARSE_SPMMOP_ALG1_HIGH_PRECISION // FP32 Kahan 补偿求和，仅 FP32 生效；workspace 语义同 ALG1
 } aclsparseSpMMOpAlg_t;
 
 // SpMMOp opaque types
@@ -1893,23 +1821,17 @@ struct aclsparseSpMMOpDescr;
 struct aclsparseSpMMOpPlan;
 
 typedef struct aclsparseSpMMOpDescr* aclsparseSpMMOpDescr_t;
-typedef struct aclsparseSpMMOpDescr const *aclsparseConstSpMMOpDescr_t;
+typedef struct aclsparseSpMMOpDescr const* aclsparseConstSpMMOpDescr_t;
 typedef struct aclsparseSpMMOpPlan* aclsparseSpMMOpPlan_t;
 
 /**
  * @brief 获取 SpMMOp 所需 workspace 大小（字节数）。
  *        ALG1/DEFAULT: 返回 0；ALG2: 返回 reorder 表 + bin_edge 表 + 对齐开销。
  */
-aclsparseStatus_t aclsparseSpMMOp_bufferSize(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA,
-    aclsparseOperation_t opB,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB,
-    aclsparseDnMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpMMOpAlg_t alg,
-    size_t *bufferSize);
+aclsparseStatus_t aclsparseSpMMOp_bufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                             aclsparseOperation_t opB, aclsparseConstSpMatDescr_t matA,
+                                             aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
+                                             aclDataType computeType, aclsparseSpMMOpAlg_t alg, size_t* bufferSize);
 
 /**
  * @brief 创建 SpMMOp 内部描述符并执行预处理。
@@ -1917,17 +1839,11 @@ aclsparseStatus_t aclsparseSpMMOp_bufferSize(
  *        buffer 由调用者在 bufferSize 后分配，保持有效直到 descr 销毁。
  *        matA 在此阶段绑定（CSR pattern 固定用于 plan 生命周期）。
  */
-aclsparseStatus_t aclsparseSpMMOp_createDescr(
-    aclsparseHandle_t handle,
-    aclsparseSpMMOpDescr_t *descr,
-    aclsparseOperation_t opA,
-    aclsparseOperation_t opB,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstDnMatDescr_t matB,
-    aclsparseDnMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpMMOpAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseSpMMOp_createDescr(aclsparseHandle_t handle, aclsparseSpMMOpDescr_t* descr,
+                                              aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                              aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+                                              aclsparseDnMatDescr_t matC, aclDataType computeType,
+                                              aclsparseSpMMOpAlg_t alg, void* buffer);
 
 /**
  * @brief 销毁 SpMMOp 描述符并释放其管理的 host 资源。
@@ -1941,10 +1857,8 @@ aclsparseStatus_t aclsparseSpMMOp_destroyDescr(aclsparseSpMMOpDescr_t descr);
  */
 aclsparseStatus_t aclsparseSpMMOp_createPlan(
     aclsparseHandle_t handle,
-    aclsparseSpMMOpDescr_t descr,        // 非 const：对标 cuSPARSE，createPlan 可修改 descr
-    aclsparseSpMMOpPlan_t *plan,
-    const void *epilogueLTOBuffer,
-    size_t epilogueLTOBufferSize);
+    aclsparseSpMMOpDescr_t descr, // 非 const：对标 cuSPARSE，createPlan 可修改 descr
+    aclsparseSpMMOpPlan_t* plan, const void* epilogueLTOBuffer, size_t epilogueLTOBufferSize);
 
 /**
  * @brief 销毁 SpMMOp 执行计划。
@@ -1956,12 +1870,9 @@ aclsparseStatus_t aclsparseSpMMOp_destroyPlan(aclsparseSpMMOpPlan_t plan);
  * @brief 将 epilogue 模块中 __constant__ 变量设置为指定数据。
  *        NPU 侧 identity epilogue 不使用此接口，直接返回 SUCCESS。
  */
-aclsparseStatus_t aclsparseSpMMOp_setGlobalUserData(
-    aclsparseHandle_t handle,
-    aclsparseSpMMOpPlan_t plan,
-    const char *epilogueDataName,
-    void *epilogueData,
-    size_t epilogueDataSize);
+aclsparseStatus_t aclsparseSpMMOp_setGlobalUserData(aclsparseHandle_t handle, aclsparseSpMMOpPlan_t plan,
+                                                    const char* epilogueDataName, void* epilogueData,
+                                                    size_t epilogueDataSize);
 
 /**
  * @brief 执行稀疏矩阵-稠密矩阵乘法：C = alpha * op(A) * op(B) + beta * C
@@ -1970,13 +1881,8 @@ aclsparseStatus_t aclsparseSpMMOp_setGlobalUserData(
  *        支持 opB ∈ {NON_TRANSPOSE, TRANSPOSE}，B/C 独立支持 ROW/COL 主序。
  *        异步执行，同步由调用方通过 stream 负责。
  */
-aclsparseStatus_t aclsparseSpMMOp(
-    aclsparseHandle_t handle,
-    aclsparseSpMMOpPlan_t plan,
-    const void *alpha,
-    const void *beta,
-    aclsparseConstDnMatDescr_t matB,
-    aclsparseDnMatDescr_t matC);
+aclsparseStatus_t aclsparseSpMMOp(aclsparseHandle_t handle, aclsparseSpMMOpPlan_t plan, const void* alpha,
+                                  const void* beta, aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC);
 
 // ============================================================================
 // Generic API: aclsparseScatter
@@ -2000,10 +1906,8 @@ aclsparseStatus_t aclsparseSpMMOp(
  * @param vecY   IN/OUT, HOST(descr)/DEVICE(data), 稠密向量描述符，其 values 被 X 散布写入。
  * @return aclsparseStatus_t 成功返回 ACL_SPARSE_STATUS_SUCCESS。
  */
-aclsparseStatus_t aclsparseScatter(
-    aclsparseHandle_t handle,
-    aclsparseConstSpVecDescr_t vecX,
-    aclsparseDnVecDescr_t vecY);
+aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVecDescr_t vecX,
+                                   aclsparseDnVecDescr_t vecY);
 
 // ============================================================================
 // Legacy API: aclsparseXcsrsort
@@ -2021,14 +1925,8 @@ aclsparseStatus_t aclsparseScatter(
  * @param pBufferSizeInBytes OUT, HOST, workspace 大小（字节）。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcsrsort_bufferSizeExt(
-    aclsparseHandle_t handle,
-    int m,
-    int n,
-    int nnz,
-    const int *csrRowPtr,
-    const int *csrColInd,
-    size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseXcsrsort_bufferSizeExt(aclsparseHandle_t handle, int m, int n, int nnz, const int* csrRowPtr,
+                                                  const int* csrColInd, size_t* pBufferSizeInBytes);
 
 /**
  * @brief 对 CSR 每行的列索引执行原地稳定排序，并输出排列 P。
@@ -2044,24 +1942,14 @@ aclsparseStatus_t aclsparseXcsrsort_bufferSizeExt(
  * @param pBuffer    IN, DEVICE, 由 bufferSizeExt 查询并由调用方分配的 workspace。
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcsrsort(
-    aclsparseHandle_t handle,
-    int m,
-    int n,
-    int nnz,
-    const aclsparseMatDescr_t descrA,
-    const int *csrRowPtr,
-    int *csrColInd,
-    int *P,
-    void *pBuffer);
+aclsparseStatus_t aclsparseXcsrsort(aclsparseHandle_t handle, int m, int n, int nnz, const aclsparseMatDescr_t descrA,
+                                    const int* csrRowPtr, int* csrColInd, int* P, void* pBuffer);
 
 // ============================================================================
 // Generic API: aclsparseSpSV — Sparse Triangular Solve (Vector)
 // ============================================================================
 
-typedef enum aclsparseSpSVAlg_t {
-    ACL_SPARSE_SPSV_ALG_DEFAULT = 0
-} aclsparseSpSVAlg_t;
+typedef enum aclsparseSpSVAlg_t { ACL_SPARSE_SPSV_ALG_DEFAULT = 0 } aclsparseSpSVAlg_t;
 
 typedef enum aclsparseSpSVUpdate_t {
     ACL_SPARSE_SPSV_UPDATE_GENERAL = 0,
@@ -2076,74 +1964,66 @@ typedef enum aclsparseSpMatAttribute_t {
     ACL_SPARSE_SPMAT_DIAG_TYPE
 } aclsparseSpMatAttribute_t;
 
-aclsparseStatus_t aclsparseSpSV_createDescr(aclsparseSpSVDescr_t *spsvDescr);
+aclsparseStatus_t aclsparseSpSV_createDescr(aclsparseSpSVDescr_t* spsvDescr);
 aclsparseStatus_t aclsparseSpSV_destroyDescr(aclsparseSpSVDescr_t spsvDescr);
 
-aclsparseStatus_t aclsparseSpSV_bufferSize(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
-    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
-    aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpSVAlg_t alg, aclsparseSpSVDescr_t spsvDescr, size_t *bufferSize);
+aclsparseStatus_t aclsparseSpSV_bufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
+                                           aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+                                           aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpSVAlg_t alg,
+                                           aclsparseSpSVDescr_t spsvDescr, size_t* bufferSize);
 
-aclsparseStatus_t aclsparseSpSV_analysis(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
-    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
-    aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpSVAlg_t alg, aclsparseSpSVDescr_t spsvDescr, void *externalBuffer);
+aclsparseStatus_t aclsparseSpSV_analysis(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
+                                         aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+                                         aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpSVAlg_t alg,
+                                         aclsparseSpSVDescr_t spsvDescr, void* externalBuffer);
 
-aclsparseStatus_t aclsparseSpSV_solve(
-    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
-    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
-    aclsparseDnVecDescr_t vecY, aclDataType computeType,
-    aclsparseSpSVAlg_t alg, aclsparseSpSVDescr_t spsvDescr);
+aclsparseStatus_t aclsparseSpSV_solve(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
+                                      aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+                                      aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpSVAlg_t alg,
+                                      aclsparseSpSVDescr_t spsvDescr);
 
-aclsparseStatus_t aclsparseSpSV_updateMatrix(
-    aclsparseHandle_t handle, aclsparseSpSVDescr_t spsvDescr,
-    void *newValues, aclsparseSpSVUpdate_t updatePart);
+aclsparseStatus_t aclsparseSpSV_updateMatrix(aclsparseHandle_t handle, aclsparseSpSVDescr_t spsvDescr, void* newValues,
+                                             aclsparseSpSVUpdate_t updatePart);
 
-aclsparseStatus_t aclsparseSpMatSetAttribute(
-    aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
-    const void *data, size_t dataSize);
+aclsparseStatus_t aclsparseSpMatSetAttribute(aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+                                             const void* data, size_t dataSize);
 
-aclsparseStatus_t aclsparseSpMatGetAttribute(
-    aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
-    void *data, size_t dataSize);
+aclsparseStatus_t aclsparseSpMatGetAttribute(aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+                                             void* data, size_t dataSize);
 
 // ============================================================================
 // Sparse Matrix Creation: COO / SLICED_ELL
 // ============================================================================
 
-aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz,
-    void *cooRowInd, void *cooColInd, void *cooValues,
-    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType);
+aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                     void* cooRowInd, void* cooColInd, void* cooValues, aclsparseIndexType_t cooIdxType,
+                                     aclsparseIndexBase_t idxBase, aclDataType valueType);
 
-aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz,
-    const void *cooRowInd, const void *cooColInd, const void *cooValues,
-    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType);
+aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                          int64_t nnz, const void* cooRowInd, const void* cooColInd,
+                                          const void* cooValues, aclsparseIndexType_t cooIdxType,
+                                          aclsparseIndexBase_t idxBase, aclDataType valueType);
 
-aclsparseStatus_t aclsparseCooGet(aclsparseSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols, int64_t *nnz,
-    void **cooRowInd, void **cooColInd, void **cooValues, aclsparseIndexType_t *cooIdxType,
-    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+aclsparseStatus_t aclsparseCooGet(aclsparseSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols, int64_t* nnz,
+                                  void** cooRowInd, void** cooColInd, void** cooValues,
+                                  aclsparseIndexType_t* cooIdxType, aclsparseIndexBase_t* idxBase,
+                                  aclDataType* valueType);
 
-aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
-    int64_t *nnz, const void **cooRowInd, const void **cooColInd, const void **cooValues,
-    aclsparseIndexType_t *cooIdxType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
+                                       int64_t* nnz, const void** cooRowInd, const void** cooColInd,
+                                       const void** cooValues, aclsparseIndexType_t* cooIdxType,
+                                       aclsparseIndexBase_t* idxBase, aclDataType* valueType);
 
-aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
-    void *sellSlicePtr, void *sellColInd, void *sellValues,
-    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType);
+aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+                                           int64_t sliceNnz, int64_t numSlices, void* sellSlicePtr, void* sellColInd,
+                                           void* sellValues, aclsparseIndexType_t sellIdxType,
+                                           aclsparseIndexBase_t idxBase, aclDataType valueType);
 
-aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMatDescr,
-    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
-    const void *sellSlicePtr, const void *sellColInd, const void *sellValues,
-    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
-    aclDataType valueType);
+aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
+                                                int64_t nnz, int64_t sliceNnz, int64_t numSlices,
+                                                const void* sellSlicePtr, const void* sellColInd,
+                                                const void* sellValues, aclsparseIndexType_t sellIdxType,
+                                                aclsparseIndexBase_t idxBase, aclDataType valueType);
 
 // ============================================================================
 // Legacy API: aclsparseXcoo2csr — COO row indices to CSR row pointers
@@ -2166,13 +2046,8 @@ aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMa
  * @param idxBase    IN, HOST, index base (ZERO or ONE).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcoo2csr(
-    aclsparseHandle_t handle,
-    const int *cooRowInd,
-    int nnz,
-    int m,
-    int *csrRowPtr,
-    aclsparseIndexBase_t idxBase);
+aclsparseStatus_t aclsparseXcoo2csr(aclsparseHandle_t handle, const int* cooRowInd, int nnz, int m, int* csrRowPtr,
+                                    aclsparseIndexBase_t idxBase);
 
 // ============================================================================
 // Legacy API: aclsparseXcscsort — CSC format in-place stable sort (single-key)
@@ -2190,10 +2065,8 @@ aclsparseStatus_t aclsparseXcoo2csr(
  * @param pBufferSizeInBytes   OUT, HOST,  required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcscsort_bufferSizeExt(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    const int *cscColPtr, const int *cscRowInd,
-    size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseXcscsort_bufferSizeExt(aclsparseHandle_t handle, int m, int n, int nnz, const int* cscColPtr,
+                                                  const int* cscRowInd, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Stable-sort CSC arrays by column (single-key: row index ascending within each column).
@@ -2212,10 +2085,8 @@ aclsparseStatus_t aclsparseXcscsort_bufferSizeExt(
  * @param pBuffer   IN,  DEVICE,  workspace (from bufferSizeExt), must be 128-byte aligned.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcscsort(
-    aclsparseHandle_t handle, int m, int n, int nnz,
-    const aclsparseMatDescr_t descrA,
-    const int *cscColPtr, int *cscRowInd, int *P, void *pBuffer);
+aclsparseStatus_t aclsparseXcscsort(aclsparseHandle_t handle, int m, int n, int nnz, const aclsparseMatDescr_t descrA,
+                                    const int* cscColPtr, int* cscRowInd, int* P, void* pBuffer);
 
 // ============================================================================
 // Legacy API: aclsparseXcsr2coo — CSR row-pointer to COO row-index conversion
@@ -2236,12 +2107,8 @@ aclsparseStatus_t aclsparseXcscsort(
  * @param idxBase    IN,  HOST,    index base: ACL_SPARSE_INDEX_BASE_ZERO or ONE.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcsr2coo(aclsparseHandle_t handle,
-                                   const int32_t *csrRowPtr,
-                                   int64_t nnz,
-                                   int64_t m,
-                                   int32_t *cooRowInd,
-                                    aclsparseIndexBase_t idxBase);
+aclsparseStatus_t aclsparseXcsr2coo(aclsparseHandle_t handle, const int32_t* csrRowPtr, int64_t nnz, int64_t m,
+                                    int32_t* cooRowInd, aclsparseIndexBase_t idxBase);
 
 // ============================================================================
 // Legacy API: aclsparseCsr2gebsr — CSR → GEBSR 格式转换
@@ -2265,44 +2132,40 @@ aclsparseStatus_t aclsparseXcsr2coo(aclsparseHandle_t handle,
  * @param pBufferSizeInBytes OUT, HOST,   required workspace size in bytes.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseScsr2gebsr_bufferSize(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n, const aclsparseMatDescr_t descrA,
-    const float *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseScsr2gebsr_bufferSize(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                                 const aclsparseMatDescr_t descrA, const float* csrValA,
+                                                 const int* csrRowPtrA, const int* csrColIndA, int rowBlockDim,
+                                                 int colBlockDim, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Query workspace size for CSR→GEBSR conversion (float16).
  *        Parameters identical to aclsparseScsr2gebsr_bufferSize except csrValA type.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseHcsr2gebsr_bufferSize(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n, const aclsparseMatDescr_t descrA,
-    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseHcsr2gebsr_bufferSize(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                                 const aclsparseMatDescr_t descrA, const void* csrValA,
+                                                 const int* csrRowPtrA, const int* csrColIndA, int rowBlockDim,
+                                                 int colBlockDim, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Query workspace size for CSR→GEBSR conversion (bfloat16).
  *        Parameters identical to aclsparseScsr2gebsr_bufferSize except csrValA type.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseBhcsr2gebsr_bufferSize(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n, const aclsparseMatDescr_t descrA,
-    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseBhcsr2gebsr_bufferSize(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                                  const aclsparseMatDescr_t descrA, const void* csrValA,
+                                                  const int* csrRowPtrA, const int* csrColIndA, int rowBlockDim,
+                                                  int colBlockDim, size_t* pBufferSizeInBytes);
 
 /**
  * @brief Query workspace size for CSR→GEBSR conversion (int32).
  *        Parameters identical to aclsparseScsr2gebsr_bufferSize except csrValA type.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseIcsr2gebsr_bufferSize(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n, const aclsparseMatDescr_t descrA,
-    const int *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+aclsparseStatus_t aclsparseIcsr2gebsr_bufferSize(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                                 const aclsparseMatDescr_t descrA, const int* csrValA,
+                                                 const int* csrRowPtrA, const int* csrColIndA, int rowBlockDim,
+                                                 int colBlockDim, size_t* pBufferSizeInBytes);
 
 // --- Step 2: Nnz (类型无关) ---
 
@@ -2327,16 +2190,10 @@ aclsparseStatus_t aclsparseIcsr2gebsr_bufferSize(
  * @param pBuffer            IN,  DEVICE,  workspace (from bufferSize).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseXcsr2gebsrNnz(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n,
-    const aclsparseMatDescr_t descrA,
-    const int *csrRowPtrA, const int *csrColIndA,
-    const aclsparseMatDescr_t descrC,
-    int *bsrRowPtrC,
-    int rowBlockDim, int colBlockDim,
-    int *nnzTotalDevHostPtr,
-    void *pBuffer);
+aclsparseStatus_t aclsparseXcsr2gebsrNnz(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                         const aclsparseMatDescr_t descrA, const int* csrRowPtrA, const int* csrColIndA,
+                                         const aclsparseMatDescr_t descrC, int* bsrRowPtrC, int rowBlockDim,
+                                         int colBlockDim, int* nnzTotalDevHostPtr, void* pBuffer);
 
 // --- Step 3: Convert (4 精度版本) ---
 
@@ -2362,65 +2219,49 @@ aclsparseStatus_t aclsparseXcsr2gebsrNnz(
  * @param pBuffer      IN,  DEVICE,  workspace (from bufferSize).
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseScsr2gebsr(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n,
-    const aclsparseMatDescr_t descrA,
-    const float *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    const aclsparseMatDescr_t descrC,
-    float *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
-    int rowBlockDim, int colBlockDim,
-    void *pBuffer);
+aclsparseStatus_t aclsparseScsr2gebsr(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                      const aclsparseMatDescr_t descrA, const float* csrValA, const int* csrRowPtrA,
+                                      const int* csrColIndA, const aclsparseMatDescr_t descrC, float* bsrValC,
+                                      int* bsrRowPtrC, int* bsrColIndC, int rowBlockDim, int colBlockDim,
+                                      void* pBuffer);
 
 /**
  * @brief Execute CSR→GEBSR conversion (float16).
  *        Parameters identical to aclsparseScsr2gebsr except csrValA/bsrValC types.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseHcsr2gebsr(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n,
-    const aclsparseMatDescr_t descrA,
-    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    const aclsparseMatDescr_t descrC,
-    void *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
-    int rowBlockDim, int colBlockDim,
-    void *pBuffer);
+aclsparseStatus_t aclsparseHcsr2gebsr(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                      const aclsparseMatDescr_t descrA, const void* csrValA, const int* csrRowPtrA,
+                                      const int* csrColIndA, const aclsparseMatDescr_t descrC, void* bsrValC,
+                                      int* bsrRowPtrC, int* bsrColIndC, int rowBlockDim, int colBlockDim,
+                                      void* pBuffer);
 
 /**
  * @brief Execute CSR→GEBSR conversion (bfloat16).
  *        Parameters identical to aclsparseScsr2gebsr except csrValA/bsrValC types.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseBhcsr2gebsr(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n,
-    const aclsparseMatDescr_t descrA,
-    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    const aclsparseMatDescr_t descrC,
-    void *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
-    int rowBlockDim, int colBlockDim,
-    void *pBuffer);
+aclsparseStatus_t aclsparseBhcsr2gebsr(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                       const aclsparseMatDescr_t descrA, const void* csrValA, const int* csrRowPtrA,
+                                       const int* csrColIndA, const aclsparseMatDescr_t descrC, void* bsrValC,
+                                       int* bsrRowPtrC, int* bsrColIndC, int rowBlockDim, int colBlockDim,
+                                       void* pBuffer);
 
 /**
  * @brief Execute CSR→GEBSR conversion (int32).
  *        Parameters identical to aclsparseScsr2gebsr except csrValA/bsrValC types.
  * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseIcsr2gebsr(
-    aclsparseHandle_t handle, aclsparseDirection_t dir,
-    int m, int n,
-    const aclsparseMatDescr_t descrA,
-    const int *csrValA, const int *csrRowPtrA, const int *csrColIndA,
-    const aclsparseMatDescr_t descrC,
-    int *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
-    int rowBlockDim, int colBlockDim,
-    void *pBuffer);
+aclsparseStatus_t aclsparseIcsr2gebsr(aclsparseHandle_t handle, aclsparseDirection_t dir, int m, int n,
+                                      const aclsparseMatDescr_t descrA, const int* csrValA, const int* csrRowPtrA,
+                                      const int* csrColIndA, const aclsparseMatDescr_t descrC, int* bsrValC,
+                                      int* bsrRowPtrC, int* bsrColIndC, int rowBlockDim, int colBlockDim,
+                                      void* pBuffer);
 
 /**
  * @brief Create/destroy a reusable descriptor for multi-stage CSR SpGEMM.
  */
-aclsparseStatus_t aclsparseSpGEMMCreateDescr(aclsparseSpGEMMDescr_t *descr);
+aclsparseStatus_t aclsparseSpGEMMCreateDescr(aclsparseSpGEMMDescr_t* descr);
 aclsparseStatus_t aclsparseSpGEMMDestroyDescr(aclsparseSpGEMMDescr_t descr);
 
 /**
@@ -2430,22 +2271,15 @@ aclsparseStatus_t aclsparseSpGEMMDestroyDescr(aclsparseSpGEMMDescr_t descr);
  * with a device buffer of at least that size. The execution call records the
  * exact intermediate product count in spgemmDescr.
  */
-aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    aclsparseSpGEMMDescr_t spgemmDescr,
-    size_t *bufferSize1, void *externalBuffer1);
+aclsparseStatus_t aclsparseSpGEMMWorkEstimation(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                                aclsparseOperation_t opB, const void* alpha,
+                                                aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                                const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                                aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t spgemmDescr,
+                                                size_t* bufferSize1, void* externalBuffer1);
 
 /** @brief Return the exact product count after WorkEstimation execution. */
-aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
-    aclsparseSpGEMMDescr_t spgemmDescr, int64_t *numProds);
+aclsparseStatus_t aclsparseSpGEMMGetNumProducts(aclsparseSpGEMMDescr_t spgemmDescr, int64_t* numProds);
 
 /**
  * @brief Stage 2: estimate auxiliary and compute workspace sizes.
@@ -2454,20 +2288,13 @@ aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
  * implementation reports a zero-byte auxiliary buffer and a full exact
  * compute buffer; externalBuffer3 is reserved for source compatibility.
  */
-aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    aclsparseSpGEMMDescr_t spgemmDescr,
-    float chunkFraction,
-    size_t *bufferSize3, void *externalBuffer3,
-    size_t *bufferSize2);
+aclsparseStatus_t aclsparseSpGEMMEstimateMemory(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                                aclsparseOperation_t opB, const void* alpha,
+                                                aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                                const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                                aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t spgemmDescr,
+                                                float chunkFraction, size_t* bufferSize3, void* externalBuffer3,
+                                                size_t* bufferSize2);
 
 /**
  * @brief Stage 3: query/execute deterministic CSR structure and value compute.
@@ -2475,31 +2302,19 @@ aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
  * The execution call writes matC row offsets and updates the descriptor nnz.
  * Call aclsparseCsrSetPointers after it to attach output column/value storage.
  */
-aclsparseStatus_t aclsparseSpGEMMCompute(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    aclsparseSpGEMMDescr_t spgemmDescr,
-    size_t *bufferSize2, void *externalBuffer2);
+aclsparseStatus_t aclsparseSpGEMMCompute(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                         const void* alpha, aclsparseConstSpMatDescr_t matA,
+                                         aclsparseConstSpMatDescr_t matB, const void* beta, aclsparseSpMatDescr_t matC,
+                                         aclDataType computeType, aclsparseSpGEMMAlg_t alg,
+                                         aclsparseSpGEMMDescr_t spgemmDescr, size_t* bufferSize2,
+                                         void* externalBuffer2);
 
 /** @brief Stage 4: asynchronously compact computed columns/values into matC. */
-aclsparseStatus_t aclsparseSpGEMMCopy(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    aclsparseSpGEMMDescr_t spgemmDescr);
+aclsparseStatus_t aclsparseSpGEMMCopy(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                      const void* alpha, aclsparseConstSpMatDescr_t matA,
+                                      aclsparseConstSpMatDescr_t matB, const void* beta, aclsparseSpMatDescr_t matC,
+                                      aclDataType computeType, aclsparseSpGEMMAlg_t alg,
+                                      aclsparseSpGEMMDescr_t spgemmDescr);
 
 /**
  * @brief 保留旧版 C 输入有效标记接口以兼容已有调用方。
@@ -2507,47 +2322,27 @@ aclsparseStatus_t aclsparseSpGEMMCopy(
  * 新多阶段接口根据 beta 和 matC 指针直接判定 C 输入；该接口保留调用语义并记录标记，
  * 已有源码无需删除调用。
  */
-aclsparseStatus_t aclsparseSpGEMMSetCInValid(
-    aclsparseSpGEMMDescr_t spgemmDescr, int32_t cInDataValid);
+aclsparseStatus_t aclsparseSpGEMMSetCInValid(aclsparseSpGEMMDescr_t spgemmDescr, int32_t cInDataValid);
 
 /** @brief 兼容接口：查询旧三阶段 SpGEMM 共用 workspace 大小。 */
-aclsparseStatus_t aclsparseSpGEMMGetBufferSize(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    size_t *size);
+aclsparseStatus_t aclsparseSpGEMMGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                               aclsparseOperation_t opB, const void* alpha,
+                                               aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                               const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                               aclsparseSpGEMMAlg_t alg, size_t* size);
 
 /** @brief 兼容接口：执行旧三阶段 SpGEMM 的结构预处理。 */
-aclsparseStatus_t aclsparseSpGEMMPreprocess(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseSpGEMMPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                            aclsparseOperation_t opB, const void* alpha,
+                                            aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                            const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                            aclsparseSpGEMMAlg_t alg, void* buffer);
 
 /** @brief 兼容接口：执行旧三阶段 SpGEMM 的数值计算。 */
-aclsparseStatus_t aclsparseSpGEMM(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseSpGEMM(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                  const void* alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                  const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                  aclsparseSpGEMMAlg_t alg, void* buffer);
 
 #ifdef __cplusplus
 }

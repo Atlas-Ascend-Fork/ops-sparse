@@ -23,13 +23,12 @@
 #include "cann_ops_sparse.h"
 
 #ifndef GM_ADDR
-#define GM_ADDR uint8_t *
+#define GM_ADDR uint8_t*
 #endif
 
-extern "C" aclsparseStatus_t sddmm_kernel_launch(
-    GM_ADDR csrRowOffsets, GM_ADDR csrColInd,
-    GM_ADDR csrValues, GM_ADDR matX, GM_ADDR matY,
-    GM_ADDR workspaceGM, GM_ADDR tilingGM,
-    int32_t dataType, uint32_t blockDim, void *stream);
+extern "C" aclsparseStatus_t sddmm_kernel_launch(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
+                                                 GM_ADDR matX, GM_ADDR matY, GM_ADDR workspaceGM,
+                                                 const SddmmTilingData& tiling, int32_t dataType, uint32_t blockDim,
+                                                 void* stream);
 
 #endif // SDDMM_KERNEL_H_

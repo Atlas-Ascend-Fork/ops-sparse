@@ -5,10 +5,10 @@
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
-
 #ifndef TEST_SDDMM_SDDMM_GOLDEN_H_
 #define TEST_SDDMM_SDDMM_GOLDEN_H_
 
@@ -18,7 +18,7 @@
 #include <random>
 #include <vector>
 
-#include "verify.h"  // applyMixedTolerance / Verifier (MIXED_TOLERANCE mode)
+#include "verify.h" // applyMixedTolerance / Verifier (MIXED_TOLERANCE mode)
 
 namespace sparse_test {
 
@@ -29,9 +29,9 @@ namespace sparse_test {
 // sides — this is the precondition for element-wise precision comparison.
 // ============================================================================
 struct SddmmCsr {
-    std::vector<int32_t> rowOffsets;  // size = m + 1, 0-based
-    std::vector<int32_t> colIndices;  // size = nnz, ascending within each row
-    std::vector<double> values;       // size = nnz, C initial values (FP64)
+    std::vector<int32_t> rowOffsets; // size = m + 1, 0-based
+    std::vector<int32_t> colIndices; // size = nnz, ascending within each row
+    std::vector<double> values;      // size = nnz, C initial values (FP64)
     int64_t m = 0;
     int64_t n = 0;
     int64_t nnz = 0;
@@ -50,8 +50,9 @@ struct SddmmCsr {
 // over [value_lo, value_hi], seeded by `seed` for reproducibility.
 // ============================================================================
 
-inline SddmmCsr MakeSddmmSparsity(int64_t m, int64_t n, double sparsity_ratio,
-                                  double value_lo, double value_hi, uint32_t seed) {
+inline SddmmCsr MakeSddmmSparsity(int64_t m, int64_t n, double sparsity_ratio, double value_lo, double value_hi,
+                                  uint32_t seed)
+{
     SddmmCsr csr;
     csr.m = m;
     csr.n = n;
@@ -103,13 +104,11 @@ inline SddmmCsr MakeSddmmSparsity(int64_t m, int64_t n, double sparsity_ratio,
 // Returns std::vector<double> of length nnz.
 // ============================================================================
 
-inline std::vector<double> SddmmGolden(int64_t m, int64_t n, int64_t k,
-                                       const std::vector<double>& X,
-                                       const std::vector<double>& Y,
-                                       const SddmmCsr& csrC,
-                                       double alpha, double beta,
+inline std::vector<double> SddmmGolden(int64_t m, int64_t n, int64_t k, const std::vector<double>& X,
+                                       const std::vector<double>& Y, const SddmmCsr& csrC, double alpha, double beta,
                                        aclsparseOperation_t opX = ACL_SPARSE_OP_NON_TRANSPOSE,
-                                       aclsparseOperation_t opY = ACL_SPARSE_OP_NON_TRANSPOSE) {
+                                       aclsparseOperation_t opY = ACL_SPARSE_OP_NON_TRANSPOSE)
+{
     std::vector<double> out(static_cast<size_t>(csrC.nnz), 0.0);
     if (csrC.nnz == 0) {
         return out;
@@ -151,11 +150,11 @@ inline std::vector<double> SddmmGolden(int64_t m, int64_t n, int64_t k,
 // FP16 bit conversion helpers (reference: spmm arch35 test).
 // Host stores FP16 as uint16_t IEEE-754 bit patterns.
 //
-// 注意：sparse/sddmm/arch35/sddmm_host.cpp 中有同功能实现 SddmmFp16BitsToFp32，
-// 两者算法一致；测试侧独立保留以避免测试代码依赖算子库内部头文件。
+// Decode the reference numerically, independently of the operator's bit decoder.
 // ============================================================================
 
-inline uint16_t Fp32ToFp16Bits(float v) {
+inline uint16_t Fp32ToFp16Bits(float v)
+{
     uint32_t bits;
     __builtin_memcpy(&bits, &v, sizeof(float));
     uint32_t sign = (bits >> 16) & 0x8000u;
@@ -197,28 +196,19 @@ inline uint16_t Fp32ToFp16Bits(float v) {
     return static_cast<uint16_t>(sign);
 }
 
-inline float Fp16BitsToFp32(uint16_t h) {
-    uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
-    uint32_t exp = (h >> 10) & 0x1Fu;
-    uint32_t mant = h & 0x03FFu;
-    uint32_t f;
-    if (exp == 0) {
-        if (mant == 0) {
-            f = sign;
-        } else {
-            uint32_t shift = __builtin_clz(mant) - 21;
-            mant <<= shift;
-            exp = 1;
-            f = sign | ((exp + 127 - 15 - shift) << 23) | ((mant << 13) & 0x7FFFFFu);
-        }
-    } else if (exp == 31) {
-        f = sign | 0x7F800000u | (mant << 13);
-    } else {
-        f = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+inline float Fp16BitsToFp32(uint16_t h)
+{
+    const uint32_t exponent = (h >> 10) & 0x1Fu;
+    const uint32_t fraction = h & 0x03FFu;
+    if (exponent == 31) {
+        const uint32_t bits = (uint32_t(h & 0x8000u) << 16) | 0x7F800000u | (fraction << 13);
+        float special;
+        __builtin_memcpy(&special, &bits, sizeof(special));
+        return special;
     }
-    float v;
-    __builtin_memcpy(&v, &f, sizeof(float));
-    return v;
+    const float significand = static_cast<float>(fraction + (exponent ? 1024 : 0));
+    const float magnitude = std::ldexp(significand, exponent ? static_cast<int>(exponent) - 25 : -24);
+    return std::copysign(magnitude, (h & 0x8000u) ? -1.0f : 1.0f);
 }
 
 // ============================================================================
@@ -226,7 +216,8 @@ inline float Fp16BitsToFp32(uint16_t h) {
 // Shared by sddmm_test.cpp and sddmm_perf.cpp to avoid duplicate definitions.
 // ============================================================================
 
-inline std::vector<float> DoublesToFp32(const std::vector<double>& v) {
+inline std::vector<float> DoublesToFp32(const std::vector<double>& v)
+{
     std::vector<float> out(v.size());
     for (size_t i = 0; i < v.size(); i++) {
         out[i] = static_cast<float>(v[i]);
@@ -234,7 +225,8 @@ inline std::vector<float> DoublesToFp32(const std::vector<double>& v) {
     return out;
 }
 
-inline std::vector<uint16_t> DoublesToFp16(const std::vector<double>& v) {
+inline std::vector<uint16_t> DoublesToFp16(const std::vector<double>& v)
+{
     std::vector<uint16_t> out(v.size());
     for (size_t i = 0; i < v.size(); i++) {
         out[i] = Fp32ToFp16Bits(static_cast<float>(v[i]));
@@ -242,6 +234,6 @@ inline std::vector<uint16_t> DoublesToFp16(const std::vector<double>& v) {
     return out;
 }
 
-}  // namespace sparse_test
+} // namespace sparse_test
 
-#endif  // TEST_SDDMM_SDDMM_GOLDEN_H_
+#endif // TEST_SDDMM_SDDMM_GOLDEN_H_

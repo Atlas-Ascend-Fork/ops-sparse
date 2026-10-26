@@ -31,30 +31,48 @@
 #define SDDMM_DTYPE_FP32 0
 #define SDDMM_DTYPE_FP16 1
 
-static inline int32_t SddmmDataTypeFromAcl(aclDataType valueType) {
-    if (valueType == ACL_FLOAT) {       return SDDMM_DTYPE_FP32; }
-    if (valueType == ACL_FLOAT16) {     return SDDMM_DTYPE_FP16; }
+static inline int32_t SddmmDataTypeFromAcl(aclDataType valueType)
+{
+    if (valueType == ACL_FLOAT) {
+        return SDDMM_DTYPE_FP32;
+    }
+    if (valueType == ACL_FLOAT16) {
+        return SDDMM_DTYPE_FP16;
+    }
     return SDDMM_DTYPE_INVALID;
 }
 
-// SddmmTilingData is laid out at the start of workspace, right after a 64-byte
-// header. It is read once by the kernel via GM->scratch.
+namespace SddmmBudget {
+constexpr int32_t kReduceTmpBytes = 32 * 1024;
+constexpr int32_t kStridedChunk = 1024;
+constexpr int32_t kScalarSlotBytes = 32;
+constexpr int32_t kStridedElemBytes = kScalarSlotBytes;
+constexpr int32_t kUbAlignmentSlack = 4 * 1024;
+constexpr int32_t kUbFixedOverhead = kReduceTmpBytes + kStridedChunk * (kStridedElemBytes + sizeof(int32_t)) +
+                                     kUbAlignmentSlack;
+} // namespace SddmmBudget
+
+// Per-launch value snapshot. Device scalar addresses are consumed on the stream.
+// The workspace retains its reserved tiling region for layout compatibility.
 typedef struct SddmmTilingData {
-    int32_t m;                 // C 的行数
-    int32_t n;                 // C 的列数
-    int32_t k;                 // X/Y 的缩减维度
-    int32_t ldx;               // X 的 leading dimension
-    int32_t ldy;               // Y 的 leading dimension
-    int32_t kTile;             // K 维度分块大小
-    int32_t nTile;             // 行内非零元素批量大小
-    int32_t reorderOffset;     // byte offset to reorder table in workspace
-    int32_t binEdgeOffset;     // byte offset to row-bin edge table in workspace
-    int32_t opX;               // 0 = NON_TRANSPOSE, 1 = TRANSPOSE
-    int32_t opY;               // 0 = NON_TRANSPOSE, 1 = TRANSPOSE
-    int32_t orderPair;         // SDDMM_ORDER_RR / RC / CR / CC
-    int32_t dataType;          // SDDMM_DTYPE_FP32 / FP16
+    int32_t m;             // C 的行数
+    int32_t n;             // C 的列数
+    int32_t k;             // X/Y 的缩减维度
+    int32_t ldx;           // X 的 leading dimension
+    int32_t ldy;           // Y 的 leading dimension
+    int32_t kTile;         // K 维度分块大小
+    int32_t nTile;         // 行内非零元素批量大小
+    int32_t reorderOffset; // byte offset to reorder table in workspace
+    int32_t binEdgeOffset; // byte offset to row-bin edge table in workspace
+    int32_t opX;           // 0 = NON_TRANSPOSE, 1 = TRANSPOSE
+    int32_t opY;           // 0 = NON_TRANSPOSE, 1 = TRANSPOSE
+    int32_t orderPair;     // SDDMM_ORDER_RR / RC / CR / CC
+    int32_t dataType;      // SDDMM_DTYPE_FP32 / FP16
     float alphaHost;
     float betaHost;
+    uint64_t alphaDevice;
+    uint64_t betaDevice;
+    int32_t scalarType; // SDDMM_DTYPE_FP32 / FP16 for DEVICE scalars
 } SddmmTilingData;
 
 // Workspace layout (all aligned to 64B):
@@ -62,10 +80,11 @@ typedef struct SddmmTilingData {
 //   [ tilingOff   , reorderOff )  : SddmmTilingData
 //   [ reorderOff  , binEdgeOff )  : int32 reorder[m]    (logical row -> original row)
 //   [ binEdgeOff  , endOff     )  : int32 bin_edge[bin_num + 1]
-#define SDDMM_WS_HEADER_BYTES     64
-#define SDDMM_WS_ALIGN            64
+#define SDDMM_WS_HEADER_BYTES 64
+#define SDDMM_WS_ALIGN 64
 
-static inline int64_t sddmm_align_up(int64_t v, int64_t a) {
+static inline int64_t sddmm_align_up(int64_t v, int64_t a)
+{
     if (a != 0) {
         return ((v + a - 1) / a) * a;
     }
