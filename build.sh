@@ -20,7 +20,7 @@ ENABLE_PACKAGE=FALSE
 ENABLE_TORCH_EXTENSION=FALSE
 
 export BASE_PATH=$(
-  cd "$(dirname $0)"
+  cd "$(dirname "$0")"
   pwd
 )
 export BUILD_PATH="${BASE_PATH}/build"
