@@ -14,7 +14,7 @@ import unittest
 from itertools import product
 
 import torch
-from _sddmm_utils import BsrOperands, BsrOptions, assert_accuracy, bsr_values
+from _sddmm_utils import BsrOperands, BsrOptions, assert_accuracy, bsr_values, require_arch22
 
 import torch_npu  # noqa: F401
 
@@ -25,6 +25,10 @@ PAIRS = ((torch.float32, torch.float32), (torch.float16, torch.float16),
 
 
 class SmallBsrTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        require_arch22()
+
     assert_accuracy = assert_accuracy
 
     def check_case(self, shape, dtypes, direction, grouped=False, beta=.5):

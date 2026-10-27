@@ -31,6 +31,9 @@
 | [aclsparseSpVecSetValues](#aclsparsespvecsetvalues) | 设置稀疏向量描述符的 values 指针 |
 | [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
+| [aclsparseCreateBsr](#aclsparsecreatebsr) | 创建BSR格式稀疏矩阵 |
+| [aclsparseCreateConstBsr](#aclsparsecreateconstbsr) | 创建只读(const) BSR格式稀疏矩阵 |
+| [aclsparseBsrSetStridedBatch](#aclsparsebsrsetstridedbatch) | 设置BSR描述符的strided-batch属性 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵 |
 | [aclsparseCreateCoo](#aclsparsecreatecoo) | 创建COO格式稀疏矩阵 |
 | [aclsparseCreateConstCoo](#aclsparsecreateconstcoo) | 创建只读(const)COO格式稀疏矩阵 |
@@ -49,9 +52,14 @@
 | [aclsparseDnMatGet](#aclsparsednmatget) | 获取稠密矩阵描述符的全部字段 |
 | [aclsparseDnMatGetValues](#aclsparsednmatgetvalues) | 获取稠密矩阵描述符的 values 指针 |
 | [aclsparseDnMatSetValues](#aclsparsednmatsetvalues) | 设置稠密矩阵描述符的 values 指针 |
+| [aclsparseDnMatGetStridedBatch](#aclsparsednmatgetstridedbatch) | 获取稠密矩阵的strided-batch属性 |
+| [aclsparseDnMatSetStridedBatch](#aclsparsednmatsetstridedbatch) | 设置稠密矩阵的strided-batch属性 |
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
+| [aclsparseSDDMMBufferSize](#aclsparsesddmmbuffersize) | 获取SDDMM工作区大小 |
+| [aclsparseSDDMMPreprocess](#aclsparsesddmmpreprocess) | SDDMM稀疏pattern校验与预处理 |
+| [aclsparseSDDMM](#aclsparsesddmm) | 采样稠密-稠密矩阵乘法 |
 | [aclsparseSpMVOp_bufferSize](#aclsparsespmvop_buffersize) | 获取 SpMVOp workspace 大小 |
 | [aclsparseSpMVOp_createDescr](#aclsparsespmvop_createdescr) | 创建 SpMVOp 描述符并执行预处理 |
 | [aclsparseSpMVOp_destroyDescr](#aclsparsespmvop_destroydescr) | 销毁 SpMVOp 描述符 |
@@ -554,6 +562,119 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - 其他值：失败
+
+---
+
+### aclsparseCreateBsr
+
+```c
+aclsparseStatus_t aclsparseCreateBsr(
+    aclsparseSpMatDescr_t *spMatDescr,
+    int64_t blockRows, int64_t blockCols, int64_t blockNnz,
+    int64_t rowBlockSize, int64_t colBlockSize,
+    void *bsrRowOffsets, void *bsrColInd, void *bsrValues,
+    aclsparseIndexType_t bsrRowOffsetsType,
+    aclsparseIndexType_t bsrColIndType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType,
+    aclsparseOrder_t order);
+```
+
+**功能**：创建 BSR（Block Sparse Row）稀疏矩阵描述符。逻辑标量形状为 `blockRows*rowBlockSize` × `blockCols*colBlockSize`，`blockNnz` 是非零块数，`order` 描述每个块内的 ROW/COL 存储顺序。
+
+**约束**：当前支持 I32 偏移与列索引、base 0/1，且仅支持方块大小 2/4/8/16/32/64/128。描述符借用 Device 数组指针，不接管其生命周期。
+
+**参数说明**：
+
+- `spMatDescr`（OUT）：HOST，返回创建的可写 BSR 描述符。
+- `blockRows`（IN）：HOST，BSR 块行数，必须为非负数。
+- `blockCols`（IN）：HOST，BSR 块列数，必须为非负数。
+- `blockNnz`（IN）：HOST，每个 batch 的非零块数，必须为非负数。
+- `rowBlockSize`（IN）：HOST，块的行数，支持 2/4/8/16/32/64/128。
+- `colBlockSize`（IN）：HOST，块的列数，必须与 `rowBlockSize` 相等。
+- `bsrRowOffsets`（IN）：DEVICE，块行偏移数组，长度为 `blockRows+1`，即使 `blockRows=0` 也不可为空。
+- `bsrColInd`（IN）：DEVICE，块列索引数组，长度为 `blockNnz`；`blockNnz=0` 时允许为空。
+- `bsrValues`（IN）：DEVICE，块值数组，长度为 `blockNnz*rowBlockSize*colBlockSize`；`blockNnz=0` 时允许为空。
+- `bsrRowOffsetsType`（IN）：HOST，块行偏移类型，当前仅支持 `ACL_SPARSE_INDEX_32I`。
+- `bsrColIndType`（IN）：HOST，块列索引类型，当前仅支持 `ACL_SPARSE_INDEX_32I`。
+- `idxBase`（IN）：HOST，索引基值，支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`。
+- `valueType`（IN）：HOST，块值类型，支持 `ACL_FLOAT16`、`ACL_BF16`、`ACL_FLOAT` 和 `ACL_COMPLEX64`。
+- `order`（IN）：HOST，块内存储顺序，支持 `ACL_SPARSE_ORDER_ROW` 和 `ACL_SPARSE_ORDER_COL`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：创建成功。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数、地址范围或矩阵几何非法。
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：块大小、索引类型、数据类型或实现范围不支持。
+- `ACL_SPARSE_STATUS_ALLOC_FAILED`：描述符内存分配失败。
+
+---
+
+### aclsparseCreateConstBsr
+
+```c
+aclsparseStatus_t aclsparseCreateConstBsr(
+    aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t blockRows, int64_t blockCols, int64_t blockNnz,
+    int64_t rowBlockSize, int64_t colBlockSize,
+    const void *bsrRowOffsets, const void *bsrColInd,
+    const void *bsrValues,
+    aclsparseIndexType_t bsrRowOffsetsType,
+    aclsparseIndexType_t bsrColIndType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType,
+    aclsparseOrder_t order);
+```
+
+**功能**：`aclsparseCreateBsr` 的只读变体；几何、索引、数据类型与指针生命周期约束相同。
+
+**参数说明**：
+
+- `spMatDescr`（OUT）：HOST，返回创建的只读 BSR 描述符。
+- `blockRows`（IN）：HOST，BSR 块行数，必须为非负数。
+- `blockCols`（IN）：HOST，BSR 块列数，必须为非负数。
+- `blockNnz`（IN）：HOST，每个 batch 的非零块数，必须为非负数。
+- `rowBlockSize`（IN）：HOST，块的行数，支持 2/4/8/16/32/64/128。
+- `colBlockSize`（IN）：HOST，块的列数，必须与 `rowBlockSize` 相等。
+- `bsrRowOffsets`（IN）：DEVICE，只读块行偏移数组，长度为 `blockRows+1`，即使 `blockRows=0` 也不可为空。
+- `bsrColInd`（IN）：DEVICE，只读块列索引数组，长度为 `blockNnz`；`blockNnz=0` 时允许为空。
+- `bsrValues`（IN）：DEVICE，只读块值数组，长度为 `blockNnz*rowBlockSize*colBlockSize`；`blockNnz=0` 时允许为空。
+- `bsrRowOffsetsType`（IN）：HOST，块行偏移类型，当前仅支持 `ACL_SPARSE_INDEX_32I`。
+- `bsrColIndType`（IN）：HOST，块列索引类型，当前仅支持 `ACL_SPARSE_INDEX_32I`。
+- `idxBase`（IN）：HOST，索引基值，支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`。
+- `valueType`（IN）：HOST，块值类型，支持 `ACL_FLOAT16`、`ACL_BF16`、`ACL_FLOAT` 和 `ACL_COMPLEX64`。
+- `order`（IN）：HOST，块内存储顺序，支持 `ACL_SPARSE_ORDER_ROW` 和 `ACL_SPARSE_ORDER_COL`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：创建成功。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数、地址范围或矩阵几何非法。
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：块大小、索引类型、数据类型或实现范围不支持。
+- `ACL_SPARSE_STATUS_ALLOC_FAILED`：描述符内存分配失败。
+
+---
+
+### aclsparseBsrSetStridedBatch
+
+```c
+aclsparseStatus_t aclsparseBsrSetStridedBatch(
+    aclsparseSpMatDescr_t spMatDescr, int batchCount,
+    int64_t offsetsBatchStride, int64_t columnsBatchStride,
+    int64_t valuesBatchStride);
+```
+
+**功能**：设置 BSR 的 strided-batch 属性。所有 stride 以对应数组的元素数为单位；`offsetsBatchStride`/`columnsBatchStride` 为 0 表示 batch 间广播稀疏结构。`batchCount` 范围为 1..65535；大于 1 时 values 不允许广播，`valuesBatchStride` 必须覆盖一个 batch 的全部块值。
+
+**参数说明**：
+
+- `spMatDescr`（IN/OUT）：HOST，要更新的可写 BSR 描述符。
+- `batchCount`（IN）：HOST，batch 数，范围为 1..65535。
+- `offsetsBatchStride`（IN）：HOST，相邻 batch 行偏移数组起点的元素间隔；0 表示广播，否则至少为 `blockRows+1`。
+- `columnsBatchStride`（IN）：HOST，相邻 batch 列索引数组起点的元素间隔；0 表示广播，否则至少为 `blockNnz`。
+- `valuesBatchStride`（IN）：HOST，相邻 batch 块值数组起点的元素间隔；多个非空 batch 时不可为 0，且至少覆盖一个 batch 的全部块值。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：设置成功。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：描述符、batch、stride 或数组地址范围非法。
 
 ---
 
@@ -1061,11 +1182,11 @@ aclsparseStatus_t aclsparseCreateDnMat(
 - `rows`（IN）：HOST，矩阵的行数，允许为 0，不允许为负数。
 - `cols`（IN）：HOST，矩阵的列数，允许为 0，不允许为负数。
 - `ld`（IN）：HOST，leading dimension。行主序时需 `>= cols`；列主序时需 `>= rows`。必须大于 0，该约束同样适用于零维矩阵。
-- `values`（IN）：DEVICE，矩阵数据指针，必须非空，包括零维矩阵。
+- `values`（IN）：DEVICE，矩阵数据指针；rows、cols 均大于 0 时必须非空，任一为 0 时允许为空。
 - `valueType`（IN）：HOST，元素数据类型。作为 B 矩阵时支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT8`；作为 C 矩阵时支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT32`（`ACL_INT32` 仅在 int8 计算路径中作为 C 矩阵类型使用）。
 - `order`（IN）：HOST，布局：`ACL_SPARSE_ORDER_ROW`（行主序）/ `ACL_SPARSE_ORDER_COL`（列主序）。
 
-**说明**：rows/cols 为 0 的零维稠密矩阵描述符可正常创建；但计算类 API 是否接受零维输入由各算子决定——aclsparseSpMM / aclsparseSDDMM / aclsparseSpSM 对零维输入返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，aclsparseSpMMOp 系列支持零维（详见对应算子文档）。
+**说明**：rows/cols 为 0 的零维稠密矩阵描述符可正常创建；arch35 的 aclsparseSDDMM 在 m/n 为 0 且 pattern 为空时成功返回，k 为 0 时执行 beta 缩放；arch22 的 aclsparseSDDMM 对零维输入返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。其他计算类 API 的零维语义见对应算子文档。
 
 **返回值**：
 
@@ -1169,6 +1290,52 @@ aclsparseStatus_t aclsparseDnMatSetValues(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnMatDescr` 为空指针
+
+---
+
+### aclsparseDnMatGetStridedBatch
+
+```c
+aclsparseStatus_t aclsparseDnMatGetStridedBatch(
+    aclsparseConstDnMatDescr_t dnMatDescr,
+    int *batchCount, int64_t *batchStride);
+```
+
+**功能**：获取稠密矩阵描述符的 batch 数和 batch 起始间隔。`batchStride` 以矩阵元素数为单位；新建描述符默认为 `batchCount=1` 和 `batchStride=0`。
+
+**参数说明**：
+
+- `dnMatDescr`（IN）：HOST，要查询的稠密矩阵描述符。
+- `batchCount`（OUT）：HOST，返回 batch 数。
+- `batchStride`（OUT）：HOST，返回相邻 batch 起点的元素间隔。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：查询成功。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：描述符或输出指针为空或无效。
+
+---
+
+### aclsparseDnMatSetStridedBatch
+
+```c
+aclsparseStatus_t aclsparseDnMatSetStridedBatch(
+    aclsparseDnMatDescr_t dnMatDescr,
+    int batchCount, int64_t batchStride);
+```
+
+**功能**：设置稠密矩阵的 strided-batch 属性。`batchCount` 范围为 1..65535；大于 1 时，ROW 布局要求 `batchStride >= rows*ld`，COL 布局要求 `batchStride >= cols*ld`。单 batch 允许非负 stride，新建描述符默认为 0。
+
+**参数说明**：
+
+- `dnMatDescr`（IN/OUT）：HOST，要更新的可写稠密矩阵描述符。
+- `batchCount`（IN）：HOST，batch 数，范围为 1..65535。
+- `batchStride`（IN）：HOST，相邻 batch 起点的元素间隔；单 batch 时允许任意非负值。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：设置成功。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：描述符、batch、stride、布局或数组地址范围非法。
 
 ---
 
@@ -1292,6 +1459,135 @@ aclsparseStatus_t aclsparseSpMM(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - 其他值：失败
+
+---
+
+### aclsparseSDDMMBufferSize
+
+```c
+aclsparseStatus_t aclsparseSDDMMBufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX,
+    aclsparseConstDnMatDescr_t matY, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t alg, size_t *size);
+```
+
+**功能**：校验 SDDMM 调用元数据，并返回预处理和执行所需的 Device workspace 字节数。返回值可为 0；非零 workspace 须按 64 字节对齐分配。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏算子句柄。
+- `opX`（IN）：HOST，X 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 和 `ACL_SPARSE_OP_TRANSPOSE`。
+- `opY`（IN）：HOST，Y 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 和 `ACL_SPARSE_OP_TRANSPOSE`。
+- `alpha`（IN）：HOST/DEVICE，`computeType` 类型的乘积系数；位置由 handle pointer mode 决定。
+- `matX`（IN）：HOST，只读稠密矩阵 X 描述符。
+- `matY`（IN）：HOST，只读稠密矩阵 Y 描述符。
+- `beta`（IN）：HOST/DEVICE，`computeType` 类型的 C 旧值系数；位置由 handle pointer mode 决定。
+- `matC`（IN）：HOST，可写 CSR/BSR 稀疏矩阵 C 描述符；本接口不修改其数据。
+- `computeType`（IN）：HOST，累加以及 `alpha`/`beta` 的数据类型；实数路径为 `ACL_FLOAT`，复数路径为 `ACL_COMPLEX64`。
+- `alg`（IN）：HOST，算法类型，当前仅支持 `ACL_SPARSE_SDDMM_ALG_DEFAULT`。
+- `size`（OUT）：HOST，返回 Preprocess 和 Execute 所需的 Device workspace 字节数。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：查询成功。
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：`handle` 为空。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：描述符、维度、指针、batch 或布局非法。
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：`matC` 不是 CSR 或 BSR。
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：操作、算法、索引或数据类型组合不支持。
+
+---
+
+### aclsparseSDDMMPreprocess
+
+```c
+aclsparseStatus_t aclsparseSDDMMPreprocess(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX,
+    aclsparseConstDnMatDescr_t matY, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t alg, void *buffer);
+```
+
+**功能**：在 `handle` 绑定的 stream 上校验 CSR/BSR pattern，并将 prepared state 绑定到 `matC`、本次形状/布局/数据类型参数和 `buffer`。该阶段只读 X、Y 以及 C 的稀疏结构，不修改 C values。
+
+`Preprocess` 可显式调用；若直接调用 `aclsparseSDDMM` 且 prepared key 不匹配，执行接口会自动完成同等预处理。调用方在原地改变 offsets/indices 内容后，必须重新调用本接口。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏算子句柄；pattern 校验提交到其绑定的 stream。
+- `opX`（IN）：HOST，X 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 和 `ACL_SPARSE_OP_TRANSPOSE`。
+- `opY`（IN）：HOST，Y 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 和 `ACL_SPARSE_OP_TRANSPOSE`。
+- `alpha`（IN）：HOST/DEVICE，`computeType` 类型的乘积系数；位置由 handle pointer mode 决定。
+- `matX`（IN）：HOST，只读稠密矩阵 X 描述符；本阶段不读取 X values。
+- `matY`（IN）：HOST，只读稠密矩阵 Y 描述符；本阶段不读取 Y values。
+- `beta`（IN）：HOST/DEVICE，`computeType` 类型的 C 旧值系数；位置由 handle pointer mode 决定。
+- `matC`（IN/OUT）：HOST/DEVICE，可写 CSR/BSR 稀疏矩阵 C 描述符；读取稀疏 pattern，更新描述符内 prepared state，不修改 C values。
+- `computeType`（IN）：HOST，累加以及 `alpha`/`beta` 的数据类型；实数路径为 `ACL_FLOAT`，复数路径为 `ACL_COMPLEX64`。
+- `alg`（IN）：HOST，算法类型，当前仅支持 `ACL_SPARSE_SDDMM_ALG_DEFAULT`。
+- `buffer`（IN/OUT）：DEVICE，`aclsparseSDDMMBufferSize` 返回的 workspace；非零时须 64 字节对齐且生命周期覆盖后续 Execute，所需大小为 0 时允许为空。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：预处理成功。
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：`handle` 为空。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数、稀疏 pattern 或 workspace 对齐非法。
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：`matC` 不是 CSR 或 BSR。
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：操作、算法、索引或数据类型组合不支持。
+- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：缺少所需 workspace。
+- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：pattern 校验的 Runtime 操作失败。
+
+---
+
+### aclsparseSDDMM
+
+```c
+aclsparseStatus_t aclsparseSDDMM(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX,
+    aclsparseConstDnMatDescr_t matY, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t alg, void *buffer);
+```
+
+**功能**：仅在 `matC` 的已存储位置计算
+`C = (alpha * op(X) * op(Y) + beta * C) ⊙ spy(C)`，原地更新 C values。设 C 的逻辑形状为 m×n：
+
+- `opX=NON_TRANSPOSE` 时 X 为 m×k，`opX=TRANSPOSE` 时 X 为 k×m。
+- `opY=NON_TRANSPOSE` 时 Y 为 k×n，`opY=TRANSPOSE` 时 Y 为 n×k。
+- `alpha==0` 时不读取乘积项，`beta==0` 时不读取 C 旧值，因此被零系数抑制的 NaN/Inf 不传播。
+
+**支持范围**：CSR/BSR，I32 索引，base 0/1，ROW/COL 稠密布局，`ACL_SPARSE_SDDMM_ALG_DEFAULT`。数据类型组合包括 FP32→FP32、FP16→FP16/FP32、COMPLEX64→COMPLEX64；BF16 输入在 CSR 支持 FP32 输出，在 BSR 支持 BF16/FP32 输出。实数路径使用 FP32 compute，复数路径使用 COMPLEX64 compute。BSR 支持 1..65535 batch，X/Y 的 batch 数必须为 1（广播）或与 C 相同；CSR 当前为单 batch。
+
+**指针与并发**：`alpha`/`beta` 的位置由 handle pointer mode 决定。X、Y 与 C pattern 只读，C values 与 workspace 可写。同一 `matC` 的多 stream 调用必须串行；并发调用必须使用不同的 `matC` 描述符和互不重叠的 workspace。不同 stream 还必须使用独立 handle，并遵守各自 stream 的数据生命周期。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏算子句柄；计算提交到其绑定的 stream。
+- `opX`（IN）：HOST，X 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 和 `ACL_SPARSE_OP_TRANSPOSE`。
+- `opY`（IN）：HOST，Y 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 和 `ACL_SPARSE_OP_TRANSPOSE`。
+- `alpha`（IN）：HOST/DEVICE，`computeType` 类型的乘积系数；位置由 handle pointer mode 决定。
+- `matX`（IN）：HOST/DEVICE，只读稠密矩阵 X 描述符及数据。
+- `matY`（IN）：HOST/DEVICE，只读稠密矩阵 Y 描述符及数据。
+- `beta`（IN）：HOST/DEVICE，`computeType` 类型的 C 旧值系数；位置由 handle pointer mode 决定。
+- `matC`（IN/OUT）：HOST/DEVICE，可写 CSR/BSR 稀疏矩阵 C 描述符；pattern 只读，values 原地更新。
+- `computeType`（IN）：HOST，累加以及 `alpha`/`beta` 的数据类型；实数路径为 `ACL_FLOAT`，复数路径为 `ACL_COMPLEX64`。
+- `alg`（IN）：HOST，算法类型，当前仅支持 `ACL_SPARSE_SDDMM_ALG_DEFAULT`。
+- `buffer`（IN/OUT）：DEVICE，与当前参数匹配的 workspace；非零时须 64 字节对齐。prepared state 不匹配时，本接口会自动执行等价 Preprocess。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：提交成功。
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：`handle` 为空。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数、稀疏 pattern 或 workspace 非法。
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：`matC` 不是 CSR 或 BSR。
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：操作、算法、索引或数据类型组合不支持。
+- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：设备核心或 workspace 资源不足。
+- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：自动 pattern 校验的 Runtime 操作失败。
 
 ---
 

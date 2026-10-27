@@ -13,6 +13,7 @@
         <licensefile></licensefile>
         <policylist>
             <policy name="projectPolicy" desc="">
+                <policyitem type="license" name="BSD-3-Clause" path="sparse/sddmm/torch_extension/csrc/sddmm[.]cpp" rule="may" group="defaultGroup" filefilter="defaultPolicyFilter" desc="PyTorch v2.7.1 SparseBlas.cpp input-validation portions; original copyright and complete BSD-3-Clause terms retained in this file. Source: https://github.com/pytorch/pytorch/blob/v2.7.1/aten/src/ATen/native/sparse/SparseBlas.cpp; license: https://github.com/pytorch/pytorch/blob/v2.7.1/LICENSE"/>
                 <!--policyitem type="compatibility" name="GPL-2.0+" path="abc/.*" desc="Process that runs independently, invoked by the X process."/-->
                 <policyitem type="license" name="CANN-2.0" path=".*" rule="may" group="defaultGroup" filefilter="defaultPolicyFilter" desc=""/>
                 <policyitem type="copyright" name="Huawei Technologies Co., Ltd." path=".*" rule="may" group="defaultGroup" filefilter="copyrightPolicyFilter" desc=""/>

@@ -17,6 +17,7 @@ import unittest
 from itertools import product
 
 import torch
+from _sddmm_utils import require_arch22
 from cann_ops_sparse.ops.sparse.sddmm import CsrOperands, ensure_sddmm_loaded, prepare_sddmm_csr
 
 import torch_npu  # noqa: F401
@@ -26,7 +27,7 @@ class CachedCsrEntryTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(1)
-        torch.npu.set_device(0)
+        require_arch22()
         ensure_sddmm_loaded()
 
     def operands(self, dtype=torch.float32, base=0, strided=False):

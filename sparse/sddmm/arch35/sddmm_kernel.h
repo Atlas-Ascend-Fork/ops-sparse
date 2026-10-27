@@ -1,7 +1,7 @@
 /**
  * ----------------------------------------------------------------------------------------------------------
- * Copyright (c) 2026 Huawei Technologies Co., Ltd
- * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -12,23 +12,38 @@
 
 /*!
  * \file sddmm_kernel.h
- * \brief sddmm kernel_launch 声明（Host / Kernel 共用）。
+ * \brief SDDMM kernel_do declarations shared by Host and Kernel code.
  */
 
 #ifndef SDDMM_KERNEL_H_
 #define SDDMM_KERNEL_H_
 
 #include <cstdint>
-#include "sddmm.h"
-#include "cann_ops_sparse.h"
+#include "sddmm_tiling_data.h"
 
 #ifndef GM_ADDR
-#define GM_ADDR uint8_t*
+#define GM_ADDR uint8_t *
 #endif
 
-extern "C" aclsparseStatus_t sddmm_kernel_launch(GM_ADDR csrRowOffsets, GM_ADDR csrColInd, GM_ADDR csrValues,
-                                                 GM_ADDR matX, GM_ADDR matY, GM_ADDR workspaceGM,
-                                                 const SddmmTilingData& tiling, int32_t dataType, uint32_t blockDim,
-                                                 void* stream);
+extern "C" {
+
+void sddmm_pattern_validate_kernel_do(
+    GM_ADDR sparseOffsets, GM_ADDR sparseColumns, GM_ADDR workspace,
+    const SddmmTilingData &tiling, uint32_t numBlocks, void *stream);
+
+void sddmm_pattern_query_kernel_do(
+    GM_ADDR sparseOffsets, GM_ADDR sparseColumns, GM_ADDR workspace,
+    const SddmmTilingData &tiling, uint32_t numBlocks, void *stream);
+
+void sddmm_pack_y_kernel_do(
+    GM_ADDR matY, GM_ADDR packedY,
+    const SddmmTilingData &tiling, uint32_t numBlocks, void *stream);
+
+void sddmm_kernel_do(
+    GM_ADDR sparseOffsets, GM_ADDR sparseColumns, GM_ADDR sparseValues,
+    GM_ADDR matX, GM_ADDR matY,
+    const SddmmTilingData &tiling, uint32_t numBlocks, void *stream);
+
+} // extern "C"
 
 #endif // SDDMM_KERNEL_H_

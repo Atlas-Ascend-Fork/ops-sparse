@@ -449,31 +449,106 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t* spMatDescr, int64_t 
                                      aclsparseIndexType_t csrRowOffsetsType, aclsparseIndexType_t csrColIndType,
                                      aclsparseIndexBase_t idxBase, aclDataType valueType);
 
-/**
- * @brief Create square BSR; block sizes 2/4/8/16/32/64/128, I32, base 0/1.
- */
-aclsparseStatus_t aclsparseCreateBsr(aclsparseSpMatDescr_t* spMatDescr, int64_t blockRows, int64_t blockCols,
-                                     int64_t blockNnz, int64_t rowBlockSize, int64_t colBlockSize, void* bsrRowOffsets,
-                                     void* bsrColInd, void* bsrValues, aclsparseIndexType_t bsrRowOffsetsType,
-                                     aclsparseIndexType_t bsrColIndType, aclsparseIndexBase_t idxBase,
-                                     aclDataType valueType, aclsparseOrder_t order);
-
-aclsparseStatus_t aclsparseCreateConstBsr(aclsparseConstSpMatDescr_t* spMatDescr, int64_t blockRows, int64_t blockCols,
-                                          int64_t blockNnz, int64_t rowBlockSize, int64_t colBlockSize,
-                                          const void* bsrRowOffsets, const void* bsrColInd, const void* bsrValues,
-                                          aclsparseIndexType_t bsrRowOffsetsType, aclsparseIndexType_t bsrColIndType,
-                                          aclsparseIndexBase_t idxBase, aclDataType valueType, aclsparseOrder_t order);
-
-aclsparseStatus_t aclsparseBsrSetStridedBatch(aclsparseSpMatDescr_t spMatDescr, int batchCount,
-                                              int64_t offsetsBatchStride, int64_t columnsBatchStride,
-                                              int64_t valuesBatchStride);
-
 /** @brief Create a read-only CSR descriptor. */
 aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
                                           int64_t nnz, const void* csrRowOffsets, const void* csrColInd,
                                           const void* csrValues, aclsparseIndexType_t csrRowOffsetsType,
                                           aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase,
                                           aclDataType valueType);
+
+/**
+ * @brief 创建 BSR（Block Sparse Row）稀疏矩阵描述符。
+ *
+ * blockRows/blockCols 是块矩阵维度，标量逻辑矩阵维度分别为
+ * blockRows*rowBlockSize 和 blockCols*colBlockSize。当前仅支持 I32 索引、
+ * base 0/1、方块大小 2/4/8/16/32/64/128，以及 ROW/COL 块内布局。
+ * blockRows 不超过 INT32_MAX-1，blockCols 不超过 INT32_MAX；逻辑标量维度
+ * 可以超过 INT32_MAX，具体算子在执行时再检查其架构支持范围。
+ * 描述符只借用调用方提供的 Device 指针，不接管其生命周期。
+ *
+ * @param spMatDescr OUT, HOST, 返回创建的可写 BSR 描述符。
+ * @param blockRows IN, HOST, BSR 块行数，必须为非负数。
+ * @param blockCols IN, HOST, BSR 块列数，必须为非负数。
+ * @param blockNnz IN, HOST, 每个 batch 的非零块数，必须为非负数。
+ * @param rowBlockSize IN, HOST, 块的行数，支持 2/4/8/16/32/64/128。
+ * @param colBlockSize IN, HOST, 块的列数，必须与 rowBlockSize 相等。
+ * @param bsrRowOffsets IN, DEVICE, 块行偏移数组，包含 blockRows + 1 个 I32 元素。
+ * @param bsrColInd IN, DEVICE, 块列索引数组，包含 blockNnz 个 I32 元素；
+ *        blockNnz 为 0 时允许为 nullptr。
+ * @param bsrValues IN, DEVICE, 块值数组，包含
+ *        blockNnz*rowBlockSize*colBlockSize 个 valueType 元素；blockNnz 为 0 时允许为 nullptr。
+ * @param bsrRowOffsetsType IN, HOST, 块行偏移类型，当前仅支持 ACL_SPARSE_INDEX_32I。
+ * @param bsrColIndType IN, HOST, 块列索引类型，当前仅支持 ACL_SPARSE_INDEX_32I。
+ * @param idxBase IN, HOST, 索引基值，支持 ACL_SPARSE_INDEX_BASE_ZERO/ONE。
+ * @param valueType IN, HOST, 块值类型，支持 ACL_FLOAT16/ACL_BF16/ACL_FLOAT/ACL_COMPLEX64。
+ * @param order IN, HOST, 块内存储顺序，支持 ACL_SPARSE_ORDER_ROW/COL。
+ * @return ACL_SPARSE_STATUS_SUCCESS 创建成功；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 参数、地址范围或矩阵几何非法；
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED 索引类型或数据类型不支持；
+ *         ACL_SPARSE_STATUS_ALLOC_FAILED 描述符内存分配失败。
+ */
+aclsparseStatus_t aclsparseCreateBsr(
+    aclsparseSpMatDescr_t *spMatDescr, int64_t blockRows,
+    int64_t blockCols, int64_t blockNnz, int64_t rowBlockSize,
+    int64_t colBlockSize, void *bsrRowOffsets, void *bsrColInd,
+    void *bsrValues, aclsparseIndexType_t bsrRowOffsetsType,
+    aclsparseIndexType_t bsrColIndType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType, aclsparseOrder_t order);
+
+/**
+ * @brief 创建只读(const) BSR 稀疏矩阵描述符。
+ *
+ * 参数与 aclsparseCreateBsr 相同；输入数组以 const Device 指针传入。
+ *
+ * @param spMatDescr OUT, HOST, 返回创建的只读 BSR 描述符。
+ * @param blockRows IN, HOST, BSR 块行数，必须为非负数。
+ * @param blockCols IN, HOST, BSR 块列数，必须为非负数。
+ * @param blockNnz IN, HOST, 每个 batch 的非零块数，必须为非负数。
+ * @param rowBlockSize IN, HOST, 块的行数，支持 2/4/8/16/32/64/128。
+ * @param colBlockSize IN, HOST, 块的列数，必须与 rowBlockSize 相等。
+ * @param bsrRowOffsets IN, DEVICE, 只读块行偏移数组，包含 blockRows + 1 个 I32 元素。
+ * @param bsrColInd IN, DEVICE, 只读块列索引数组，包含 blockNnz 个 I32 元素；
+ *        blockNnz 为 0 时允许为 nullptr。
+ * @param bsrValues IN, DEVICE, 只读块值数组，包含
+ *        blockNnz*rowBlockSize*colBlockSize 个 valueType 元素；blockNnz 为 0 时允许为 nullptr。
+ * @param bsrRowOffsetsType IN, HOST, 块行偏移类型，当前仅支持 ACL_SPARSE_INDEX_32I。
+ * @param bsrColIndType IN, HOST, 块列索引类型，当前仅支持 ACL_SPARSE_INDEX_32I。
+ * @param idxBase IN, HOST, 索引基值，支持 ACL_SPARSE_INDEX_BASE_ZERO/ONE。
+ * @param valueType IN, HOST, 块值类型，支持 ACL_FLOAT16/ACL_BF16/ACL_FLOAT/ACL_COMPLEX64。
+ * @param order IN, HOST, 块内存储顺序，支持 ACL_SPARSE_ORDER_ROW/COL。
+ * @return ACL_SPARSE_STATUS_SUCCESS 创建成功；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 参数、地址范围或矩阵几何非法；
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED 索引类型或数据类型不支持；
+ *         ACL_SPARSE_STATUS_ALLOC_FAILED 描述符内存分配失败。
+ */
+aclsparseStatus_t aclsparseCreateConstBsr(
+    aclsparseConstSpMatDescr_t *spMatDescr, int64_t blockRows,
+    int64_t blockCols, int64_t blockNnz, int64_t rowBlockSize,
+    int64_t colBlockSize, const void *bsrRowOffsets,
+    const void *bsrColInd, const void *bsrValues,
+    aclsparseIndexType_t bsrRowOffsetsType,
+    aclsparseIndexType_t bsrColIndType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType, aclsparseOrder_t order);
+
+/**
+ * @brief 设置 BSR 描述符的 strided-batch 属性。
+ *
+ * 所有 stride 均以对应数组的元素数为单位。offsets/columns stride 为 0
+ * 表示 batch 间广播结构；batchCount 大于 1 时 values 不允许广播。
+ *
+ * @param spMatDescr IN/OUT, HOST, 要更新的可写 BSR 描述符。
+ * @param batchCount IN, HOST, batch 数，范围为 1..65535。
+ * @param offsetsBatchStride IN, HOST, 相邻 batch 行偏移数组起点的元素间隔；0 表示广播。
+ * @param columnsBatchStride IN, HOST, 相邻 batch 列索引数组起点的元素间隔；0 表示广播。
+ * @param valuesBatchStride IN, HOST, 相邻 batch 块值数组起点的元素间隔；
+ *        batchCount 大于 1 且块值非空时必须覆盖一个 batch，且不能为 0。
+ * @return ACL_SPARSE_STATUS_SUCCESS 设置成功；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 描述符、batch、stride 或地址范围非法。
+ */
+aclsparseStatus_t aclsparseBsrSetStridedBatch(
+    aclsparseSpMatDescr_t spMatDescr, int batchCount,
+    int64_t offsetsBatchStride, int64_t columnsBatchStride,
+    int64_t valuesBatchStride);
 
 /**
  * @brief 创建一个CSC（Compressed Sparse Column）稀疏矩阵。
@@ -554,8 +629,13 @@ aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatD
 
 aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void* values);
 
-aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
-                                        int64_t* nnz);
+/**
+ * @brief 获取稀疏矩阵的逻辑尺寸。
+ *
+ * 对 BSR，rows/cols 返回展开块后的标量矩阵维度，nnz 返回非零块数量。
+ */
+aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows, int64_t *cols, int64_t *nnz);
 
 /**
  * @brief 获取稀疏矩阵向量乘法（SpMV）所需的缓冲区大小
@@ -628,9 +708,10 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
  * @param dnMatDescr IN/OUT, HOST，输出的稠密矩阵描述符。
  * @param rows       IN, HOST，矩阵的行数，允许为 0，不允许为负数。
  * @param cols       IN, HOST，矩阵的列数，允许为 0，不允许为负数。
- * @param ld         IN, HOST，leading dimension，必须大于 0。行主序时需 >= cols；
+ * @param ld         IN, HOST，leading dimension，必须非负。行主序时需 >= cols；
  *                   列主序时需 >= rows；该约束同样适用于零维矩阵。
- * @param values     IN, DEVICE，矩阵数据指针，必须为非空，包括零维矩阵。
+ * @param values     IN, DEVICE，矩阵数据指针；rows*cols 非零时必须非空，
+ *                   rows==0 或 cols==0 时允许为空。
  * @param valueType  IN, HOST，元素数据类型。支持 ACL_FLOAT / ACL_FLOAT16 / ACL_INT8
  *                   （用于 B 矩阵）；C 矩阵在 INT8 路径下为 ACL_INT32。
  * @param order      IN, HOST，布局：ACL_SPARSE_ORDER_ROW / ACL_SPARSE_ORDER_COL。
@@ -698,19 +779,51 @@ aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatD
  */
 aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void* values);
 
-aclsparseStatus_t aclsparseDnMatGetStridedBatch(aclsparseConstDnMatDescr_t dnMatDescr, int* batchCount,
-                                                int64_t* batchStride);
-aclsparseStatus_t aclsparseDnMatSetStridedBatch(aclsparseDnMatDescr_t dnMatDescr, int batchCount, int64_t batchStride);
+/**
+ * @brief 获取稠密矩阵描述符的 strided-batch 属性。
+ *
+ * batchStride 的单位为 valueType 元素；新建描述符默认返回
+ * batchCount=1、batchStride=0。
+ *
+ * @param dnMatDescr IN, HOST, 要查询的稠密矩阵描述符。
+ * @param batchCount OUT, HOST, 返回 batch 数。
+ * @param batchStride OUT, HOST, 返回相邻 batch 起点的元素间隔。
+ * @return ACL_SPARSE_STATUS_SUCCESS 查询成功；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 描述符或输出指针为空或无效。
+ */
+aclsparseStatus_t aclsparseDnMatGetStridedBatch(
+    aclsparseConstDnMatDescr_t dnMatDescr, int *batchCount,
+    int64_t *batchStride);
 
-aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
-                                                      aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
-                                                      size_t* bufferSize);
-aclsparseStatus_t aclsparseDenseToSparseAnalysis(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
-                                                 aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
-                                                 void* buffer);
-aclsparseStatus_t aclsparseDenseToSparseConvert(aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
-                                                aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
-                                                void* buffer);
+/**
+ * @brief 设置稠密矩阵描述符的 strided-batch 属性。
+ *
+ * batchCount 范围为 1..65535。batchCount 大于 1 时，batchStride 至少覆盖
+ * 最后一个有效元素：ROW 为 (rows-1)*ld+cols，COL 为 (cols-1)*ld+rows；
+ * 任一逻辑维度为零时跨度为零。具体算子可在执行阶段要求更大的含 padding 跨度。
+ *
+ * @param dnMatDescr IN/OUT, HOST, 要更新的可写稠密矩阵描述符。
+ * @param batchCount IN, HOST, batch 数，范围为 1..65535。
+ * @param batchStride IN, HOST, 相邻 batch 起点的元素间隔；单 batch 时允许任意非负值。
+ * @return ACL_SPARSE_STATUS_SUCCESS 设置成功；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 描述符、batch、stride、布局或地址范围非法。
+ */
+aclsparseStatus_t aclsparseDnMatSetStridedBatch(
+    aclsparseDnMatDescr_t dnMatDescr, int batchCount,
+    int64_t batchStride);
+
+aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(
+    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    size_t *bufferSize);
+aclsparseStatus_t aclsparseDenseToSparseAnalysis(
+    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    void *buffer);
+aclsparseStatus_t aclsparseDenseToSparseConvert(
+    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    void *buffer);
 
 // ============================================================================
 // SparseToDense Generic API
@@ -862,10 +975,10 @@ aclsparseStatus_t aclsparseCubeSpmm(aclsparseHandle_t handle, const void* alpha,
 // ============================================================================
 // SDDMM (Sampled Dense-Dense Matrix Multiplication) Generic API
 // ============================================================================
-//  C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
-//  opX/opY determine X/Y shapes: X=m×k (NON_TRANSPOSE) or k×m (TRANSPOSE);
-//  Y=k×n (NON_TRANSPOSE) or n×k (TRANSPOSE); C=m×n CSR.
-//  C values are updated in-place.
+//  C_out = (alpha * op(X) * op(Y) + beta * C) ⊙ spy(C)
+//  C is m×n sparse (CSR or BSR) and its values are updated in place.
+//  opX=NON_TRANSPOSE: X is m×k; opX=TRANSPOSE: X is k×m.
+//  opY=NON_TRANSPOSE: Y is k×n; opY=TRANSPOSE: Y is n×k.
 
 // Algorithm enum for SDDMM.
 typedef enum aclsparseSDDMMAlg_t {
@@ -874,6 +987,34 @@ typedef enum aclsparseSDDMMAlg_t {
 
 /**
  * @brief 计算 SDDMM 所需 workspace 字节数。
+ *
+ * @param handle IN, HOST, 稀疏算子句柄。
+ * @param opX IN, HOST, X 的操作类型，支持 ACL_SPARSE_OP_NON_TRANSPOSE/TRANSPOSE。
+ * @param opY IN, HOST, Y 的操作类型，支持 ACL_SPARSE_OP_NON_TRANSPOSE/TRANSPOSE。
+ * @param alpha IN, HOST/DEVICE, computeType 类型的乘积系数；位置由 handle pointer mode 决定。
+ * @param matX IN, HOST, 只读稠密矩阵 X 描述符。
+ * @param matY IN, HOST, 只读稠密矩阵 Y 描述符。
+ * @param beta IN, HOST/DEVICE, computeType 类型的 C 旧值系数；位置由 handle pointer mode 决定。
+ * @param matC IN/OUT, HOST, CSR/BSR 描述符；arch35 保存容量计划，不修改矩阵数据。
+ * @param computeType IN, HOST, 累加以及 alpha/beta 的数据类型。
+ * @param alg IN, HOST, SDDMM 算法，当前支持 ACL_SPARSE_SDDMM_ALG_DEFAULT。
+ * @param size OUT, HOST, 返回 Preprocess 和 Execute 所需的 Device workspace 字节数；允许为 0。
+ * @return ACL_SPARSE_STATUS_SUCCESS 查询成功；
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 描述符、维度、指针、batch 或布局非法；
+ *         ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED matC 不是 CSR/BSR；
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED 操作、算法、索引或数据类型组合不支持；
+ *         ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES arch35 查询需检查 pattern 但无可用 AIV 核；
+ *         ACL_SPARSE_STATUS_ALLOC_FAILED arch35 查询临时区分配失败；
+ *         ACL_SPARSE_STATUS_EXECUTION_FAILED arch35 查询 pattern 的 Runtime 操作失败。
+ * @note arch35 仅在 CSR Cube 需要超过 generic 容量的 scratch 时读取 Device pattern，
+ *       在 handle stream 上同步确认 pattern 和首列对齐；每个活跃 AIV 核使用 64 字节
+ *       临时结果槽，总大小为 64 × min(AIV 核数, m) 字节。
+ *       每次成功查询替换 matC 的容量计划并使 prepared state 失效，后续 buffer 必须
+ *       满足此次返回大小。元数据变化后应重新查询；仅修改 pattern 后重新 Preprocess
+ *       不扩大原容量，不足以容纳 Cube 时使用 generic 路径。alpha/beta 的变化不扩大容量。
+ *       查询同步失败时保留临时区，后续 SDDMM 调用会先尝试完成同步再释放；持续失败时
+ *       返回 EXECUTION_FAILED。描述符销毁时若仍无法同步，不释放可能仍被 Device 使用的临时区。
  */
 aclsparseStatus_t aclsparseSDDMMBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
                                            const void* alpha, aclsparseConstDnMatDescr_t matX,
@@ -882,7 +1023,28 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(aclsparseHandle_t handle, aclsparseOp
                                            size_t* size);
 
 /**
- * @brief 对稀疏矩阵进行预处理，加速后续 SDDMM 计算。
+ * @brief 校验稀疏 pattern 并将 SDDMM prepared state 绑定到 matC。
+ *
+ * @param handle IN, HOST, 稀疏算子句柄；pattern 校验提交到其绑定的 stream。
+ * @param opX IN, HOST, X 的操作类型，支持 ACL_SPARSE_OP_NON_TRANSPOSE/TRANSPOSE。
+ * @param opY IN, HOST, Y 的操作类型，支持 ACL_SPARSE_OP_NON_TRANSPOSE/TRANSPOSE。
+ * @param alpha IN, HOST/DEVICE, computeType 类型的乘积系数；位置由 handle pointer mode 决定。
+ * @param matX IN, HOST, 只读稠密矩阵 X 描述符；本接口不读取 X values。
+ * @param matY IN, HOST, 只读稠密矩阵 Y 描述符；本接口不读取 Y values。
+ * @param beta IN, HOST/DEVICE, computeType 类型的 C 旧值系数；位置由 handle pointer mode 决定。
+ * @param matC IN/OUT, HOST, 可写 CSR/BSR 稀疏矩阵 C 描述符；读取 pattern，
+ *        更新描述符内 prepared state，不修改 C values。
+ * @param computeType IN, HOST, 累加以及 alpha/beta 的数据类型。
+ * @param alg IN, HOST, SDDMM 算法，当前支持 ACL_SPARSE_SDDMM_ALG_DEFAULT。
+ * @param buffer IN/OUT, DEVICE, BufferSize 返回的 workspace；非零时须为 64 字节对齐且生命周期
+ *        覆盖后续 Execute，BufferSize 为 0 时允许为 nullptr。arch35 使用最近成功查询的容量计划。
+ * @return ACL_SPARSE_STATUS_SUCCESS 预处理成功；
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 参数、稀疏 pattern 或 workspace 对齐非法；
+ *         ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED matC 不是 CSR/BSR；
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED 操作、算法、索引或数据类型组合不支持；
+ *         ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES 缺少所需 workspace；
+ *         ACL_SPARSE_STATUS_EXECUTION_FAILED pattern 校验的 Runtime 操作失败。
  */
 aclsparseStatus_t aclsparseSDDMMPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
                                            const void* alpha, aclsparseConstDnMatDescr_t matX,
@@ -891,10 +1053,34 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(aclsparseHandle_t handle, aclsparseOp
                                            void* buffer);
 
 /**
- * @brief 采样稠密-稠密矩阵乘法：C = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
+ * @brief 采样稠密-稠密矩阵乘法：
+ *        C = (alpha * op(X) * op(Y) + beta * C) ⊙ spy(C)。
  *
- * @note 线程安全：本接口内部使用 pattern cache 加速重复调用，该 cache 非线程安全。
- *       多 stream 并发调用时，调用者须保证串行访问，或使用独立的 matC 描述符。
+ * @note matC 内的 prepared state 及 buffer 指向的 workspace 都是可变状态。
+ *       同一 matC 的多 stream 调用必须串行；并发调用必须使用不同的
+ *       matC 描述符与互不重叠的 workspace。不同 stream 还必须使用独立
+ *       handle，并保证各自的 stream 时序。
+ *
+ * @param handle IN, HOST, 稀疏算子句柄；计算提交到其绑定的 stream。
+ * @param opX IN, HOST, X 的操作类型，支持 ACL_SPARSE_OP_NON_TRANSPOSE/TRANSPOSE。
+ * @param opY IN, HOST, Y 的操作类型，支持 ACL_SPARSE_OP_NON_TRANSPOSE/TRANSPOSE。
+ * @param alpha IN, HOST/DEVICE, computeType 类型的乘积系数；位置由 handle pointer mode 决定。
+ * @param matX IN, HOST, 只读稠密矩阵 X 描述符及数据。
+ * @param matY IN, HOST, 只读稠密矩阵 Y 描述符及数据。
+ * @param beta IN, HOST/DEVICE, computeType 类型的 C 旧值系数；位置由 handle pointer mode 决定。
+ * @param matC IN/OUT, HOST/DEVICE, 可写 CSR/BSR 稀疏矩阵 C 描述符；pattern 只读，
+ *        values 在原地址更新。
+ * @param computeType IN, HOST, 累加以及 alpha/beta 的数据类型。
+ * @param alg IN, HOST, SDDMM 算法，当前支持 ACL_SPARSE_SDDMM_ALG_DEFAULT。
+ * @param buffer IN/OUT, DEVICE, 与当前参数匹配的 workspace；非零时须为 64 字节对齐。
+ *        prepared state 不匹配时，本接口会自动执行等价 Preprocess。
+ * @return ACL_SPARSE_STATUS_SUCCESS 提交成功；
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空；
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 参数、稀疏 pattern 或 workspace 非法；
+ *         ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED matC 不是 CSR/BSR；
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED 操作、算法、索引或数据类型组合不支持；
+ *         ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES 设备核心或 workspace 资源不足；
+ *         ACL_SPARSE_STATUS_EXECUTION_FAILED 自动 pattern 校验的 Runtime 操作失败。
  */
 aclsparseStatus_t aclsparseSDDMM(aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
                                  const void* alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,

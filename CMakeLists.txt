@@ -184,6 +184,19 @@ target_include_directories(${OPS_SPARSE} PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
 )
 
+if(SOC_VERSION_LOWER MATCHES "^ascend950")
+    # DAV-3510 Cube kernels use the CANN Tensor API in addition to the base
+    # Ascend C headers. Keep these private to the core implementation.
+    target_include_directories(${OPS_SPARSE} PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc
+        ${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api
+        ${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api/include
+    )
+    target_compile_definitions(${OPS_SPARSE} PRIVATE
+        SDDMM_ENABLE_CSR_CUBE
+    )
+endif()
+
 target_compile_options(${OPS_SPARSE} PRIVATE
     "$<$<COMPILE_LANGUAGE:ASC>:SHELL:-iquote ${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<$<COMPILE_LANGUAGE:ASC>:SHELL:-iquote ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common>"

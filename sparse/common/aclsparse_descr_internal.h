@@ -40,11 +40,11 @@
 // 描述符签名常量，用于在 Destroy/Get/Set/Execute 前识别不透明句柄的描述符类型，
 // 并拒绝错误类型的句柄。
 enum DescrSignature : uint32_t {
+    kSpMatSignature = 0x53504D54,
     kDnVecSignature = 0xD0D2D4D6,
     kSpVecSignature = 0x51705663,
-    kSpMatSignature = 0x53504D54,
     kDnMatSignature = 0xD0D2D4D8,
-    kSpGemmSignature = 0x5350474D, // ASCII "SPGM"，表示 SpGEMM 描述符类型。
+    kSpGemmSignature = 0x5350474D,  // ASCII "SPGM"，表示 SpGEMM 描述符类型。
 };
 
 enum class AclsparseSpGemmState : uint32_t {
@@ -65,9 +65,9 @@ struct aclsparseSpGEMMDescr {
     AclsparseSpGemmState state = AclsparseSpGemmState::CREATED;
     aclsparseSpGEMMAlg_t alg = ACL_SPARSE_SPGEMM_DEFAULT;
     aclDataType computeType = ACL_FLOAT;
-    const aclsparseSpMatDescr* matA = nullptr;
-    const aclsparseSpMatDescr* matB = nullptr;
-    aclsparseSpMatDescr* matC = nullptr;
+    const aclsparseSpMatDescr *matA = nullptr;
+    const aclsparseSpMatDescr *matB = nullptr;
+    aclsparseSpMatDescr *matC = nullptr;
     uint64_t m = 0;
     uint64_t k = 0;
     uint64_t n = 0;
@@ -81,24 +81,123 @@ struct aclsparseSpGEMMDescr {
     int32_t cInDataValid = 0;
     size_t requiredBuffer1 = 0;
     size_t requiredBuffer2 = 0;
-    void* externalBuffer1 = nullptr;
-    void* externalBuffer2 = nullptr;
+    void *externalBuffer1 = nullptr;
+    void *externalBuffer2 = nullptr;
     float chunkFraction = 1.0F;
 };
 
-// 稀疏矩阵描述符内部结构（CSR / CSC / COO / BELL / SLICED_ELL 共用）。
-struct aclsparseSpMatDescr {
-    uint32_t signature = kSpMatSignature;
-    // Architecture-owned state; workspace and user arrays remain caller-owned.
-    std::shared_ptr<void> sddmmState;
-    uint64_t blockSize = 1;
+// Exact Host-observable inputs that determine an SDDMM preprocessing result.
+// Callers compare this key field-by-field before taking a prepared fast path.
+struct SddmmPreparedKey {
+    uint64_t structureGeneration = 0;
+    aclsparseFormat_t format{};
+    uint64_t rows = 0;
+    uint64_t cols = 0;
+    uint64_t nnz = 0;
+    const void *offsets = nullptr;
+    const void *columns = nullptr;
+    aclsparseIndexBase_t indexBase{};
+    aclsparseIndexType_t offsetsType{};
+    aclsparseIndexType_t columnsType{};
+    aclDataType valueTypeC{};
+    int64_t blockRows = 0;
+    int64_t blockCols = 0;
+    int64_t blockNnz = 0;
+    int64_t rowBlockSize = 1;
+    int64_t colBlockSize = 1;
     aclsparseOrder_t blockOrder = ACL_SPARSE_ORDER_ROW;
-    int batchCount = 1;
+    int32_t batchCountC = 1;
     int64_t offsetsBatchStride = 0;
     int64_t columnsBatchStride = 0;
     int64_t valuesBatchStride = 0;
+
+    int64_t rowsX = 0;
+    int64_t colsX = 0;
+    int64_t ldX = 0;
+    aclsparseOrder_t orderX = ACL_SPARSE_ORDER_ROW;
+    aclDataType valueTypeX{};
+    int32_t batchCountX = 1;
+    int64_t batchStrideX = 0;
+    aclsparseOperation_t opX = ACL_SPARSE_OP_NON_TRANSPOSE;
+
+    int64_t rowsY = 0;
+    int64_t colsY = 0;
+    int64_t ldY = 0;
+    aclsparseOrder_t orderY = ACL_SPARSE_ORDER_ROW;
+    aclDataType valueTypeY{};
+    int32_t batchCountY = 1;
+    int64_t batchStrideY = 0;
+    aclsparseOperation_t opY = ACL_SPARSE_OP_NON_TRANSPOSE;
+
+    aclDataType computeType{};
+    aclsparseSDDMMAlg_t algorithm = ACL_SPARSE_SDDMM_ALG_DEFAULT;
+    const void *workspace = nullptr;
+    size_t workspaceBytes = 0;
+};
+
+// SDDMM preprocessing metadata is descriptor-local so independently created
+// sparse matrices never share mutable process-global cache state. workspace is
+// borrowed from the caller and is never allocated or freed by this state.
+struct SddmmPreparedState {
+    SddmmPreparedKey key{};
+    const void *workspace = nullptr;
+    size_t workspaceBytes = 0;
+    uint64_t patternGenerationSnapshot = 0;
+    uint64_t preprocessEpoch = 0;
+    uint32_t path = 0;
+    // Device-validated pattern properties.  These flags are valid only for
+    // the exact prepared key and structure-generation snapshot above.
+    uint32_t patternFlags = 0;
+    int32_t patternLogicalFirstColumn = -1;
+    bool prepared = false;
+};
+
+// Capacity is fixed by BufferSize, independently of the pattern subsequently
+// validated by Preprocess. In-place index changes must never grow a caller's
+// allocation. The key excludes pattern addresses/generation and workspace.
+struct SddmmWorkspacePlan {
+    SddmmPreparedKey key{};
+    size_t workspaceBytes = 0;
+    bool queried = false;
+};
+
+// Usually released before BufferSize returns. A failed synchronization cannot
+// prove that the device stopped writing, so retain this small allocation for
+// a later drain attempt instead of freeing live storage. If draining still
+// fails during destruction, leave it allocated rather than free live storage.
+struct SddmmQueryScratch {
+    void *buffer = nullptr;
+    aclrtStream stream = nullptr;
+    bool pending = false;
+
+    bool Release()
+    {
+        if (buffer == nullptr) {
+            return true;
+        }
+        if (pending && aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+            return false;
+        }
+        pending = false;
+        if (aclrtFree(buffer) != ACL_SUCCESS) {
+            return false;
+        }
+        buffer = nullptr;
+        stream = nullptr;
+        return true;
+    }
+
+    ~SddmmQueryScratch() { (void)Release(); }
+    SddmmQueryScratch() = default;
+    SddmmQueryScratch(const SddmmQueryScratch &) = delete;
+    SddmmQueryScratch &operator=(const SddmmQueryScratch &) = delete;
+};
+
+// 稀疏矩阵描述符内部结构（CSR / CSC / COO / BSR / BELL / SLICED_ELL 共用）。
+struct aclsparseSpMatDescr {
+    uint32_t signature = kSpMatSignature;
     // Non-SpMV preprocess cache (SpMM/SDDMM workspace layout).
-    const void* activeBuffer = nullptr;
+    const void *activeBuffer = nullptr;
     // Monotonic host-side identity used to distinguish descriptor address reuse
     // when a device workspace is shared by multiple CSR descriptors.
     uint64_t spmmWorkspaceOwnerId = 0;
@@ -110,13 +209,13 @@ struct aclsparseSpMatDescr {
     bool spmmIdentityReorder = false;
     int32_t spmmUniformDegree = -1;
     // SpMV uses a separate layout and must never populate activeBuffer.
-    const void* activeSpmvBuffer = nullptr;
+    const void *activeSpmvBuffer = nullptr;
     // Parameters captured by the most recent SpMV preprocess. Keeping
     // these fields beside activeSpmvBuffer prevents a workspace from being reused
     // after the CSR pattern or static execution attributes have changed.
-    const void* activeRowOffsets = nullptr;
-    const void* activeColIndices = nullptr;
-    const void* activeValues = nullptr;
+    const void *activeRowOffsets = nullptr;
+    const void *activeColIndices = nullptr;
+    const void *activeValues = nullptr;
     int64_t activeRowOffsetsStride = 1;
     int64_t activeColIndStride = 1;
     int64_t activeValuesStride = 1;
@@ -134,7 +233,7 @@ struct aclsparseSpMatDescr {
     int32_t activeAlg = -1;
     // Preprocess metadata is produced asynchronously on the handle stream.
     // It must not be reused after a stream switch without re-preprocessing.
-    const void* activeStream = nullptr;
+    const void *activeStream = nullptr;
     uint64_t activeStreamEpoch = 0;
     // SpMV cube 算法的最长行探测缓存：由 aclsparseSpMVPreprocess 写入，
     // aclsparseSpMV 直接复用以免每次调用 D2H+同步；ptrs 重绑定或行数变化时失效。
@@ -143,20 +242,20 @@ struct aclsparseSpMatDescr {
     // DenseToSparse discovers nnz/offsets before callers allocate its output
     // payload. Rebinding indices/values must not discard that analysis, while
     // generic SpMM/SDDMM and SpMV preprocess caches still require invalidation.
-    const void* activeDenseToSparseBuffer = nullptr;
+    const void *activeDenseToSparseBuffer = nullptr;
     bool denseToSparseAnalysisReady = false;
     int32_t cInDataValid = 0;
     // 旧三阶段 SpGEMM 接口复用新多阶段实现时保存的内部描述符及 workspace。
     // 生命周期随 matC 结束，避免旧接口额外暴露描述符管理要求。
     std::unique_ptr<aclsparseSpGEMMDescr> legacySpGemmDescr;
-    const void* legacySpGemmBuffer = nullptr;
+    const void *legacySpGemmBuffer = nullptr;
     aclsparseFormat_t format{};
     uint64_t rows = 0;
     uint64_t cols = 0;
     uint64_t nnz = 0;
-    void* ptrs = nullptr;
-    void* idxs = nullptr;
-    void* values = nullptr;
+    void *ptrs = nullptr;
+    void *idxs = nullptr;
+    void *values = nullptr;
     int64_t ptrStride = 1;
     int64_t idxStride = 1;
     int64_t valueStride = 1;
@@ -168,14 +267,77 @@ struct aclsparseSpMatDescr {
     aclsparseDiagType_t diagType = ACL_SPARSE_DIAG_TYPE_NON_UNIT;
     uint64_t sliceNnz = 0;
     int64_t numSlices = 0;
-    void* rowInds = nullptr;
-    void* colInds = nullptr;
+    void *rowInds = nullptr;
+    void *colInds = nullptr;
     uint64_t ellBlockSize = 0;
     uint64_t ellCols = 0;
-    void* ellColInd = nullptr;
+    void *ellColInd = nullptr;
+
+    // BSR geometry. rows/cols remain the logical scalar matrix shape, while
+    // nnz and blockNnz both count stored blocks for ACL_SPARSE_FORMAT_BSR.
+    int64_t blockRows = 0;
+    int64_t blockCols = 0;
+    int64_t blockNnz = 0;
+    int64_t rowBlockSize = 1;
+    int64_t colBlockSize = 1;
+    int64_t bsrValuesCount = 0;
+    aclsparseOrder_t bsrOrder = ACL_SPARSE_ORDER_ROW;
+
+    // Sparse strided-batch defaults preserve the historical single-matrix
+    // behavior. Strides are element counts, not byte counts.
+    int32_t batchCount = 1;
+    int64_t offsetsBatchStride = 0;
+    int64_t columnsBatchStride = 0;
+    int64_t valuesBatchStride = 0;
+
+    uint64_t structureGeneration = 1;
+    SddmmPreparedState sddmmPrepared{};
+    SddmmWorkspacePlan sddmmWorkspacePlan{};
+    SddmmQueryScratch sddmmQueryScratch{};
+
+    // arch22 owns its prepared metadata separately from arch35. Public BSR
+    // creation initializes both geometry views; user arrays stay caller-owned.
+    std::shared_ptr<void> sddmmState;
+    uint64_t blockSize = 1;
+    aclsparseOrder_t blockOrder = ACL_SPARSE_ORDER_ROW;
 };
 
-inline aclsparseStatus_t ValidateSpMatCreateParams(const void* descrPtr, int64_t rows, int64_t cols, int64_t nnz)
+inline void AclsparseInvalidateSddmmPreparedState(aclsparseSpMatDescr *descr)
+{
+    if (descr == nullptr) {
+        return;
+    }
+    descr->sddmmPrepared.workspace = nullptr;
+    descr->sddmmPrepared.workspaceBytes = 0;
+    descr->sddmmPrepared.key = {};
+    descr->sddmmPrepared.patternGenerationSnapshot = 0;
+    descr->sddmmPrepared.path = 0;
+    descr->sddmmPrepared.patternFlags = 0;
+    descr->sddmmPrepared.patternLogicalFirstColumn = -1;
+    descr->sddmmPrepared.prepared = false;
+}
+
+inline void AclsparseMarkSpMatStructureChanged(aclsparseSpMatDescr *descr)
+{
+    if (descr == nullptr) {
+        return;
+    }
+    ++descr->structureGeneration;
+    // Generation zero is reserved as "no snapshot" in prepared state.
+    if (descr->structureGeneration == 0) {
+        descr->structureGeneration = 1;
+    }
+    // Existing sparse operators also cache preprocess data through borrowed
+    // pointers; a structure mutation must not let them reuse stale data.
+    descr->activeBuffer = nullptr;
+    descr->activeSpmvBuffer = nullptr;
+    // arch22 revalidates its own key and retains the preceding stream event
+    // until Preprocess has enqueued any required cross-stream dependency.
+    AclsparseInvalidateSddmmPreparedState(descr);
+}
+
+inline aclsparseStatus_t ValidateSpMatCreateParams(
+    const void *descrPtr, int64_t rows, int64_t cols, int64_t nnz)
 {
     if (descrPtr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -221,7 +383,7 @@ inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypesExtended(aclspar
 struct aclsparseDnVecDescr {
     uint32_t signature = 0;
     uint64_t nums = 0;
-    void* values = nullptr;
+    void *values = nullptr;
     int64_t stride = 1;
     aclDataType valueType{};
 };
@@ -231,8 +393,8 @@ struct aclsparseSpVecDescr {
     uint32_t signature = 0;
     uint64_t size = 0;
     uint64_t nnz = 0;
-    void* indices = nullptr;
-    void* values = nullptr;
+    void *indices = nullptr;
+    void *values = nullptr;
     aclsparseIndexType_t idxType{};
     aclsparseIndexBase_t idxBase{};
     aclDataType valueType{};
@@ -245,9 +407,9 @@ struct aclsparseDnMatDescr {
     int64_t cols = 0;
     int64_t ld = 0;
     aclsparseOrder_t order{};
-    void* values = nullptr;
+    void *values = nullptr;
     aclDataType valueType{};
-    int batchCount = 1;
+    int32_t batchCount = 1;
     int64_t batchStride = 0;
 };
 
@@ -262,9 +424,10 @@ struct AclsparseSpmmDtypeCombo {
 
 // SpMM dtype 组合匹配（表驱动）：matA/matB/matC/computeType 四元组与 combos
 // 表中任一组合全等即命中。供公共或架构特定校验复用。
-inline bool AclsparseMatchSpmmDtypeCombo(const aclsparseSpMatDescr* matA, const aclsparseDnMatDescr* matB,
-                                         const aclsparseDnMatDescr* matC, aclDataType computeType,
-                                         const AclsparseSpmmDtypeCombo* combos, size_t comboCount)
+inline bool AclsparseMatchSpmmDtypeCombo(
+    const aclsparseSpMatDescr *matA, const aclsparseDnMatDescr *matB,
+    const aclsparseDnMatDescr *matC, aclDataType computeType,
+    const AclsparseSpmmDtypeCombo *combos, size_t comboCount)
 {
     for (size_t i = 0; i < comboCount; ++i) {
         if (matA->valueType == combos[i].matA && matB->valueType == combos[i].matB &&
@@ -281,11 +444,11 @@ inline bool AclsparseMatchSpmmDtypeCombo(const aclsparseSpMatDescr* matA, const 
 // allowOpBTranspose：true 允许 N/T，false 仅允许 N。
 // 各架构差异化检查（alg 集合、紧凑布局、INT32_MAX 上限等）由调用方在本函数
 // 返回 SUCCESS 后自行补充。
-inline aclsparseStatus_t AclsparseValidateSpmmCommon(const aclsparseSpMatDescr* matA, const aclsparseDnMatDescr* matB,
-                                                     const aclsparseDnMatDescr* matC, aclsparseOperation_t opA,
-                                                     aclsparseOperation_t opB, aclDataType computeType,
-                                                     bool allowOpBTranspose, const AclsparseSpmmDtypeCombo* combos,
-                                                     size_t comboCount)
+inline aclsparseStatus_t AclsparseValidateSpmmCommon(
+    const aclsparseSpMatDescr *matA, const aclsparseDnMatDescr *matB,
+    const aclsparseDnMatDescr *matC, aclsparseOperation_t opA,
+    aclsparseOperation_t opB, aclDataType computeType, bool allowOpBTranspose,
+    const AclsparseSpmmDtypeCombo *combos, size_t comboCount)
 {
     if (matA == nullptr || matB == nullptr || matC == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
@@ -294,7 +457,8 @@ inline aclsparseStatus_t AclsparseValidateSpmmCommon(const aclsparseSpMatDescr* 
     if (opA != ACL_SPARSE_OP_NON_TRANSPOSE) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (opB != ACL_SPARSE_OP_NON_TRANSPOSE && (!allowOpBTranspose || opB != ACL_SPARSE_OP_TRANSPOSE)) {
+    if (opB != ACL_SPARSE_OP_NON_TRANSPOSE &&
+        (!allowOpBTranspose || opB != ACL_SPARSE_OP_TRANSPOSE)) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     if (matA->format != ACL_SPARSE_FORMAT_CSR) {
@@ -329,17 +493,17 @@ inline aclsparseStatus_t AclsparseValidateSpmmCommon(const aclsparseSpMatDescr* 
 // 不保存 COO 原始输入；COO 数组在 aclsparseCubeSpmmPreprocess 调用时直接传入。
 struct aclsparseCubeSpmmMatDescr {
     // 记录当前与该 Cube-BCSR 描述符绑定的 workspace buffer，用于多次 SpMM 复用。
-    const void* activeBuffer = nullptr;
+    const void *activeBuffer = nullptr;
     int64_t rows = 0;
     int64_t cols = 0;
     int64_t nnz = 0;
     int64_t blockM = 16;
     int64_t blockK = 16;
     int32_t numCores = 0;
-    void* rwPtr = nullptr;    // device, int64, 预处理输出
-    void* colRef = nullptr;   // device, int32, 预处理输出
-    void* vals = nullptr;     // device, float16, 预处理输出
-    void* coreInfo = nullptr; // device, int32, 预处理输出
+    void *rwPtr = nullptr;     // device, int64, 预处理输出
+    void *colRef = nullptr;    // device, int32, 预处理输出
+    void *vals = nullptr;      // device, float16, 预处理输出
+    void *coreInfo = nullptr;  // device, int32, 预处理输出
     aclsparseIndexBase_t baseType{};
     aclsparseIndexType_t ptrType{};
     aclsparseIndexType_t IdxType{};
@@ -367,13 +531,13 @@ struct aclsparseSpMVOpDescr {
     aclsparseIndexType_t colIndType{ACL_SPARSE_INDEX_32I};
     aclDataType valueType{ACL_FLOAT};
     // CSR device pointers（不持有所有权）
-    void* csrRowOffsets = nullptr;
-    void* csrColInd = nullptr;
-    void* csrValues = nullptr;
+    void *csrRowOffsets = nullptr;
+    void *csrColInd = nullptr;
+    void *csrValues = nullptr;
     // 算法
     aclsparseSpMVOpAlg_t alg{ACL_SPARSE_SPMVOP_ALG_DEFAULT};
     // ALG2 预处理关联的 user-provided buffer（用于 reorder/bin_edge）
-    void* userBuffer = nullptr;
+    void *userBuffer = nullptr;
     // ALG2: preprocess kernel 使用的 block 数（execute 时复用，避免重新计算导致不一致）
     // ALG1/DEFAULT: 未使用（execute 时独立计算 useBlocks）
     uint32_t alg2NumBlocks = 0;
@@ -386,21 +550,21 @@ struct aclsparseSpMVOpDescr {
 // ALG1 允许仅更新 csrValues 而不重建 descr/plan。
 struct aclsparseSpMMOpDescr {
     aclsparseFormat_t format{ACL_SPARSE_FORMAT_CSR};
-    uint64_t m = 0; // CSR 行数（固定，createDescr 绑定）
-    uint64_t k = 0; // CSR 列数 = 收缩维度（固定，用于 execute 维度校验）
+    uint64_t m = 0;              // CSR 行数（固定，createDescr 绑定）
+    uint64_t k = 0;              // CSR 列数 = 收缩维度（固定，用于 execute 维度校验）
     uint64_t nnz = 0;
-    aclsparseIndexBase_t indexBase{ACL_SPARSE_INDEX_BASE_ZERO}; // ZERO 或 ONE
-    aclsparseIndexType_t rowOffsetType{ACL_SPARSE_INDEX_32I};   // I32 或 I64（ptrType）
-    aclDataType valueType{ACL_FLOAT};                           // FP32 或 FP16（A/B/C 一致）
-    aclsparseOperation_t opB{ACL_SPARSE_OP_NON_TRANSPOSE};      // createDescr 绑定，plan 生命周期固定
+    aclsparseIndexBase_t indexBase{ACL_SPARSE_INDEX_BASE_ZERO};  // ZERO 或 ONE
+    aclsparseIndexType_t rowOffsetType{ACL_SPARSE_INDEX_32I};     // I32 或 I64（ptrType）
+    aclDataType valueType{ACL_FLOAT};  // FP32 或 FP16（A/B/C 一致）
+    aclsparseOperation_t opB{ACL_SPARSE_OP_NON_TRANSPOSE};  // createDescr 绑定，plan 生命周期固定
     // CSR device pointers（weak reference，不持有所有权）
-    void* csrRowOffsets = nullptr; // int32_t* 或 int64_t*（由 rowOffsetType 决定）
-    void* csrColInd = nullptr;     // int32_t*（IdxType 固定 I32）
-    void* csrValues = nullptr;     // float* 或 __fp16*
+    void *csrRowOffsets = nullptr;  // int32_t* 或 int64_t*（由 rowOffsetType 决定）
+    void *csrColInd = nullptr;      // int32_t*（IdxType 固定 I32）
+    void *csrValues = nullptr;      // float* 或 __fp16*
     // 算法
     aclsparseSpMMOpAlg_t alg{ACL_SPARSE_SPMMOP_ALG_DEFAULT};
     // ALG2 预处理关联的 user-provided buffer（用于 reorder/bin_edge/scratch/tmpScratch）
-    void* userBuffer = nullptr;
+    void *userBuffer = nullptr;
     // ALG2: preprocess kernel 使用的 block 数（execute 时复用，避免重新计算不一致）
     // ALG1/DEFAULT: 未使用（execute 时独立计算 useBlocks）
     uint32_t alg2NumBlocks = 0;

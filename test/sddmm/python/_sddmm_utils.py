@@ -11,10 +11,22 @@
 """Shared golden comparison and native BSR invocation for SDDMM tests."""
 
 import math
+import unittest
 from dataclasses import dataclass
 
 import torch
 from cann_ops_sparse.ops.sparse.sddmm import ensure_sddmm_loaded
+
+
+def require_arch22():
+    """Select the A2/A3 suite before loading its architecture-specific wrapper."""
+    import torch_npu
+
+    if not torch.npu.is_available():
+        raise unittest.SkipTest("an available NPU is required")
+    torch.npu.set_device(0)
+    if torch_npu.npu.get_device_name().startswith("Ascend950"):
+        raise unittest.SkipTest("A2/A3 native-wrapper tests require arch22")
 
 
 def assert_accuracy(self, actual, expected):
