@@ -83,10 +83,10 @@ Test Summary:
 
 ### 1. 修改 Kernel
 
-打开 `sparse/spmv/arch22/kernels/spmv_kernel.h`，在 `Compute` 函数的 float 路径中，将 `alpha` 缩放临时改为 2 倍（**仅用于学习，勿合入**）：
+打开 `sparse/spmv/arch22/kernels/spmv_kernel.h`，在非转置路径的 `SpmvKernel<CompT, ValT, OutT>::Init` 中，找到 `this->alpha = alpha;`，临时改为（**仅用于学习，勿合入**）：
 
 ```cpp
-AscendC::Muls(floatTmpBuffer, floatTmpBuffer, this->alpha * 2.0f, 1);
+this->alpha = alpha * 2;
 ```
 
 ### 2. 编译与验证
@@ -114,44 +114,23 @@ bash build.sh --soc=ascend910b --ops=spmv --run
 
   该接口支持打印Scalar类型数据，如整数、字符型、布尔型等，详细介绍请参见[《Ascend C API》](https://hiascend.com/document/redirect/CannCommunityAscendCApi)中“算子调测API > printf”。
 
-  在 `Init` 中打印当前核负责的行范围与 tile 大小，便于确认多核切分是否正确：
+  在 `SpmvKernel<CompT, ValT, OutT>::Init` 调用 `SpmvSplitBlockRange` 后，打印当前核负责的行范围：
 
   ```cpp
-  __aicore__ inline void Init(
-      GM_ADDR csrRowPtr, GM_ADDR csrColInd, GM_ADDR csrVal, GM_ADDR xVec, GM_ADDR yVec,
-      uint32_t totalRowsNum, uint32_t totalColsNum,
-      CompT alpha, CompT beta) {
-      // ... 行切分与 GlobalBuffer 绑定 ...
-
-      AscendC::PRINTF("blockIdx=%u startRow=%u blockRowNum=%u tileLength=%u nnzRange=[%u,%u)\n",
-                      AscendC::GetBlockIdx(), this->startRow, this->blockRowNum,
-                      this->tileLength, this->startValIdx, this->endValIdx);
-
-      pipe.InitBuffer(inQueueColIdx, BUFFER_NUM, this->tileLength * sizeof(int32_t));
-      // ...
-  }
+  SpmvSplitBlockRange(totalRowsNum, blockNum, this->blockRowNum, this->startRow);
+  AscendC::PRINTF("blockIdx=%u startRow=%u blockRowNum=%u\n",
+                  AscendC::GetBlockIdx(), this->startRow, this->blockRowNum);
   ```
 
 * **DumpTensor**
 
   该接口支持Dump指定Tensor的内容，同时支持打印自定义附加信息，比如当前行号等，详细介绍请参见[《Ascend C API》](https://hiascend.com/document/redirect/CannCommunityAscendCApi)中“算子调测API > DumpTensor”。
 
-  在 `Compute` 中，`xLocal` 与 `valsLocal` 逐元素相乘后，Dump 局部向量检查中间结果：
+  在 `SpmvKernel<CompT, ValT, OutT>::FinalizeGroup` 中获取 `bufAcc` 后，Dump 当前行组的累加结果：
 
   ```cpp
-  __aicore__ inline void Compute(int32_t currentRow, int32_t validNum) {
-      // ... xLocal 已与 valsLocal 完成 Mul ...
-
-      AscendC::Mul(xLocal, xLocal, valsLocal, validNum);
-      AscendC::PipeBarrier<PIPE_V>();
-
-      // 打印当前行、有效非零元个数及 xLocal 前若干元素
-      AscendC::PRINTF("Compute row=%d validNum=%d\n", currentRow, validNum);
-      AscendC::DumpTensor(xLocal, 0, validNum);
-
-      sharedTmpBuffer = workQueueReduce.AllocTensor<float>();
-      // ...
-  }
+  AscendC::LocalTensor<CompT> acc = bufAcc.Get<CompT>();
+  AscendC::DumpTensor(acc, 0, groupCount);
   ```
 
 ### 2. 性能采集
