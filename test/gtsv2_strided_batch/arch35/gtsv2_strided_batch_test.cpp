@@ -149,17 +149,14 @@ static bool VerifyPrecisionPerBatch(const Sgtsv2StridedBatchNpuResult& r,
                                     const std::vector<float>& xGolden,
                                     const Gtsv2StridedBatchTestParam& p)
 {
-    VerifyConfig cfg;
-    cfg.SetMode(PrecisionMode::MERE_MARE)
-       .SetMERE(p.mere_threshold)
-       .SetMARE(p.mare_multiplier);
-
     bool allPass = true;
     for (int b = 0; b < p.batchCount; b++) {
         int64_t base = static_cast<int64_t>(b) * p.batchStride;
         std::vector<float> xNpuBatch(r.x.begin() + base, r.x.begin() + base + p.m);
         std::vector<float> xGoldenBatch(xGolden.begin() + base, xGolden.begin() + base + p.m);
         std::string batchCaseId = p.case_name + "_b" + std::to_string(b);
+        VerifyConfig cfg;
+        applyMixedTolerance(cfg, ACL_FLOAT, xGoldenBatch.data(), xGoldenBatch.size());
         if (!Verifier::verifyVector(xNpuBatch, xGoldenBatch, cfg, batchCaseId)) {
             allPass = false;
         }
