@@ -1,0 +1,17 @@
+case_name,rows,cols,nnz,batch_count,batch_stride,dtype,idx_base,seed,expect_result
+# L1: CooSetStridedBatch -> SpMatGetStridedBatch 闭环（含 stride=0 广播（含 nnz=0+stride=0 空矩阵广播）、
+# stride==nnz 紧凑、stride>nnz 带间隔、batchCount=1/65535 边界等形态）
+# 失败/异常路径（null 描述符、非 COO 格式、batchCount<=0、batchStride 非法、覆盖写等）
+# 在 coo_set_strided_batch_test.cpp 的 CooSetStridedBatchExceptionTest 中以非 CSV 方式覆盖
+S_broadcast_fp32_b3,128,128,1024,3,0,float32,0,1,SUCCESS
+S_broadcast_fp16_b16,64,64,256,16,0,float16,0,2,SUCCESS
+M_tight_b2_stride_eq_nnz,512,256,2048,2,2048,float32,0,3,SUCCESS
+M_tight_b8,256,256,1024,8,1024,float16,0,4,SUCCESS
+M_padded_2x_b4,320,640,5120,4,10240,float32,0,5,SUCCESS
+S_padded_gap_b3,100,100,500,3,700,float32,0,6,SUCCESS
+S_broadcast_unaligned_idx1,128,128,999,2,0,float32,1,7,SUCCESS
+S_b1_stride_eq_nnz,2,2,2,1,2,float32,0,8,SUCCESS
+S_empty_nnz0_broadcast,64,64,0,4,0,float32,0,9,SUCCESS
+S_empty_nnz0_stride,64,64,0,2,16,float32,0,10,SUCCESS
+M_fp16_idx1_padded,384,256,3072,2,4096,float16,1,11,SUCCESS
+S_batchcount_65535,2,2,2,65535,2,float32,0,13,SUCCESS

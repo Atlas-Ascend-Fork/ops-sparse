@@ -1,0 +1,20 @@
+case_name,format,rows,cols,nnz,pre_set,batch_count,batch_stride,dtype,idx_base,seed,expect_result
+# L1: SpMatGetStridedBatch 格式无关读回（默认值=1 + 配套算子 Set 后读回写入值）
+# coo/csr/csc 三格式默认值；coo 经 aclsparseCooSetStridedBatch 写入后读回
+#（batch_stride=0 为广播，正值须 >= nnz）
+# SELL / BLOCKED_ELL / const 描述符与 null 异常路径在 spmat_get_strided_batch_test.cpp
+# 的 SpMatGetStridedBatchExceptionTest 中以非 CSV 方式覆盖
+# pre_set=0 的行 batch_stride 列为占位值（不传入 API）
+S_coo_default_fp32,coo,128,128,1024,0,1,0,float32,0,1,SUCCESS
+S_coo_default_fp16_idx1,coo,64,64,256,0,1,0,float16,1,2,SUCCESS
+M_csr_default_fp32,csr,512,256,2048,0,1,0,float32,0,3,SUCCESS
+M_csc_default_fp32,csc,256,512,2048,0,1,0,float32,0,4,SUCCESS
+S_coo_set_b3_broadcast,coo,128,128,1024,1,3,0,float32,0,5,SUCCESS
+M_coo_set_b2_tight,coo,512,256,2048,1,2,2048,float32,0,6,SUCCESS
+S_coo_set_b16_broadcast,coo,64,64,256,1,16,0,float16,0,7,SUCCESS
+M_coo_set_b8_padded,coo,256,256,1024,1,8,2048,float32,0,8,SUCCESS
+L_csr_wide_default,csr,1024,128,4096,0,1,0,float32,0,9,SUCCESS
+L_csc_tall_default,csc,128,1024,4096,0,1,0,float16,0,10,SUCCESS
+S_coo_set_b2_min,coo,2,2,2,1,2,2,float32,0,11,SUCCESS
+M_coo_set_b4_idx1_padded,coo,384,256,3072,1,4,4096,float16,1,12,SUCCESS
+L_coo_set_b2_huge_stride_gt_int32,coo,2,2,2,1,2,3000000000,float32,0,13,SUCCESS

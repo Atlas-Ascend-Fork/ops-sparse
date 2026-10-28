@@ -38,6 +38,12 @@ inline int parseInt(const csv_map& row, const std::string& key) {
     return std::atoi(it->second.c_str());
 }
 
+inline int64_t parseInt64(const csv_map& row, const std::string& key) {
+    auto it = row.find(key);
+    if (it == row.end()) return 0;
+    return static_cast<int64_t>(std::strtoll(it->second.c_str(), nullptr, 10));
+}
+
 inline double parseDouble(const csv_map& row, const std::string& key) {
     auto it = row.find(key);
     if (it == row.end()) return 0.0;

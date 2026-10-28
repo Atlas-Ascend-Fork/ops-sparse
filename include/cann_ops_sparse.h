@@ -638,6 +638,21 @@ aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
     int64_t *rows, int64_t *cols, int64_t *nnz);
 
 /**
+ * @brief 读回稀疏矩阵描述符的 batch 数（对标 cuSPARSE cusparseSpMatGetStridedBatch）。
+ *
+ * 适用于任意格式（COO/CSR/CSC 等）的稀疏矩阵描述符。新建描述符未调用过
+ * SetStridedBatch 时 batchCount 为 1（未 batch 化）。
+ *
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符。
+ * @param batchCount OUT, HOST, batch 数（不可为 nullptr）。
+ * @return aclsparseStatus_t 成功返回 ACL_SPARSE_STATUS_SUCCESS；
+ *         spMatDescr 为 nullptr 或签名非法、batchCount 为 nullptr 返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
+aclsparseStatus_t aclsparseSpMatGetStridedBatch(aclsparseConstSpMatDescr_t spMatDescr,
+    int *batchCount);
+
+/**
  * @brief 获取稀疏矩阵向量乘法（SpMV）所需的缓冲区大小
  *
  * @param handle IN, HOST, aclsparse 句柄
@@ -2199,6 +2214,32 @@ aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, in
                                        int64_t* nnz, const void** cooRowInd, const void** cooColInd,
                                        const void** cooValues, aclsparseIndexType_t* cooIdxType,
                                        aclsparseIndexBase_t* idxBase, aclDataType* valueType);
+
+/**
+ * @brief 设置 COO 稀疏矩阵描述符的 batch 数与 batch 步长
+ *        （对标 cuSPARSE cusparseCooSetStridedBatch）。
+ *
+ * 将 batchCount 与 batchStride 写入 COO 描述符，使其可表达 batch 化稀疏矩阵。
+ * batchStride 为相邻两个 batch 的 cooRowInd/cooColInd/cooValues 起始地址间的
+ * 元素偏移；batchStride = 0 表示广播——所有 batch 共享同一组 row/col/values
+ * 数组（对齐 cuSPARSE 官方样例与本仓 aclsparseBsrSetStridedBatch 的 0=广播
+ * 约定）。纯 Host 侧描述符操作，不启动 NPU kernel。
+ *
+ * @param spMatDescr IN/OUT, HOST, COO 稀疏矩阵描述符（须由 aclsparseCreateCoo 创建，
+ *                   其 batchCount / batchStride 字段被写入）。
+ * @param batchCount IN, HOST, batch 数，范围为 1..65535。
+ * @param batchStride IN, HOST, 相邻 batch 间元素偏移；合法取值为 0（广播）或 >= nnz，
+ *                    负值非法。
+ * @return aclsparseStatus_t 成功返回 ACL_SPARSE_STATUS_SUCCESS；
+ *         spMatDescr 为 nullptr 或签名非法、batchCount 超出 [1, 65535]、
+ *         batchStride 非法（负值或 0 < batchStride < nnz）
+ *         或地址范围 (batchCount-1)*batchStride+nnz 溢出 int64 返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE；
+ *         描述符格式非 COO 返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
+ * @note batch 元数据实际变化时失效描述符既有预处理缓存（sddmm 等）。
+ */
+aclsparseStatus_t aclsparseCooSetStridedBatch(aclsparseSpMatDescr_t spMatDescr,
+    int batchCount, int64_t batchStride);
 
 aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
                                            int64_t sliceNnz, int64_t numSlices, void* sellSlicePtr, void* sellColInd,

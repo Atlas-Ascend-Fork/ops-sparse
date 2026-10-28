@@ -39,11 +39,13 @@
 | [aclsparseCreateConstCoo](#aclsparsecreateconstcoo) | 创建只读(const)COO格式稀疏矩阵 |
 | [aclsparseCooGet](#aclsparsecooget) | 获取COO稀疏矩阵描述符的全部字段 |
 | [aclsparseConstCooGet](#aclsparseconstcooget) | 获取只读(const)COO稀疏矩阵描述符的全部字段 |
+| [aclsparseCooSetStridedBatch](#aclsparsecoosetstridedbatch) | 设置COO描述符的batch数与batch步长 |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
 | [aclsparseSpMatGetFormat](#aclsparsespmatgetformat) | 获取稀疏矩阵的存储格式 |
 | [aclsparseSpMatGetValues](#aclsparsespmatgetvalues) | 获取稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatSetValues](#aclsparsespmatsetvalues) | 设置稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatGetSize](#aclsparsespmatgetsize) | 获取稀疏矩阵的行数、列数和非零元素个数 |
+| [aclsparseSpMatGetStridedBatch](#aclsparsespmatgetstridedbatch) | 获取稀疏矩阵描述符的batch数 |
 | [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小 |
 | [aclsparseSpMVPreprocess](#aclsparsespmvpreprocess) | SpMV预处理（**暂未支持**） |
 | [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
@@ -885,6 +887,35 @@ aclsparseStatus_t aclsparseConstCooGet(
 
 ---
 
+### aclsparseCooSetStridedBatch
+
+```c
+aclsparseStatus_t aclsparseCooSetStridedBatch(
+    aclsparseSpMatDescr_t spMatDescr,
+    int batchCount,
+    int64_t batchStride
+);
+```
+
+**功能**：设置 COO 稀疏矩阵描述符的 batch 数与 batch 步长（对标 cuSPARSE `cusparseCooSetStridedBatch`），使单个 COO 描述符可表达 batch 化稀疏矩阵。`batchStride` 为相邻两个 batch 的 `cooRowInd` / `cooColInd` / `cooValues` 起始地址间的**元素偏移**（非字节偏移）；`batchStride = 0` 表示广播——所有 batch 共享同一组 row/col/values 数组（同一稀疏模式广播到全部 batch，数组长度仍为 `nnz`，对齐 cuSPARSE 官方样例与本仓 BSR 的 0=广播约定）；其余合法取值必须满足 `batchStride >= nnz`，即用户数组按 `[batchStride * batchCount]` 元素布局，第 `i` 个 batch 的数组起始偏移为 `batchStride * i`。纯 host 描述符操作，不启动 NPU kernel；可对同一描述符多次调用，后值覆盖前值。
+
+**参数说明**：
+
+- `spMatDescr`（IN/OUT）：HOST，COO 稀疏矩阵描述符（由 `aclsparseCreateCoo` 创建，batchCount / batchStride 字段被写入）。
+- `batchCount`（IN）：HOST，batch 数，范围为 `1..65535`。
+- `batchStride`（IN）：HOST，相邻 batch 间元素偏移；合法取值为 `0`（广播）或 `>= nnz`，负值非法；正值时地址范围 `(batchCount-1)*batchStride+nnz` 不得溢出 int64。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法、`batchCount` 超出 `[1, 65535]`、`batchStride` 非法（负值或 `0 < batchStride < nnz`）或地址范围溢出 int64
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 COO 格式
+- 其他值：失败
+
+**说明**：batch 元数据实际变化时失效描述符既有预处理缓存（sddmm 等）。
+
+---
+
 ### aclsparseDestroySpMat
 
 ```c
@@ -997,6 +1028,30 @@ aclsparseStatus_t aclsparseSpMatGetSize(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+
+---
+
+### aclsparseSpMatGetStridedBatch
+
+```c
+aclsparseStatus_t aclsparseSpMatGetStridedBatch(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    int *batchCount
+);
+```
+
+**功能**：获取稀疏矩阵描述符的 batch 数（对标 cuSPARSE `cusparseSpMatGetStridedBatch`）。适用于任意格式（COO/CSR/CSC 等）的稀疏矩阵描述符；接受 const 描述符，非 const 描述符同样支持。未调用过 `aclsparseCooSetStridedBatch` 的新建描述符返回 `1`（未 batch 化）。纯 host 描述符操作，不启动 NPU kernel。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `batchCount`（OUT）：HOST，batch 数。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法（错型/损坏句柄）、`batchCount` 为空指针
+- 其他值：失败
 
 ---
 
