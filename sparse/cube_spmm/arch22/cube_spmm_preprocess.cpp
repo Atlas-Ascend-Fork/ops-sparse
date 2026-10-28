@@ -64,7 +64,8 @@ bool AllocDeviceAndCopy(void **out, const void *hostData, size_t bytes)
     if (out == nullptr) {
         return false;
     }
-    aclError ret = aclrtMalloc(out, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+    const size_t allocationBytes = std::max<size_t>(bytes, 32);
+    aclError ret = aclrtMalloc(out, allocationBytes, ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         *out = nullptr;
         return false;
@@ -109,6 +110,17 @@ struct DeviceBuffersGuard {
         vals = nullptr;
         coreInfo = nullptr;
     }
+
+    void CommitTo(aclsparseCubeSpmmMatDescr_t matA, bool needsOutputPreclear)
+    {
+        FreeAll(matA->rwPtr, matA->colRef, matA->vals, matA->coreInfo);
+        matA->rwPtr = rwPtr;
+        matA->colRef = colRef;
+        matA->vals = vals;
+        matA->coreInfo = coreInfo;
+        matA->needsSafeOutputInit = needsOutputPreclear;
+        Release();
+    }
 };
 
 }  // namespace
@@ -118,6 +130,9 @@ static aclsparseStatus_t CopyCooFromDeviceToHost(
     const void *cooRowsDev, const void *cooColsDev, const void *cooValsDev,
     std::vector<int32_t> &cooRows, std::vector<int32_t> &cooCols, std::vector<uint16_t> &cooVals)
 {
+    if (nnz == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
     aclError ret = aclrtMemcpy(cooRows.data(), cooRows.size() * sizeof(int32_t),
                                cooRowsDev, cooRows.size() * sizeof(int32_t),
                                ACL_MEMCPY_DEVICE_TO_HOST);
@@ -199,6 +214,12 @@ static aclsparseStatus_t BuildBcsrFromCsr(
     std::vector<int32_t> &tcColRef,
     std::vector<uint16_t> &blockVals)
 {
+    if (safeBlockM <= 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (safeBlockK <= 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     int64_t blockRows = CeilDiv(M, safeBlockM);
     int64_t blockSize = safeBlockM * safeBlockK;
 
@@ -260,6 +281,10 @@ static void BuildCoreInfoPartition(
     const std::vector<int64_t> &rwPartition,
     std::vector<int32_t> &coreInfo)
 {
+    if (safeNumCores <= 0) {
+        coreInfo.clear();
+        return;
+    }
     coreInfo.assign(static_cast<size_t>(safeNumCores) * 4, 0);
     if (numBlocks <= 0) {
         for (int32_t c = 0; c < safeNumCores; ++c) {
@@ -353,12 +378,32 @@ static aclsparseStatus_t AllocateAndCopyBcsrOutputs(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t CubeSpmmBuildBcsrOnDevice(
+static bool NeedsOutputPreclear(
+    const std::vector<int64_t> &rwPartition, const std::vector<int32_t> &coreInfo)
+{
+    // The original partitioner covers leading/internal empty windows, but not
+    // an empty tail after the last nonempty window (including an entirely empty A).
+    if (rwPartition.back() == rwPartition[rwPartition.size() - 2]) {
+        return true;
+    }
+    for (size_t core = 0; core < coreInfo.size(); core += 4) {
+        const int32_t begin = coreInfo[core];
+        const int32_t end = coreInfo[core + 1];
+        if (begin >= end) {
+            continue;
+        }
+        const int64_t lastBlocks = rwPartition[end] - rwPartition[end - 1];
+        if (coreInfo[core + 2] > 0 || coreInfo[core + 3] < lastBlocks) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static aclsparseStatus_t ValidateBcsrInputs(
     int64_t M, int64_t K, int64_t nnz,
     const void *cooRowsDev, const void *cooColsDev, const void *cooValsDev,
-    int64_t blockM, int64_t blockK, int32_t numCores,
-    void **rwPtrOut, void **colRefOut, void **valsOut, void **coreInfoOut,
-    int64_t *rwPtrElems, int64_t *colRefElems, int64_t *valsElems, int64_t *coreInfoElems)
+    int64_t blockM, int64_t blockK, int32_t numCores)
 {
     if (M <= 0 || K <= 0 || nnz < 0 || numCores <= 0 ||
         blockM <= 0 || blockK <= 0) {
@@ -375,8 +420,25 @@ aclsparseStatus_t CubeSpmmBuildBcsrOnDevice(
     if (cooRowsDev == nullptr || cooColsDev == nullptr || cooValsDev == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t CubeSpmmBuildBcsrOnDevice(
+    int64_t M, int64_t K, int64_t nnz,
+    const void *cooRowsDev, const void *cooColsDev, const void *cooValsDev,
+    int64_t blockM, int64_t blockK, int32_t numCores,
+    void **rwPtrOut, void **colRefOut, void **valsOut, void **coreInfoOut,
+    int64_t *rwPtrElems, int64_t *colRefElems, int64_t *valsElems, int64_t *coreInfoElems,
+    bool *needsOutputPreclearOut)
+{
+    aclsparseStatus_t st = ValidateBcsrInputs(
+        M, K, nnz, cooRowsDev, cooColsDev, cooValsDev, blockM, blockK, numCores);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
     if (rwPtrOut == nullptr || colRefOut == nullptr || valsOut == nullptr || coreInfoOut == nullptr ||
-        rwPtrElems == nullptr || colRefElems == nullptr || valsElems == nullptr || coreInfoElems == nullptr) {
+        rwPtrElems == nullptr || colRefElems == nullptr || valsElems == nullptr || coreInfoElems == nullptr ||
+        needsOutputPreclearOut == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
 
@@ -389,7 +451,7 @@ aclsparseStatus_t CubeSpmmBuildBcsrOnDevice(
     std::vector<int32_t> cooRows(static_cast<size_t>(nnz));
     std::vector<int32_t> cooCols(static_cast<size_t>(nnz));
     std::vector<uint16_t> cooVals(static_cast<size_t>(nnz));
-    aclsparseStatus_t st = CopyCooFromDeviceToHost(
+    st = CopyCooFromDeviceToHost(
         nnz, cooRowsDev, cooColsDev, cooValsDev, cooRows, cooCols, cooVals);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
@@ -416,6 +478,7 @@ aclsparseStatus_t CubeSpmmBuildBcsrOnDevice(
     std::vector<int32_t> coreInfo;
     BuildCoreInfoPartition(
         blockRows, numBlocks, safeNumCores, rwPartition, coreInfo);
+    *needsOutputPreclearOut = NeedsOutputPreclear(rwPartition, coreInfo);
 
     return AllocateAndCopyBcsrOutputs(
         rwPartition, tcColRef, blockVals, coreInfo,
@@ -457,34 +520,18 @@ aclsparseStatus_t aclsparseCubeSpmmPreprocess(
     int64_t valsElems = 0;
     int64_t coreInfoElems = 0;
     DeviceBuffersGuard newBuffers;
+    bool needsOutputPreclear = false;
     aclsparseStatus_t st = CubeSpmmBuildBcsrOnDevice(
         matA->rows, matA->cols, matA->nnz,
         cooRows, cooCols, cooVals,
         matA->blockM, matA->blockK, matA->numCores,
         &newBuffers.rwPtr, &newBuffers.colRef, &newBuffers.vals, &newBuffers.coreInfo,
-        &rwPtrElems, &colRefElems, &valsElems, &coreInfoElems);
+        &rwPtrElems, &colRefElems, &valsElems, &coreInfoElems, &needsOutputPreclear);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
 
-    if (matA->rwPtr != nullptr) {
-        aclrtFree(matA->rwPtr);
-    }
-    if (matA->colRef != nullptr) {
-        aclrtFree(matA->colRef);
-    }
-    if (matA->vals != nullptr) {
-        aclrtFree(matA->vals);
-    }
-    if (matA->coreInfo != nullptr) {
-        aclrtFree(matA->coreInfo);
-    }
-
-    matA->rwPtr = newBuffers.rwPtr;
-    matA->colRef = newBuffers.colRef;
-    matA->vals = newBuffers.vals;
-    matA->coreInfo = newBuffers.coreInfo;
-    newBuffers.Release();
+    newBuffers.CommitTo(matA, needsOutputPreclear);
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }

@@ -17,7 +17,7 @@ using namespace AscendC;
 
 namespace cube_spmm {
 
-template <typename aType, typename bType, typename cType, typename idxType>
+template <typename aType, typename bType, typename cType, typename idxType, bool outputPrecleared = false>
 class CubeSpmmKernel {
     static constexpr uint32_t CUBE_BLOCK_K = static_cast<uint32_t>(kTileK);
 
@@ -83,17 +83,19 @@ public:
         // stale host data is not picked up by atomic-add paths at row-window
         // boundaries. The zero buffer is chunk-sized; C is zeroed one N-chunk at
         // a time before the main compute loop begins.
-        pipe.InitBuffer(zeroBuf, static_cast<uint32_t>(CUBE_BLOCK_M * nProcTile * sizeof(cType)));
-        AscendC::LocalTensor<cType> cZero = zeroBuf.Get<cType>();
-        FillLocalBufferWithZero(cZero, static_cast<int64_t>(CUBE_BLOCK_M) * nProcTile);
+        if constexpr (!outputPrecleared) {
+            pipe.InitBuffer(zeroBuf, static_cast<uint32_t>(CUBE_BLOCK_M * nProcTile * sizeof(cType)));
+            AscendC::LocalTensor<cType> cZero = zeroBuf.Get<cType>();
+            FillLocalBufferWithZero(cZero, static_cast<int64_t>(CUBE_BLOCK_M) * nProcTile);
 
-        for (int64_t nOffset = 0; nOffset < N; nOffset += nProcTile) {
-            int64_t chunkN = (nOffset + nProcTile <= N) ? nProcTile : (N - nOffset);
-            for (int32_t row = 0; row < this->rowWindowNum; row++) {
-                bool isLastGlobalRow = (this->rwStart + row == this->lastRowWindow);
-                uint32_t rowsToWrite = isLastGlobalRow ? static_cast<uint32_t>(this->tailM) : this->CUBE_BLOCK_M;
-                auto cGmRow = this->cGm[static_cast<int64_t>(row) * CUBE_BLOCK_M * cLd + nOffset];
-                CopyZeroRows(cGmRow, cZero, rowsToWrite, chunkN, cLd);
+            for (int64_t nOffset = 0; nOffset < N; nOffset += nProcTile) {
+                int64_t chunkN = (nOffset + nProcTile <= N) ? nProcTile : (N - nOffset);
+                for (int32_t row = 0; row < this->rowWindowNum; row++) {
+                    bool isLastGlobalRow = (this->rwStart + row == this->lastRowWindow);
+                    uint32_t rowsToWrite = isLastGlobalRow ? static_cast<uint32_t>(this->tailM) : this->CUBE_BLOCK_M;
+                    auto cGmRow = this->cGm[static_cast<int64_t>(row) * CUBE_BLOCK_M * cLd + nOffset];
+                    CopyZeroRows(cGmRow, cZero, rowsToWrite, chunkN, cLd);
+                }
             }
         }
 
@@ -210,33 +212,22 @@ private:
         }
     }
 
-    // Fill/InitConstValueParams repeatTimes is uint8 on the hardware, so a single
-    // Fill call can cover at most 255 elements when blockNum == 1. Loop until the
-    // whole local buffer is zeroed. Each chunk is aligned to 32B so that the
-    // vector engine can access it safely; for float this is 8 elements, for half
-    // it is 16 elements.
+    // L1 Fill counts 32-byte blocks, not elements. Order its MTE2 writes
+    // before the subsequent L1-to-GM copies on MTE3.
     __aicore__ inline void FillLocalBufferWithZero(
         AscendC::LocalTensor<cType> buf,
         int64_t totalElements)
     {
-        constexpr int32_t kBytesPerAlign = 32;
-        constexpr int32_t kAlignElems = kBytesPerAlign / static_cast<int32_t>(sizeof(cType));
-        constexpr int32_t kMaxRepeatPerFill = 255;
-        constexpr int32_t kChunkElems = (kMaxRepeatPerFill / kAlignElems) * kAlignElems;
-
         AscendC::InitConstValueParams<cType> params;
-        params.blockNum = 1;
+        params.repeatTimes = 1;
+        params.blockNum = static_cast<uint16_t>(totalElements * sizeof(cType) / 32);
         params.dstGap = 0;
         params.initValue = static_cast<cType>(0);
 
-        int64_t offset = 0;
-        while (totalElements > 0) {
-            int64_t cur = totalElements > kChunkElems ? kChunkElems : totalElements;
-            params.repeatTimes = static_cast<uint16_t>(cur);
-            AscendC::Fill(buf[offset], params);
-            totalElements -= cur;
-            offset += cur;
-        }
+        AscendC::Fill(buf, params);
+        const auto event = static_cast<event_t>(pipe.FetchEventID(HardEvent::MTE2_MTE3));
+        AscendC::SetFlag<HardEvent::MTE2_MTE3>(event);
+        AscendC::WaitFlag<HardEvent::MTE2_MTE3>(event);
     }
 
     __aicore__ inline void CopyInB(int64_t row, int64_t i, int64_t nOffset, int64_t chunkN)
@@ -413,14 +404,32 @@ extern "C" __global__ __aicore__ void cube_spmm_kernel(
     op.Process();
 }
 
+extern "C" __global__ __aicore__ void cube_spmm_precleared_kernel(
+    GM_ADDR rw_ptr, GM_ADDR col_ref, GM_ADDR vals,
+    GM_ADDR b, GM_ADDR core_info, GM_ADDR c,
+    GM_ADDR workspaceGM, const cube_spmm::CubeSpmmTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    cube_spmm::CubeSpmmKernel<half, half, float, int32_t, true> op;
+    op.Init(rw_ptr, col_ref, vals, b, core_info, c, workspaceGM, tiling);
+    op.Process();
+}
+
 extern "C" void cube_spmm_kernel_launch(
     GM_ADDR rw_ptr, GM_ADDR col_ref, GM_ADDR vals,
     GM_ADDR b, GM_ADDR core_info, GM_ADDR c,
     GM_ADDR workspaceGM, const cube_spmm::CubeSpmmTilingData &tiling,
-    uint32_t usedCoreNum, void *stream)
+    uint32_t usedCoreNum, void *stream, bool outputPrecleared)
 {
-    cube_spmm_kernel<<<usedCoreNum, nullptr, stream>>>(
-        rw_ptr, col_ref, vals,
-        b, core_info, c,
-        workspaceGM, tiling);
+    if (outputPrecleared) {
+        cube_spmm_precleared_kernel<<<usedCoreNum, nullptr, stream>>>(
+            rw_ptr, col_ref, vals,
+            b, core_info, c,
+            workspaceGM, tiling);
+    } else {
+        cube_spmm_kernel<<<usedCoreNum, nullptr, stream>>>(
+            rw_ptr, col_ref, vals,
+            b, core_info, c,
+            workspaceGM, tiling);
+    }
 }

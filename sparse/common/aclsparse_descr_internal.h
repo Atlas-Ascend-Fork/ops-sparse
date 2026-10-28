@@ -517,6 +517,8 @@ struct aclsparseCubeSpmmMatDescr {
     aclsparseIndexType_t ptrType{};
     aclsparseIndexType_t IdxType{};
     aclDataType valueType{};
+    // Shared windows or an unowned empty tail require initialization before compute.
+    bool needsSafeOutputInit = false;
 };
 
 // Legacy 矩阵描述符内部结构（Format Conversion / nnz 等 Legacy API 使用）。

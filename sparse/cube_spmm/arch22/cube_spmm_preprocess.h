@@ -28,6 +28,7 @@ aclsparseStatus_t CubeSpmmBuildBcsrOnDevice(
     const void *cooRowsDev, const void *cooColsDev, const void *cooValsDev,
     int64_t blockM, int64_t blockK, int32_t numCores,
     void **rwPtrOut, void **colRefOut, void **valsOut, void **coreInfoOut,
-    int64_t *rwPtrElems, int64_t *colRefElems, int64_t *valsElems, int64_t *coreInfoElems);
+    int64_t *rwPtrElems, int64_t *colRefElems, int64_t *valsElems, int64_t *coreInfoElems,
+    bool *needsOutputPreclearOut);
 
 #endif  // CUBE_SPMM_PREPROCESS_H_

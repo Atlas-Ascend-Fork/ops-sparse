@@ -24,11 +24,14 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "cube_spmm.h"
 
+extern "C" void cube_spmm_zero_launch(
+    GM_ADDR c, uint32_t rows, uint32_t cols, uint32_t ld, uint32_t blocks, void *stream);
+
 extern "C" void cube_spmm_kernel_launch(
     GM_ADDR rw_ptr, GM_ADDR col_ref, GM_ADDR vals,
     GM_ADDR b, GM_ADDR core_info, GM_ADDR c,
     GM_ADDR workspaceGM, const cube_spmm::CubeSpmmTilingData &tiling,
-    uint32_t usedCoreNum, void *stream);
+    uint32_t usedCoreNum, void *stream, bool outputPrecleared);
 
 namespace cube_spmm {
 
@@ -410,6 +413,12 @@ aclsparseStatus_t aclsparseCubeSpmm(
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
 
+    const bool outputPrecleared = matAInner->needsSafeOutputInit || matC->ld % 8 != 0;
+    if (outputPrecleared) {
+        cube_spmm_zero_launch(reinterpret_cast<GM_ADDR>(matC->values),
+                             static_cast<uint32_t>(td.M), static_cast<uint32_t>(td.N),
+                             static_cast<uint32_t>(td.cLd), td.usedCoreNum, stream);
+    }
     cube_spmm_kernel_launch(
         reinterpret_cast<GM_ADDR>(matAInner->rwPtr),
         reinterpret_cast<GM_ADDR>(matAInner->colRef),
@@ -418,7 +427,7 @@ aclsparseStatus_t aclsparseCubeSpmm(
         reinterpret_cast<GM_ADDR>(matAInner->coreInfo),
         reinterpret_cast<GM_ADDR>(matC->values),
         reinterpret_cast<GM_ADDR>(buffer), td,
-        static_cast<uint32_t>(matAInner->numCores), stream);
+        static_cast<uint32_t>(matAInner->numCores), stream, outputPrecleared);
 
     aclError ret = aclrtSynchronizeStream(stream);
     if (ret != ACL_ERROR_NONE) {
