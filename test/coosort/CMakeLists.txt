@@ -25,6 +25,8 @@ endforeach()
 
 if(NOT _test_src)
     message(STATUS "[test/${_op_name}/${_variant}] no test sources for SOC=${SOC_VERSION} (SOC_ARCH_DIRS=${SOC_ARCH_DIRS}), skipping ${_target}")
+    file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+        "${_op_name}|no test sources for SOC=${SOC_VERSION} (arch=${SOC_ARCH_DIRS})\n")
     return()
 endif()
 

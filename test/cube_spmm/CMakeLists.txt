@@ -10,6 +10,8 @@
 
 if(NOT SOC_VERSION_LOWER MATCHES "^ascend910b")
     message(STATUS "[test/cube_spmm] SOC=${SOC_VERSION} not ascend910b*, skipping cube_spmm_test")
+    file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+        "cube_spmm|SOC=${SOC_VERSION} not ascend910b*\n")
     return()
 endif()
 
