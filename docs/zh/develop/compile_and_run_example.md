@@ -3,6 +3,10 @@
 ## 前提说明
 
 - 请确保基础环境已搭建完成，包括 NPU 驱动与固件、CANN 软件包（toolkit + ops）等。环境搭建请参考[环境部署](../install/quick_install.md)。
+- 本文的 `aclsparseSnnz` 示例仅适用于 Ascend 950：该接口当前只有 arch35 实现，Ascend 910B/910_93（arch22）没有对应实现。`build.sh` 支持某个 `--soc` 值不代表该平台实现了所有接口。
+- 在 910B/910C（A3）上可参考[SpMV 仓内测试](../../../test/spmv/README.md)，并在仓库根目录分别指定目标 SOC 运行：
+  - 910B：`bash build.sh --soc=ascend910b --ops=spmv --run`
+  - 910C（A3）：`bash build.sh --soc=ascend910_93 --ops=spmv --run`
 
 ## 步骤一：编译并安装 ops-sparse
 
@@ -57,7 +61,7 @@
 
 ## 步骤二：准备示例代码
 
-本章以开发和运行环境合设场景为例，即代码开发和代码运行在同一台机器上。这里以 **aclsparseSnnz** 接口为例，调用其他计算接口请根据实际情况自行修改 API 调用脚本（\*.cpp）和编译脚本（CMakeLists.txt）。
+本章以开发和运行环境合设场景为例，即代码开发和代码运行在同一台机器上。以下 **aclsparseSnnz** 示例仅适用于 Ascend 950；Ascend 910B/910C（A3）上的 `libops_sparse.so` 不含该接口。调用其他计算接口请根据实际情况自行修改 API 调用脚本（\*.cpp）和编译脚本（CMakeLists.txt）。
 
 1. 新建项目目录。
 
@@ -312,6 +316,8 @@
 ## 步骤三：编译与运行
 
 以下步骤均在步骤二创建的项目目录下执行。
+
+若链接时报 `undefined reference to aclsparseSnnz`，请检查当前芯片是否为 Ascend 950，以及 `OPS_SPARSE_PATH` 是否指向包含该接口实现的 ops-sparse 安装目录；Ascend 910B/910_93 不支持此示例。
 
 1. 新建 build 目录并执行编译。
 
