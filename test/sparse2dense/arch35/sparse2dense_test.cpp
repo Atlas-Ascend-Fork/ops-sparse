@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -149,6 +150,26 @@ static aclsparseStatus_t InvokeMutation(const std::string &mutation,
         size = probe;
         return aclsparseSparseToDense(handle, sparse, dense, alg, nullptr);
     }
+    if (mutation == "nonzero_nnz_values_null") {
+        sparseInner->nnz = 4;
+        sparseInner->values = nullptr;
+        return aclsparseSparseToDense(handle, sparse, dense, alg, nullptr);
+    }
+    if (mutation == "nonzero_nnz_ptrs_null_buffer_size") {
+        sparseInner->nnz = 4;
+        sparseInner->ptrs = nullptr;
+        return aclsparseSparseToDense_bufferSize(handle, sparse, dense, alg, &size);
+    }
+    if (mutation == "nonzero_nnz_idxs_null_buffer_size") {
+        sparseInner->nnz = 4;
+        sparseInner->idxs = nullptr;
+        return aclsparseSparseToDense_bufferSize(handle, sparse, dense, alg, &size);
+    }
+    if (mutation == "nonzero_nnz_values_null_buffer_size") {
+        sparseInner->nnz = 4;
+        sparseInner->values = nullptr;
+        return aclsparseSparseToDense_bufferSize(handle, sparse, dense, alg, &size);
+    }
     return aclsparseSparseToDense_bufferSize(handle, sparse, dense, alg, &size);
 }
 
@@ -278,6 +299,69 @@ TEST_P(Sparse2DenseL2Test, NegativeCase) {
     const auto &p = GetParam();
     const auto actual = RunL2Case(p.mutation, *handle_);
     EXPECT_EQ(actual, p.expected) << p.caseName;
+}
+
+
+using Sparse2DenseUnboundPointerTest = Sparse2DenseAclEnvironment<testing::Test>;
+
+TEST_F(Sparse2DenseUnboundPointerTest, RejectsUnboundPointersInBothStages) {
+    auto dDense = DeviceBuffer::alloc(4 * sizeof(float));
+    const std::array<const char *, 3> formats = {"CSR", "CSC", "COO"};
+
+    for (const char *format : formats) {
+        SpMatManager sparse;
+        if (std::string(format) == "CSR") {
+            sparse = SpMatManager::createCsr(2, 2, 1, nullptr, nullptr, nullptr);
+        } else if (std::string(format) == "CSC") {
+            sparse = SpMatManager::createCsc(2, 2, 1, nullptr, nullptr, nullptr);
+        } else {
+            sparse = SpMatManager::createCoo(2, 2, 1, nullptr, nullptr, nullptr);
+        }
+        auto dense = DnMatManager::create(2, 2, 2, dDense.get(), ACL_FLOAT,
+                                          ACL_SPARSE_ORDER_ROW);
+
+        size_t workspaceSize = 0;
+        EXPECT_EQ(aclsparseSparseToDense_bufferSize(
+                      handle_->get(), sparse.get(), dense.get(),
+                      ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT, &workspaceSize),
+                  ACL_SPARSE_STATUS_INVALID_VALUE)
+            << format;
+        EXPECT_EQ(aclsparseSparseToDense(
+                      handle_->get(), sparse.get(), dense.get(),
+                      ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT, nullptr),
+                  ACL_SPARSE_STATUS_INVALID_VALUE)
+            << format;
+    }
+}
+
+TEST_F(Sparse2DenseUnboundPointerTest, AllowsNullSparsePointersWhenNnzIsZero) {
+    auto dDense = DeviceBuffer::alloc(4 * sizeof(float));
+    const std::array<const char *, 3> formats = {"CSR", "CSC", "COO"};
+
+    for (const char *format : formats) {
+        SpMatManager sparse;
+        if (std::string(format) == "CSR") {
+            sparse = SpMatManager::createCsr(2, 2, 0, nullptr, nullptr, nullptr);
+        } else if (std::string(format) == "CSC") {
+            sparse = SpMatManager::createCsc(2, 2, 0, nullptr, nullptr, nullptr);
+        } else {
+            sparse = SpMatManager::createCoo(2, 2, 0, nullptr, nullptr, nullptr);
+        }
+        auto dense = DnMatManager::create(2, 2, 2, dDense.get(), ACL_FLOAT,
+                                          ACL_SPARSE_ORDER_ROW);
+
+        size_t workspaceSize = 0;
+        EXPECT_EQ(aclsparseSparseToDense_bufferSize(
+                      handle_->get(), sparse.get(), dense.get(),
+                      ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT, &workspaceSize),
+                  ACL_SPARSE_STATUS_SUCCESS)
+            << format;
+        EXPECT_EQ(aclsparseSparseToDense(
+                      handle_->get(), sparse.get(), dense.get(),
+                      ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT, nullptr),
+                  ACL_SPARSE_STATUS_SUCCESS)
+            << format;
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(

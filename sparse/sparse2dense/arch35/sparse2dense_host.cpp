@@ -131,6 +131,25 @@ static aclsparseStatus_t ValidateDenseDescriptorForExecute(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+static aclsparseStatus_t ValidateSparseDataPointers(
+    const aclsparseSpMatDescr *matInner)
+{
+    if (matInner->nnz == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (matInner->ptrs == nullptr) {
+        OP_LOGE(kTag, "sparse row/column indices are null (nnz=%llu > 0)",
+                static_cast<unsigned long long>(matInner->nnz));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matInner->idxs == nullptr || matInner->values == nullptr) {
+        OP_LOGE(kTag, "sparse indices or values are null (nnz=%llu > 0)",
+                static_cast<unsigned long long>(matInner->nnz));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 static aclsparseStatus_t ValidateSparseToDenseCommon(
     aclsparseHandle_t handle, aclsparseConstSpMatDescr_t matA,
     aclsparseDnMatDescr_t matB, bool requireDenseValues)
@@ -145,6 +164,10 @@ static aclsparseStatus_t ValidateSparseToDenseCommon(
     }
     auto *matInner = Sparse2DenseToConstMatInner(matA);
     aclsparseStatus_t st = ValidateSparseDescriptor(matInner);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    st = ValidateSparseDataPointers(matInner);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -274,15 +297,6 @@ static aclsparseStatus_t ValidateAndZeroOutput(const aclsparseSpMatDescr *matInn
         if (zst != ACL_SPARSE_STATUS_SUCCESS) { return zst; }
         OP_LOGD(kTag, "nnz=0, output zeroed, skip kernel launch");
         return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    if (matInner->ptrs == nullptr) {
-        OP_LOGE(kTag, "sparse ptrs is null");
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    if (matInner->idxs == nullptr || matInner->values == nullptr) {
-        OP_LOGE(kTag, "idxs or values is null (nnz=%llu > 0)",
-                static_cast<unsigned long long>(matInner->nnz));
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     // Hot path: kernel SIMT uint64 zero replaces host aclrtMemsetAsync.
     (void)dnInner;
