@@ -27,8 +27,8 @@
 //      SetInt8CDVecEpiAttrs / SetupSearchAlgPlanWs）。
 //   3. 剪枝（PruneInt8CDForSearch）：A-sparse 产出 A_pruned（batch 布局，
 //      mat_a_null 时写入 ws+aPrunedOffset 白盒偏移目标）；B-sparse 剪枝
-//      dB（物理 (n,k)）→ dPruned（(k,n) 行主序输出）。prune 输入/输出
-//      缓冲按 batch 总量放大（描述符携带 batch 属性，单调用处理全 batch）。
+//      dB（描述符 (order, ld) 布局）→ dPruned（(b) 同布局保持输出）。
+//      prune 输入/输出缓冲按 batch 总量放大（描述符携带 batch 属性，单调用处理全 batch）。
 //   4. 指针组装 + def-热身窗 + Search + 后置（复用主链
 //      SearchCallAndPostPass；回读/搜索后再执行按 batch 总量）。
 //
@@ -46,8 +46,9 @@ namespace sparse_test {
 // PruneInt8CDForSearch：Int8CD 链剪枝段。
 //   - A-sparse：A_pruned——独立 dPruned 缓冲（batch 总量）或
 //     ws+aPrunedOffset 白盒偏移目标（mat_a_null 回退路径）。
-//   - B-sparse：剪枝 dB（物理 (n,k)）→ dPruned（(k,n) 行主序输出；
-//     prune 输出恒紧凑 (k,n)，缓冲上界 = max(bPhysSpan, kn)）。
+//   - B-sparse：剪枝 dB（描述符 (order, ld) 布局）→ dPruned（(b) 同布局
+//     保持输出；dPruned 容量按 max(bPhysSpan, kn) 上界分配——描述符物理
+//     矩形 span ≥ 访问跨度的既有保守口径，布局保持下仍然安全）。
 // 描述符携带 numBatches/batchStride，单调用处理全 batch（传 batch0
 // 基址；host 侧切片循环会使末切片基址被算子按 numBatches 二次推进而
 // 越界，禁止切片）；输出与输入共用 batchStride 推进，回读
@@ -57,7 +58,7 @@ template <typename CDT>
 inline bool PruneInt8CDForSearch(const MatmulSearchRunArgs<int8_t, CDT, CDT>& args,
     SparseLtHandleGuard& handle, SparseLtMatmulDescGuard& matmulDesc,
     DeviceBuffer& dA, DeviceBuffer& dB, DeviceBuffer& dPruned, void* wsPtr,
-    size_t mk, size_t kn, size_t bPhysSpan, aclrtStream stream,
+    size_t kn, size_t bPhysSpan, aclrtStream stream,
     MatmulSearchNpuResult<CDT>& result, void*& matAPtr, void*& matBPtr)
 {
     constexpr size_t kInElt = 1;  // int8
@@ -67,14 +68,17 @@ inline bool PruneInt8CDForSearch(const MatmulSearchRunArgs<int8_t, CDT, CDT>& ar
         // NpuDtypeTrait<int8_t>::kAclDtype = ACL_INT8 等价推导；白盒
         // aPrunedOffset / 独立 dPruned 缓冲与 batch 全量语义同源）。
         return PruneASparseForSearch(args, handle, matmulDesc, dA, dPruned,
-            wsPtr, mk, kInElt, stream, result, matAPtr);
+            wsPtr, kInElt, stream, result, matAPtr);
     }
-    // B-sparse：剪枝 dB（物理 (n,k)）→ dPruned（(k,n) 行主序输出）
+    // B-sparse：剪枝 dB（描述符 (order, ld) 布局）→ dPruned（(b) 同布局保持
+    // 输出；RunPruneToTarget 回读解包需 batch 参数——按 batchStride 逐段
+    // 解包为逻辑 batch-strided）
     const size_t pruneSpan = (bPhysSpan > kn) ? bPhysSpan : kn;
     const size_t totalElems = BatchTotalElems(pruneSpan, args.numBatches, args.batchStride);
     dPruned = DeviceBuffer::alloc(totalElems * kInElt);
     if (!RunPruneToTarget(result, handle.get(), matmulDesc.get(), dB,
-            static_cast<uint8_t*>(dPruned.get()), totalElems, kInElt, args.pruneAlg, stream)) {
+            static_cast<uint8_t*>(dPruned.get()), totalElems, kInElt, args.pruneAlg, stream,
+            args.numBatches, args.batchStride)) {
         return false;
     }
     matBPtr = dPruned.get();
@@ -97,7 +101,8 @@ inline bool SetupInt8CDAttrsPlanWs(SparseLtHandleGuard& handle,
             args.biasEnabled, args.biasStride, args.activationType,
             args.reluUpperBound, args.reluThreshold, args.geluScaling,
             args.numBatches, args.batchStride, args.biasVec,
-            setup.vecBufs, setup.epiBufs, result)) {
+            setup.vecBufs, setup.epiBufs, result,
+            args.biasEltSize, args.biasDtype)) {
         return false;
     }
     return SetupSearchAlgPlanWs(args, handle, matmulDesc, result,
@@ -176,7 +181,7 @@ MatmulSearchNpuResult<CDT> RunSearchChainInt8CD(
     void* matAPtr = nullptr;
     void* matBPtr = nullptr;
     if (!PruneInt8CDForSearch<CDT>(args, ctx.handle, *ctx.matmulDesc, ctx.dA, ctx.dB,
-            dPruned, setup.wsPtr, mk, static_cast<size_t>(k) * n, ctx.lay.bPhysSize,
+            dPruned, setup.wsPtr, static_cast<size_t>(k) * n, ctx.lay.bPhysSize,
             stream, result, matAPtr, matBPtr)) {
         return result;
     }

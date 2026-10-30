@@ -175,6 +175,8 @@ aclsparseStatus_t aclsparseLtMatmulPlanDestroy(aclsparseLtMatmulPlan_t* plan)
 
 示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)。
 
+> 示例中 `ACL_SPARSE_COMPUTE_16F` 与 FP16 矩阵组合为合法用法（computeType↔valueType 绑定：16F↔仅 FP16；32F↔FP32/FP16/BF16；32I↔INT8，错配返回 NOT_SUPPORTED，绑定口径详见 [matmul_descriptor/README.md](../matmul_descriptor/README.md)）。本实现 16F 按 FP32 累加执行，精度与 32F 路径一致。
+
 ```cpp
 #include "cann_ops_sparseLt.h"
 #include "acl/acl.h"

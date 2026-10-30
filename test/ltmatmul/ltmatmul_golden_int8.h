@@ -72,14 +72,26 @@ inline void MatmulAlphaBetaInt32(
 {
     MatmulInt32Accumulate(A_pruned, Bf, Df, m, k, n);
     // Apply alpha/beta scaling (only when non-trivial).
+    // B5: with beta==0 and alpha an int32-domain integral value, mirror the
+    // kernel's int32-domain scaling (Muls<int32_t>, exact even for
+    // |sum| > 2^24); otherwise (including non-integral alpha / beta!=0)
+    // keep the float domain (mirroring the kernel's Cast->Muls rounding
+    // path — for |sum| <= 2^24 double and float are bit-identical, zero
+    // regression).
     if (alpha != 1.0f || beta != 0.0f) {
+        const bool int32Domain = (beta == 0.0f) && SpltAlphaIsIntegralInt32Host(alpha);
         for (int32_t i = 0; i < m; ++i) {
             const int8_t* cRow = Cf.data() + static_cast<int64_t>(i) * n;
             int32_t* dRow = Df.data() + static_cast<int64_t>(i) * n;
             for (int32_t j = 0; j < n; ++j) {
-                float scaled = alpha * static_cast<float>(dRow[j])
-                             + beta * static_cast<float>(cRow[j]);
-                dRow[j] = static_cast<int32_t>(std::round(scaled));
+                if (int32Domain) {
+                    dRow[j] = static_cast<int32_t>(
+                        static_cast<int64_t>(alpha) * static_cast<int64_t>(dRow[j]));
+                } else {
+                    float scaled = alpha * static_cast<float>(dRow[j])
+                                 + beta * static_cast<float>(cRow[j]);
+                    dRow[j] = static_cast<int32_t>(std::round(scaled));
+                }
             }
         }
     }
@@ -152,8 +164,22 @@ inline void PruneInt8Matrix(const std::vector<int8_t>& A, std::vector<int8_t>& A
         // and converts back via AlgSetAttrDtypeTrait<int8_t>::fromFp32
         // (round + saturate). Kept int8 values are exact (int8->FP32 is lossless
         // and round of an integer float is itself); zeros stay zero.
-        // alongRow = !isColOrder for NON_TRANSPOSE, matching the STRIP path and
-        // the FP32/FP16 MatmulPruneInputAWithAlg convention.
+        // Direction semantics, per branch (post batch-2 view derivation —
+        // do NOT read the 8th argument as alongRow):
+        //   STRIP (below): grouping always runs along the logical (m,k) rows
+        //     (the K dim) regardless of view — MatmulPruneInputA ->
+        //     PruneRowFp32 is direction-blind (under (b) semantics the ColView
+        //     STRIP and the Row variant share identical group sets);
+        //   TILE (here): SpMMAPruneGolden's 8th param is isRowOrder, with
+        //     alongRow = (transA != isRowOrder) derived inside. Passing
+        //     (transA=false, isRowOrder=!isColOrder) selects the ColView
+        //     same-view branch (transpose + Col variant + transpose back)
+        //     exactly when isColOrder is true. isColOrder here carries the
+        //     caller-derived sparse-side VIEW ((trans == !order), i.e.
+        //     ColView=true — see GoldenIsColOrder in ltmatmul_test.cpp), not
+        //     the raw physical order, so N+COL / T+ROW take the same-view
+        //     TILE branch, matching the kernel's view dispatch. Same
+        //     convention as the FP32/FP16 MatmulPruneInputAWithAlg.
         SpMMAPruneGolden<int8_t>(A, A_pruned, m, k, 0, 1, false, !isColOrder, "TILE");
         return;
     }
@@ -163,7 +189,7 @@ inline void PruneInt8Matrix(const std::vector<int8_t>& A, std::vector<int8_t>& A
         Af[i] = static_cast<float>(A[i]);
     }
     std::vector<float> Af_pruned;
-    MatmulPruneInputA<int8_t>(Af, Af_pruned, m, k, isColOrder);
+    MatmulPruneInputA<int8_t>(Af, Af_pruned, m, k);
     A_pruned.resize(Af.size());
     for (size_t i = 0; i < Af.size(); ++i) {
         A_pruned[i] = (Af_pruned[i] == 0.0f)

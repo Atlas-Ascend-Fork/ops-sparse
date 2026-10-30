@@ -181,16 +181,17 @@ __aicore__ inline void SpltMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     // uint16_t 推导 => C0=16，对 fp32 是错误的，会导致 CopyGmToCbufMultiND2Nz
     // 按错误的内块大小打包 NZ 分形，数据错乱。
     // 使用 Te::LayoutTraitDefault<T>，它同时设置数据类型与 C0（=32/sizeof(T)）。
-    // A 的物理行距经 td.ldA 直通布局参数：A_pruned（A-sparse）恒为 prune
-    // 紧凑输出（ldA==k，与旧逻辑维度参数逐位一致——零回归锚点）；dense A
-    // （B-sparse / dense×dense）从描述符 ld 直读，MTE2 按行距跳过行尾
-    // padding，无需预处理。
-    // sparseTrans=1：dense×dense + transA。物理 A 为
-    // (k,m) 行主序；声明为 DNExt(ldA, k)（列主序视图），使 CopyGM2L1
-    // 在分形转换时完成转置 —— 与 transB 同一机制。
-    // sparseTrans=0：标准 NDExt(m, ldA)（A-sparse 路径 prune 已完成转置）。
-    // transB=1：GM B 物理布局为 (n, k) 行主序。声明为
-    // DNExt(ldB, n)（列主序）—— CopyGM2L1 自动选择 DN2ZN 完成转置。
+    // A 的物理行距经 td.ldA 直通布局参数（(b) 两侧恒描述符 ld 快照——
+    // A_pruned（A-sparse）为 prune 的描述符 (order, ld) 布局输出，dense A
+    //（B-sparse / dense×dense）从描述符 ld 直读；紧凑场景与旧逻辑维度
+    // 参数逐位一致——零回归锚点），MTE2 按行距跳过行尾 padding，无需预处理。
+    // sparseTrans=1：声明为 DNExt(ldA, k)（列主序视图），使 CopyGM2L1
+    // 在分形转换时完成转置 —— 与 transB 同一机制（基值含 op 分量，
+    // COL 分量由执行期 splt_apply_gm_layout 翻转叠加，最终标志 =
+    // isColView(该侧)，投递到 L0 的逻辑矩阵恒为 op(该侧)）。
+    // sparseTrans=0：标准 NDExt(m, ldA)（行主序视图）。
+    // transB=1：声明为 DNExt(ldB, n)（列主序）—— CopyGM2L1 自动选择
+    // DN2ZN 完成转置。
     // DNExt 与 NDExt 产生不同的张量类型，因此 tile 循环调用必须在
     // 调用点分支（按 GmTensorA/GmTensorB 类型做模板分发）。
     const L1BufferConfig l1cfg = InitL1DoubleBuffer<T>(baseM, baseN, td.kL1Size);

@@ -72,6 +72,7 @@ inline sparse_test::MatmulLayoutOpts ToNpuLayoutOpts(const MatmulParam& p) {
     o.denseOrder = p.isDenseColOrder() ? ACL_SPARSE_ORDER_COL : ACL_SPARSE_ORDER_ROW;
     o.cdOrder = p.isCdColOrder() ? ACL_SPARSE_ORDER_COL : ACL_SPARSE_ORDER_ROW;
     o.ldCd = p.ldCd;
+    o.directFeed = (p.directFeed != 0);
     return o;
 }
 
@@ -885,7 +886,15 @@ inline void VerifyInt8Int32Output(const MatmulParam& p,
     const std::vector<int32_t>& hGoldenD, const std::vector<int32_t>& hNpuD)
 {
     const bool hasBiasOrActivation = p.hasBias() || p.hasActivation();
-    if (p.alpha == 1.0f && p.beta == 0.0f && !hasBiasOrActivation) {
+    // B5: int32-domain comparison condition extended — when alpha is an
+    // int32-domain integral value with beta==0 and no bias/act, the kernel
+    // takes the int32 domain (FastPath or the int32-scaled branch) and the
+    // golden is likewise an exact int64 value -> EXACT integer comparison.
+    // Note it must not go through MatmulToFloat (in the float domain with
+    // |sum| > 2^24 the spacing is >= 2, which swallows ±1 differences and
+    // cannot verify bit-exactness).
+    if ((p.alpha == 1.0f || SpltAlphaIsIntegralInt32Host(p.alpha))
+        && p.beta == 0.0f && !hasBiasOrActivation) {
         // EXACT (atol=0, rtol=0): INT32 accumulation is bit-exact.
         VerifyExactInt32(hGoldenD, hNpuD, p.caseId());
         // Assertion record (EXACT).
@@ -1189,7 +1198,11 @@ AlphaBetaVecs PrepareInt8CDCaseInputs(const MatmulParam& p, uint32_t seed,
         hB = MatmulGenTestMatrix<int8_t>(p.k, p.n, -5.0f, 5.0f, seed + 1);
         GenInt8CDInputC<CDT>(p.m, p.n, hC);
     }
-    return GenAlphaBetaVectors(p, seed);
+    AlphaBetaVecs vecs = GenAlphaBetaVectors(p, seed);
+    // B2/A4 bias roundtrip（INT8 × C/D=FP16/BF16）：共享 helper（见
+    // ltmatmul_test_utils.h 的 RoundtripBiasVecToCDtype）。
+    RoundtripBiasVecToCDtype<CDT>(p, vecs);
+    return vecs;
 }
 
 // golden 计算（NPU 剪枝回读范式）：acc = Σ A_pruned·B（int32 精确，共享
@@ -1216,13 +1229,27 @@ void ComputeInt8CDCaseGolden(const MatmulParam& p, const MatmulNpuResult& npu,
         std::vector<CDT> Cb = SliceBatch(hC, mn, b, bs);
         std::vector<int8_t> prunedB = SliceBatch(npu.npuPrunedA, prunedSize, b, bs);
         AlphaBetaVecs batchVecs = CopyVecsForBatch(vecs, p, b);
-        std::vector<float> Df = ComputeInt8CDGoldenCore<CDT>(p.m, p.k, p.n, p.isSparseA(),
+        auto Df = ComputeInt8CDGoldenCore<CDT>(p.m, p.k, p.n, p.isSparseA(),
             useVec, p.alpha, p.beta, batchVecs.alphaVec, batchVecs.betaVec,
             Ab, Bb, prunedB, Cb);
-        ApplyEpilogueFp32(Df, batchVecs.biasVec, GoldenActType(p.activationType),
-                          p.reluUpperBound, p.reluThreshold, p.geluScaling, p.m, p.n);
         std::vector<CDT> Db;
-        TruncateToOutput<CDT>(Df, Db, mn);
+        if constexpr (std::is_same_v<CDT, int32_t>) {
+            // B5：int32 输出——有 bias/act 时 epilogue 在 float 域（原数值
+            // 路径，转 float 后施加；|sum| <= 2^24 时 double 与 float 逐位
+            // 一致，零回归），否则 double 直转（精确）。
+            const int32_t actType = GoldenActType(p.activationType);
+            if (actType != 0 || !batchVecs.biasVec.empty()) {
+                std::vector<float> DfF(Df.begin(), Df.end());
+                ApplyEpilogueFp32(DfF, batchVecs.biasVec, actType,
+                                  p.reluUpperBound, p.reluThreshold, p.geluScaling, p.m, p.n);
+                Df.assign(DfF.begin(), DfF.end());
+            }
+            TruncateToOutputInt32FromDouble(Df, Db, mn);
+        } else {
+            ApplyEpilogueFp32(Df, batchVecs.biasVec, GoldenActType(p.activationType),
+                              p.reluUpperBound, p.reluThreshold, p.geluScaling, p.m, p.n);
+            TruncateToOutput<CDT>(Df, Db, mn);
+        }
         std::copy(Db.begin(), Db.end(), hGoldenD.begin() + static_cast<size_t>(b) * mn);
     }
 }
@@ -1245,6 +1272,7 @@ void RunInt8CDCase(const MatmulParam& p, aclrtStream /*stream*/)
         vecs.alphaPtr, vecs.betaPtr,
         p.biasEnabled, vecs.biasPtr,
         p.activationType, p.reluUpperBound, p.reluThreshold, p.geluScaling,
+        p.biasStride,
         // order / batch / 布局透传（单 batch 紧凑 = 既有形态）
         ToNpuOrder(p), p.numBatches, p.batchStride, ToNpuLayoutOpts(p));
     ASSERT_EQ(npu.algSetCfgRet, ACL_SPARSE_STATUS_SUCCESS) << caseId << " algConfigId set failed";
@@ -1457,16 +1485,65 @@ TEST_F(MatmulExceptionTest, L2_06_NullWorkspace) {
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES);
 }
 
-// M-L2-07: null streams
+// M-L2-07: streams = nullptr → default stream (D3 lenient policy, positive).
+// The official cuSPARSELt samples declare `int num_streams = 0;
+// cudaStream_t* streams = nullptr;` and pass them directly — a null array
+// pointer means "default stream only" and numStreams is not judged in that
+// case. Full 128³ FP16 chain (prune → matmul on the default stream) with
+// precision comparison; the only streams==nullptr coverage in this suite.
+// (L2_08/L2_09 lock the streams != nullptr + numStreams <= 0 rejection.)
 TEST_F(MatmulExceptionTest, L2_07_NullStreams) {
-    MatmulExceptionCtx ctx;
-    MatmulRawParams p;
+    constexpr int32_t m = 128, k = 128, n = 128;
+    SparseLtHandleGuard handle;
+    SparseLtMatDescGuard matA(handle.get(), m, k, k, 16, ACL_FLOAT16,
+                              ACL_SPARSE_ORDER_ROW, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
+    SparseLtDnMatDescGuard matB(handle.get(), k, n, n, 16, ACL_FLOAT16, ACL_SPARSE_ORDER_ROW);
+    SparseLtDnMatDescGuard matC(handle.get(), m, n, n, 16, ACL_FLOAT16, ACL_SPARSE_ORDER_ROW);
+    SparseLtDnMatDescGuard matD(handle.get(), m, n, n, 16, ACL_FLOAT16, ACL_SPARSE_ORDER_ROW);
+    SparseLtMatmulDescGuard mm(handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE,
+        ACL_SPARSE_OP_NON_TRANSPOSE, matA.get(), matB.get(), matC.get(), matD.get(),
+        ACL_SPARSE_COMPUTE_32F);
+    SparseLtAlgSelectionGuard algSel(handle.get(), mm.get());
+    SparseLtPlanGuard plan(handle.get(), mm.get(), algSel.get());
+
+    size_t wsSize = 0;
+    ASSERT_EQ(aclsparseLtMatmulGetWorkspace(handle.get(), plan.cptr(), &wsSize),
+              ACL_SPARSE_STATUS_SUCCESS);
+    auto dWorkspace = DeviceBuffer::alloc(wsSize);
+
+    auto hA = MatmulGenTestMatrix<uint16_t>(m, k, -1.0f, 1.0f, 4243u);
+    auto hB = MatmulGenTestMatrix<uint16_t>(k, n, -1.0f, 1.0f, 4244u);
+    auto hC = MatmulGenTestMatrix<uint16_t>(m, n, -1.0f, 1.0f, 4245u);
+    const size_t mk = static_cast<size_t>(m) * k;
+    const size_t kn = static_cast<size_t>(k) * n;
+    const size_t mn = static_cast<size_t>(m) * n;
+    auto dA = DeviceBuffer::copyFrom(hA.data(), mk * sizeof(uint16_t));
+    auto dB = DeviceBuffer::copyFrom(hB.data(), kn * sizeof(uint16_t));
+    auto dC = DeviceBuffer::copyFrom(hC.data(), mn * sizeof(uint16_t));
+    auto dD = DeviceBuffer::alloc(mn * sizeof(uint16_t));
+    auto dPruned = DeviceBuffer::alloc(mk * sizeof(uint16_t));
+
+    // Prune on the default stream (single-stream param, nullptr is allowed).
+    aclsparseLtConstMatmulDescriptor_t mdForPrune = mm.get();
+    ASSERT_EQ(aclsparseLtSpMMAPrune(handle.get(), &mdForPrune, dA.get(), dPruned.get(),
+                                    ACLSPARSELT_PRUNE_SPMMA_STRIP, nullptr),
+              ACL_SPARSE_STATUS_SUCCESS);
+
+    // Matmul with streams = nullptr / numStreams = 0 (official sample usage).
     float alpha = 1.0f, beta = 0.0f;
-    FillMatmulRawParams(p, ctx.handle.get(), ctx.plan.get(), &alpha,
-        ctx.dA.get(), ctx.dB.get(), &beta, ctx.dC.get(), ctx.dD.get(),
-        ctx.dWorkspace.get(), nullptr, 1);
-    auto ret = MatmulNpuRaw(p);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+    MatmulRawParams p;
+    FillMatmulRawParams(p, handle.get(), plan.get(), &alpha, dPruned.get(), dB.get(),
+        &beta, dC.get(), dD.get(), dWorkspace.get(), nullptr, 0);
+    ASSERT_EQ(MatmulNpuRaw(p), ACL_SPARSE_STATUS_SUCCESS);
+
+    // Sync the default stream, then compare with the CPU golden.
+    ASSERT_EQ(aclrtSynchronizeStream(nullptr), ACL_SUCCESS);
+    std::vector<uint16_t> hNpuD(mn, 0);
+    dD.copyToHost(hNpuD.data(), mn * sizeof(uint16_t));
+    std::vector<uint16_t> hGoldenD;
+    LtMatmulGoldenRunWithPruneAlg<uint16_t>(hA, hB, hC, hGoldenD, m, k, n, alpha, beta,
+        0, 1, /*isColOrder=*/false, /*pruneB=*/false, "STRIP");
+    VerifyFloatOutput(hGoldenD, hNpuD, "M-L2-07-null-streams");
 }
 
 // M-L2-08: numStreams=0

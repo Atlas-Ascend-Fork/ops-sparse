@@ -50,8 +50,8 @@ inline void fill_cube_tiling_dims(AclsparseltTilingData& td,
     td.m = md_m(md);
     td.n = md_n(md);
     td.k = md_k(md);
-    // matmul path: A_pruned is stored contiguously (ld == k).
-    // Prune path sets td.ld = matA->ld separately in prune_host.cpp.
+    // td.ld 仅 prune 消费（matmul 经 ldA/ldB 寻址稀疏/稠密两侧——(b) 布局
+    // 保持）；此处按 md_k 填充保持字段非零，prune host 调用时另行覆盖。
     td.ld = md_k(md);
     td.baseM = ct.baseM;
     td.baseN = ct.baseN;
@@ -88,10 +88,38 @@ inline void fill_splitk_tiling_dims(AclsparseltTilingData& td,
     td.splitK = effectiveSplitK;
     // kSegLen = ceil(k / effectiveSplitK), aligned up to baseK for cube efficiency.
     // kernel clamps to td.k at segment tail.
-    int32_t kSeg = (k + effectiveSplitK - 1) / effectiveSplitK;
+    // int64 domain: k is legal up to INT32_MAX at the descriptor layer (init
+    // only enforces rows/cols > 0, no upper bound; the INT8 extreme geometry
+    // 2^31-32 is self-evidently reachable), and (k + effectiveSplitK - 1)
+    // wraps int32 for k near INT32_MAX with splitK >= 2 — a negative kSegLen
+    // would poison every downstream consumer. The ceil result always fits
+    // int32 again (<= ceil(INT32_MAX / 2) = 2^30 for splitK >= 2).
+    int32_t kSeg = static_cast<int32_t>(
+        (static_cast<int64_t>(k) + effectiveSplitK - 1) / effectiveSplitK);
     kSeg = ((kSeg + ct.baseK - 1) / ct.baseK) * ct.baseK;
     if (effectiveSplitK == 1 && kSeg > k) { kSeg = k; }
     td.kSegLen = kSeg;
+    // B4: valid segment count = the number of segments whose start falls in
+    // [0,k) = ceil(k / kSeg); kSeg is aligned to baseK so it is <= splitK.
+    // When effectiveSplitK==1, kSeg is already clamped to k, so it is
+    // always 1. The epilogue reduction converges on it (the empty segments
+    // [validSplitK, splitK) are never read — the correctness premise of the
+    // memset removal; proof chain anchored at the memset-removal comment in
+    // matmul_host).
+    // int64 domain for the same wrap reason: (k + kSeg - 1) exceeds INT32_MAX
+    // for k = 1.5*2^30-class geometry with splitK = 2 (kSeg = 0.75*2^30)
+    // even though both operands individually fit int32 — the int32 form
+    // yielded a negative validSplitK, tripping the epilogue defensive
+    // fallback (validSplitK > 0) ? validSplitK : splitK into reading the
+    // empty segments [validSplitK, splitK) as uninitialized temp (the B4
+    // memset removal left those unwritten).
+    // Local defense: kSeg <= 0 is unreachable through legal descriptors
+    // (rows/cols > 0 implies kSeg >= 1); a forged k = 0 would otherwise
+    // divide by zero here — clamp to the degenerate single-segment value 1.
+    td.validSplitK = (effectiveSplitK == 1 || kSeg <= 0)
+        ? 1
+        : static_cast<int32_t>(std::min<int64_t>(
+              effectiveSplitK, (static_cast<int64_t>(k) + kSeg - 1) / kSeg));
 }
 
 inline void fill_sparse_tiling_dims(AclsparseltTilingData& td,
@@ -110,30 +138,23 @@ inline void fill_sparse_tiling_dims(AclsparseltTilingData& td,
                                 == ACL_SPARSE_ORDER_ROW;
         td.pruneAlongRow = ((isSparseA ? transA : transB) != isRowOrder) ? 1 : 0;
     }
+    // (b) same rule for both sides — the cube transpose-flag base value =
+    // the op component (the COL component is flipped on top at execution
+    // time by splt_apply_gm_layout; final flag = isColView(side)):
+    // the sparse-side A_pruned/B_pruned is prune's descriptor-layout output
+    // (no longer compact-specialized), and the dense side is a
+    // descriptor-layout input — carried uniformly by NDExt/DNExt + direct
+    // ld reads.
     td.sparseTrans = transA ? 1 : 0;
-    // A-sparse: prune transposes A, matmul must not.
-    // B-sparse: A is dense (not pruned), matmul must handle transA via sparseTrans.
-    if (hasStructuredSparsity && isSparseA) {
-        td.sparseTrans = 0;
-    }
-    // B-sparse: prune always outputs B_pruned in (k, n) row-major layout
-    // (TransRowOrder path transposes during prune; AlongRow/AlongCol paths
-    // read B in (k,n) and output (k,n) unchanged). The matmul must treat
-    // B_pruned as NDExt(k, n) — no additional transpose.
-    if (hasStructuredSparsity && !isSparseA) {
-        td.transB = 0;
-    } else {
-        td.transB = transB ? 1 : 0;
-    }
-    // cube A/B 输入的物理行距：稀疏侧为 prune 紧凑输出（ldA=k / ldB=n）；
-    // dense 侧从描述符 ld 直读（ROW/COL 的 ld 同为物理 ROW 视图的行步长，
-    // IsLdValid 保证 >= 紧凑值）。COL 的转置视图翻转由执行期
-    // splt_apply_dense_layout 翻转转置标志承载（ld 口径不变，ldA/ldB 为
-    // PlanInit 快照，与 ldC/ldD 同口径）。
-    td.ldA = (hasStructuredSparsity && isSparseA)
-        ? md_k(md) : static_cast<int32_t>(md->matA->ld);
-    td.ldB = (hasStructuredSparsity && !isSparseA)
-        ? md_n(md) : static_cast<int32_t>(md->matB->ld);
+    td.transB = transB ? 1 : 0;
+    // Physical row strides of the cube A/B inputs: both sides always read
+    // the descriptor ld directly ((b) layout preserving — the sparse-side
+    // prune output and the dense-side input follow the same caliber; for both
+    // ROW and COL, ld is the row step of the physical ROW view, and
+    // IsLdValid guarantees >= the compact value). ldA/ldB are PlanInit
+    // snapshots, same caliber as ldC/ldD.
+    td.ldA = static_cast<int32_t>(md->matA->ld);
+    td.ldB = static_cast<int32_t>(md->matB->ld);
 }
 
 // Fill tiling dimension fields (shared by PlanInit).
@@ -252,7 +273,13 @@ inline uint64_t compute_fused_epilogue_small_buffer_bytes(
     const uint64_t aElemSize = splt_dtype_elem_size(dt);
     const uint64_t cElemSize = splt_dtype_elem_size(td.cDataType);
     const uint64_t cElemSizeMax = (aElemSize > cElemSize) ? aElemSize : cElemSize;
-    const uint64_t biasElemSize = (dt == SPLT_DTYPE_INT8 || dt == SPLT_DTYPE_FP32) ? 4 : 2;
+    // bias dtype 键于 (dt, cDataType)（SpltBiasDType<T, CType> 口径）：
+    // FP32 或 INT8 × 32I 域（C ∈ {INT8,INT32}）→ FP32；否则 = C dtype
+    //（含 INT8 × C/D=FP16/BF16 → FP16/BF16）。
+    const bool biasIsFp32 = (dt == SPLT_DTYPE_FP32) ||
+        (dt == SPLT_DTYPE_INT8 && (td.cDataType == SPLT_DTYPE_INT8 ||
+                                   td.cDataType == SPLT_DTYPE_INT32));
+    const uint64_t biasElemSize = biasIsFp32 ? 4 : 2;
     return (td.outDataType != SPLT_DTYPE_FP32 ? maxNAlign * outElemSize : 0) +  // dTBuf
         (td.outDataType == SPLT_DTYPE_INT8 ? maxNAlign * 2 : 0) +               // halfBuf
         maxNAlign * 4 +                                                          // tempBuf
@@ -271,7 +298,13 @@ inline uint64_t compute_fused_epilogue_small_buffer_bytes(
 inline uint64_t compute_vec_fullload_bytes(
     const AclsparseltTilingData& td, int32_t dt, bool biasEnabled, int32_t m)
 {
-    const bool needBiasLoadBuf = (dt != SPLT_DTYPE_FP32 && dt != SPLT_DTYPE_INT8);
+    // An FP16/BF16 bias (!=FP32) needs an m*2 raw load buffer — keyed on
+    // (dt, cDataType) (INT8 x C/D=FP16/BF16 takes FP16/BF16 bias and must
+    // be budgeted).
+    const bool biasIsFp32 = (dt == SPLT_DTYPE_FP32) ||
+        (dt == SPLT_DTYPE_INT8 && (td.cDataType == SPLT_DTYPE_INT8 ||
+                                   td.cDataType == SPLT_DTYPE_INT32));
+    const bool needBiasLoadBuf = !biasIsFp32;
     return (td.alphaVectorScaling ? static_cast<uint64_t>(m) * 4 : 0) +
         (td.betaVectorScaling ? static_cast<uint64_t>(m) * 4 : 0) +
         (biasEnabled ? static_cast<uint64_t>(m) * 4 : 0) +

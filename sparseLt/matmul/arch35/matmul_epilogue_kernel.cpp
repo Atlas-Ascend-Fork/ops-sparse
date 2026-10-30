@@ -42,6 +42,32 @@
 //   —— temp 值正确但 D 全为零。
 // ============================================================================
 
+// int32 UB -> GM write-out segment (M1 extraction, shared by the INT32 output
+// branch of SpltEpilogueInt32AccPath and the B5 int32-domain scaling tier of
+// SpltEpilogueTryInt32FastPath):
+// V_MTE3 sync -> ROW (single-point addressed DataCopyPad via SpltCdOffset) /
+// COL (element-block scatter via SpltCdColScatter) -> return. The
+// cross-iteration WAR sync (MTE3_MTE2) is carried by the caller —
+// Int32AccPath applies it uniformly at function level (shared by the INT8
+// branch), and the B5 scaling tier adds it itself after the call — matching
+// the two original inline sites bit-for-bit.
+// copyOut's blockLen has already been set by the caller to count * sizeof(int32_t).
+template <typename OutType>
+__aicore__ inline void SpltEpilogueInt32WriteOut(
+    LocalTensor<int32_t>& srcUB, GlobalTensor<OutType>& dGM,
+    LocalTensor<OutType>& wideCdUB, const SpltCdCtx& cd,
+    int32_t row, int32_t colStart, int32_t count,
+    DataCopyExtParams& copyOut)
+{
+    SetFlag<HardEvent::V_MTE3>(0);
+    WaitFlag<HardEvent::V_MTE3>(0);
+    if (!cd.isCol) {
+        DataCopyPad(dGM[SpltCdOffset(row, colStart, cd.ldD, false)], srcUB, copyOut);
+    } else {
+        SpltCdColScatter<OutType>(dGM, srcUB, wideCdUB, row, colStart, count, cd.ldD);
+    }
+}
+
 // splitK epilogue 的 INT8 + alpha=1 + beta=0 快速路径。
 // 使用 int32 累加（LocalTensor 上的 Add<int32_t>）而非 float Cast+Add，
 // 对大累加值保持精确的 int32 精度。
@@ -77,14 +103,10 @@ __aicore__ inline void SpltEpilogueInt32AccPath(
 
     // 3. 输出（X1：ROW 经 SpltCdOffset 单点寻址；COL 走元素块散开）
     if constexpr (std::is_same_v<OutType, int32_t>) {
-        // INT32 输出：int32 UB 直接写 GM（无 Cast）
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        if (!cd.isCol) {
-            DataCopyPad(dGM[SpltCdOffset(row, colStart, cd.ldD, false)], accIntUB, copyAcc);
-        } else {
-            SpltCdColScatter<OutType>(dGM, accIntUB, wideCdUB, row, colStart, count, cd.ldD);
-        }
+        // INT32 输出：int32 UB 直接写 GM（无 Cast；M1——写出段经共享
+        // helper，跨迭代 MTE3_MTE2 由函数级步骤 4 统一施加）。
+        SpltEpilogueInt32WriteOut<OutType>(accIntUB, dGM, wideCdUB, cd,
+                                           row, colStart, count, copyAcc);
     } else {
         // INT8 输出：向量化 Cast int32→float→clamp→int8。
         // tempUB（float）复用为 Cast 目的缓冲 —— 上方 splitK 循环完成后
@@ -329,12 +351,16 @@ __aicore__ inline void SpltEpilogueChunkStoreOutput(
     }
 }
 
-// INT32 快速路径判定与执行：
-// INT32 快速路径：alpha=1+beta=0+无 bias+无 activation 时直接 int32 累加输出
-// 有 bias 或 activation 时必须走 FP32 域（bias Adds / GeLU Exp 等在 FP32 域操作）。
-// 快速路径仅支持 INT8/INT32 输出（编译期守卫防止 half/bf16 输出实例化
-// 其内部 INT8 输出分支）；INT8 A/B × C/D=FP16/BF16（超集组合）走下方
-// FP32 域链（int32→float Cast 后既有输出 Cast 写出）。
+// INT32 快速路径判定与执行（B1+B5 两档）：
+// 第一档 FastPath：SpltFastPathCond（alpha=1+beta=0+无 vec 缩放+无 bias+
+//   无 activation）时直接 int32 累加输出；
+// 第二档 int32 域缩放（B5，仅 INT32 输出）：alpha 为 int32 域整值且其余
+//   条件同 FastPath（alpha≠1）时，int32 累加后 Muls<int32_t> 域内缩放
+//   直写——对 |sum| > 2^24 保持精确（FP32 域链存在 ≤1 ulp 舍入）。
+// 有 bias 或 activation 时必须走 FP32 域（bias Adds / GeLU Exp 等在 FP32
+// 域操作）。快速路径仅支持 INT8/INT32 输出（编译期守卫防止 half/bf16 输出
+// 实例化其内部 INT8 输出分支）；INT8 A/B × C/D=FP16/BF16（超集组合）走
+// 下方 FP32 域链（int32→float Cast 后既有输出 Cast 写出）。
 // 返回 true 表示已按快速路径处理完毕（调用方直接返回）。
 template <typename T, typename CType, typename OutType>
 __aicore__ inline bool SpltEpilogueTryInt32FastPath(
@@ -345,20 +371,49 @@ __aicore__ inline bool SpltEpilogueTryInt32FastPath(
     GlobalTensor<OutType>& dGM,
     int64_t base, int32_t row, int32_t colStart, int32_t count,
     int32_t splitK, int64_t totalElem,
-    int32_t alphaVectorScaling, float alpha, float beta,
+    int32_t alphaVectorScaling, int32_t betaVectorScaling,
+    float alpha, float beta,
     uint64_t biasDevPtr, int32_t activationType)
 {
     using TempType = typename SpltL0CTypeTrait<T>::type;
     if constexpr (!std::is_same_v<TempType, float>
                   && (std::is_same_v<OutType, int8_t> || std::is_same_v<OutType, int32_t>)) {
-        if (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f
-            && biasDevPtr == 0 && activationType == 0) {
+        if (SpltFastPathCond(alpha, beta, alphaVectorScaling, betaVectorScaling,
+                             biasDevPtr, activationType)) {
             LocalTensor<OutType> wideCdUB = (cd.wideBuf != nullptr)
                 ? wideCdBuf.Get<OutType>() : LocalTensor<OutType>{};
             SpltEpilogueInt32AccPath<OutType>(accUB, tempUB, dTBuf, halfBuf, tempGM, dGM,
                                               wideCdUB, cd,
                                               base, row, colStart, count, splitK, totalElem);
             return true;
+        }
+        // B5 第二档（仅 INT32 输出）：int32 域缩放。触发条件与 FastPath
+        // 仅 alpha 维度放宽（整值 alpha，含 alpha≠1）；beta/bias/act/vec
+        // 缩放任一存在时维持 FP32 域链。
+        if constexpr (std::is_same_v<OutType, int32_t>) {
+            if (alphaVectorScaling == 0 && betaVectorScaling == 0 && beta == 0.0f
+                && biasDevPtr == 0 && activationType == 0
+                && SpltAlphaIsIntegralInt32(alpha)) {
+                DataCopyExtParams copyAcc{1, 0, 0, 0, 0};
+                DataCopyPadExtParams<int32_t> padAcc{false, 0, 0, int32_t(0)};
+                copyAcc.blockLen = static_cast<uint32_t>(count * sizeof(int32_t));
+                LocalTensor<int32_t> accIntUB = accUB.ReinterpretCast<int32_t>();
+                LocalTensor<int32_t> tempIntUB = tempUB.ReinterpretCast<int32_t>();
+                // reduce（int32 域，含 splitK 累加）→ 域内 Muls 缩放 →
+                // int32 直写（M1：写出段经共享 helper，与 Int32AccPath 的
+                // INT32 输出分支同构）+ 跨迭代 WAR 同步。
+                SpltSplitKAccInt32(accIntUB, tempIntUB, tempGM, base, count, splitK,
+                                   totalElem, copyAcc, padAcc);
+                Muls<int32_t>(accIntUB, accIntUB, static_cast<int32_t>(alpha), count);
+                PipeBarrier<PIPE_V>();
+                LocalTensor<OutType> wideCdUB = (cd.wideBuf != nullptr)
+                    ? wideCdBuf.Get<OutType>() : LocalTensor<OutType>{};
+                SpltEpilogueInt32WriteOut<OutType>(accIntUB, dGM, wideCdUB, cd,
+                                                   row, colStart, count, copyAcc);
+                SetFlag<HardEvent::MTE3_MTE2>(0);
+                WaitFlag<HardEvent::MTE3_MTE2>(0);
+                return true;
+            }
         }
     }
     return false;
@@ -420,11 +475,13 @@ __aicore__ inline void SpltEpilogueProcessChunk(
     float reluThreshold, float reluUpperBound, float geluScaling)
 {
     using TempType = typename SpltL0CTypeTrait<T>::type;
-    // INT32 快速路径（命中则处理完毕直接返回）。
+    // INT32 快速路径（命中则处理完毕直接返回）。B1：透传 betaVectorScaling
+    //（混合态 (alphaVec=0, betaVec=1) 下 beta==0.0f 哨兵恒真，须显式排除）。
     if (SpltEpilogueTryInt32FastPath<T, CType, OutType>(
             accUB, tempUB, dTBuf, halfBuf, wideCdBuf, cd, tempGM, dGM,
             base, row, colStart, count, splitK, totalElem,
-            alphaVectorScaling, alpha, beta, biasDevPtr, activationType)) {
+            alphaVectorScaling, betaVectorScaling, alpha, beta,
+            biasDevPtr, activationType)) {
         return;
     }
     DataCopyExtParams copyAcc{1, 0, 0, 0, 0};
@@ -515,7 +572,8 @@ __aicore__ inline void SpltEpilogueInitBuffers(
 // 为 SpltEpilogueBatchLoop 设置逐 batch 的 GM 指针。
 // 将 temp/c/d/bias GM 按 batch stride 偏移；biasStride != 0 时重载 bias。
 // CType：C 矩阵实际 dtype（batchStrideC 以 CType 元素为单位——类型化
-// 指针偏移自动正确）。bias 恒键于 T。
+// 指针偏移自动正确）。bias 键于 (T, CType)（cuSPARSELt：bias = C dtype，
+// INT8 × 32I 域例外为 FP32）。
 // C/D/bias 的 batch 基址段经 SpltOffsetBatchCdBiasGM
 // 共享（融合侧 SpltFusedEpilogueOffsetBatchGM 同款）。
 template <typename T, typename CType, typename OutType>
@@ -523,13 +581,13 @@ __aicore__ inline void SpltEpilogueOffsetBatchGM(
     const AclsparseltTilingData& td,
     GlobalTensor<typename SpltL0CTypeTrait<T>::type>& tempGM,
     GlobalTensor<CType>& cGM, GlobalTensor<OutType>& dGM,
-    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    GlobalTensor<SpltBiasDType<T, CType>>& biasVecGM,
     LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
     GM_ADDR tempGm, GM_ADDR cGm, GM_ADDR dGm,
     int32_t b, int32_t m, int64_t totalElem)
 {
     using TempType = typename SpltL0CTypeTrait<T>::type;
-    using BiasType = SpltBiasDType<T>;
+    using BiasType = SpltBiasDType<T, CType>;
     const int64_t tempBatchElems = static_cast<int64_t>(td.splitK) * totalElem;
     tempGM.SetGlobalBuffer(reinterpret_cast<__gm__ TempType*>(tempGm)
                            + static_cast<int64_t>(b) * tempBatchElems,
@@ -554,7 +612,7 @@ __aicore__ inline void SpltEpilogueBatchLoop(
     const AclsparseltTilingData& td,
     GlobalTensor<typename SpltL0CTypeTrait<T>::type>& tempGM,
     GlobalTensor<CType>& cGM, GlobalTensor<OutType>& dGM,
-    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    GlobalTensor<SpltBiasDType<T, CType>>& biasVecGM,
     LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
     LocalTensor<float>& accUB, LocalTensor<float>& tempUB, LocalTensor<float>& dFp32UB,
     TBuf<TPosition::VECCALC>& cTBuf, TBuf<TPosition::VECCALC>& cFp32Buf,
@@ -566,7 +624,14 @@ __aicore__ inline void SpltEpilogueBatchLoop(
     int32_t alphaVectorScaling, int32_t betaVectorScaling, float beta)
 {
     const int32_t n = td.n;
-    const int32_t splitK = td.splitK;
+    // B4：归约上界换源 validSplitK（[validSplitK, splitK) 空段不读——memset
+    // 完全去除后依赖「有效段 cube 全量写」不变量，证明链固化在 matmul_host
+    // memset 删除处）。防御兼容：旧 tiling（validSplitK==0，PlanInit 早于
+    // 本字段引入）回落 td.splitK。下游 ProcessChunk → SplitKReduce /
+    // TryInt32FastPath → Int32AccPath → SpltSplitKAccInt32 的循环上界全部经
+    // 本形参链传导（形参零改动，仅源头换值）；temp 的 SetGlobalBuffer 长度
+    // 保持 td.splitK 口径（匹配分配大小，见 SpltEpilogueOffsetBatchGM）。
+    const int32_t splitK = (td.validSplitK > 0) ? td.validSplitK : td.splitK;
     const float alpha = td.alpha;
     const uint64_t biasDevPtr = td.biasDevPtr;
     const int32_t activationType = td.activationType;
@@ -627,7 +692,7 @@ template <typename T, typename CType = T, typename OutType = T>
 __aicore__ inline void SpltEpilogueImpl(GM_ADDR tempGm, GM_ADDR cGm, GM_ADDR dGm, GM_ADDR tilingGm)
 {
     using TempType = typename SpltL0CTypeTrait<T>::type;  // float 或 int32_t
-    using BiasType = SpltBiasDType<T>;  // bias dtype：FP32/FP16/BF16 时为 T，INT8 时为 float
+    using BiasType = SpltBiasDType<T, CType>;  // bias dtype = C dtype（INT8 × 32I 域例外 FP32）
     const AclsparseltTilingData td = splt_load_tiling(tilingGm);
     const int32_t m = td.m;
     const float beta = td.beta;

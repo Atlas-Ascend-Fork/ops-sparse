@@ -273,7 +273,11 @@ SearchVecs PrepareInt8CDSearchInputs(const MatmulSearchParam& p, uint32_t seed,
         hB = MatmulGenTestMatrix<int8_t>(p.k, p.n, -5.0f, 5.0f, seed + 1);
         GenInt8CDInputC<CDT>(p.m, p.n, hC);
     }
-    return GenSearchVecs(p, seed);
+    SearchVecs vecs = GenSearchVecs(p, seed);
+    // B2/A4 bias roundtrip（INT8 × C/D=FP16/BF16）：共享 helper（见
+    // ltmatmul_test_utils.h 的 RoundtripBiasVecToCDtype）。
+    RoundtripBiasVecToCDtype<CDT>(p, vecs);
+    return vecs;
 }
 
 // Int8CD 搜索链参数组装（H 组超集链专用：C 走独立参数、C/D dtype=CDT；
@@ -306,8 +310,12 @@ MatmulSearchRunArgs<int8_t, CDT, CDT> BuildInt8CDSearchArgs(const MatmulSearchPa
     args.betaNull = (p.beta_null == 1);
     args.numStreams = p.num_streams;
     args.biasVec = vecs.biasPtr;
-    args.biasEltSize = sizeof(float);   // INT8 超集链 C 为 FP 域 → bias FP32
-    args.biasDtype = ACL_FLOAT;
+    // B2/A4：bias dtype = C dtype（INT8 × 32I 域例外 FP32）——FP16/BF16
+    // 超集链传 FP16/BF16（PrepareInt8CDSearchInputs 已同步 roundtrip）。
+    args.biasEltSize = (std::is_same_v<CDT, uint16_t> || std::is_same_v<CDT, bf16_bits_t>)
+        ? sizeof(uint16_t) : sizeof(float);
+    args.biasDtype = std::is_same_v<CDT, uint16_t>
+        ? ACL_FLOAT16 : (std::is_same_v<CDT, bf16_bits_t> ? ACL_BF16 : ACL_FLOAT);
     args.layout = ToNpuLayoutOpts(p);
     return args;
 }
@@ -488,13 +496,32 @@ TEST_F(MatmulSearchExceptionTest, X04PlanStarNull)
     EXPECT_EQ(SearchRaw(p), ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// ---- X05: streams = nullptr → INVALID_VALUE ----
+// ---- X05: streams = nullptr → SUCCESS on the default stream (D3 lenient
+// policy). The official cuSPARSELt samples declare `int num_streams = 0;
+// cudaStream_t* streams = nullptr;` and pass them directly; a null array
+// pointer means "default stream only" and numStreams is not judged. Also
+// covers the search-entry crash guard (streams[0] must not be dereferenced
+// when the array is null). The blocking search completes with matD holding
+// the selected config's full output: A (all 1.0, 2:4 pruned → half kept) ×
+// B (all 1.0) with beta=0 → every element = 64.0 exactly.
+// (X06/X07 lock the streams != nullptr + numStreams <= 0 rejection.) ----
 TEST_F(MatmulSearchExceptionTest, X05StreamsNullptr)
 {
     SearchExceptionCtx ctx;
     SearchRawParams p = DefaultRawParams(ctx);
     p.streams = nullptr;
-    EXPECT_EQ(SearchRaw(p), ACL_SPARSE_STATUS_INVALID_VALUE);
+    p.numStreams = 0;
+    EXPECT_EQ(SearchRaw(p), ACL_SPARSE_STATUS_SUCCESS);
+    // Blocking semantics: matD is readable directly after the call returns.
+    constexpr size_t kMn = 128 * 128;
+    std::vector<float> hD(kMn, 0.0f);
+    ctx.dD.copyToHost(hD.data(), kMn * sizeof(float));
+    size_t mismatches = 0;
+    for (float v : hD) {
+        if (v != 64.0f) { ++mismatches; }
+    }
+    EXPECT_EQ(mismatches, 0u) << "streams=nullptr search: " << mismatches
+                              << "/" << kMn << " elements deviate from 64.0f";
 }
 
 // ---- X06: numStreams = 0 → INVALID_VALUE ----

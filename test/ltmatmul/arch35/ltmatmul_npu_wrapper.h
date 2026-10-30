@@ -416,21 +416,33 @@ inline void MakeInt8CDAbDescriptors(sparse_test::SparseLtHandleGuard& handle,
 // ComputeASparsePhysicalLayout / ComputeBSparsePhysicalLayout，C/D 接入
 // (cdOrder, ldCd)）透传；默认值 = 单 batch 紧凑 ROW 基线。
 // -----------------------------------------------------------------------------
-// B-sparse 剪枝段：剪枝 dB（物理 (n,k)）→ dPruned（(k,n) 行主序输出）+
-// 同步 + 回读 golden（prune 输出恒紧凑 (k,n)）。
-// numBatches/batchStride 尾参：>1 时单调用化处理全 batch
-//（描述符携带 batch 属性，prune 输出按 batchStride 逐段推进——与主链
-// RunBSparsePruneAndTranspose 同范式）；kn 为 prune 缓冲的单 batch span 上界。
-// 回读段（CopyPrunedToHost）与 RunPruneForASparse 共享；同步检查保持
-// 本链内联判断（不记录 syncRet）。
+// B-sparse prune segment: prunes dB (descriptor (order, ld) layout) ->
+// dPruned ((b) same layout-preserving output) + sync + readback unpack into
+// logical golden (the npuPrunedA consumption contract is unchanged).
+// numBatches/batchStride tail params: when >1, a single call handles the
+// whole batch (the descriptor carries the batch attributes and the prune
+// output advances per batchStride — same paradigm as the main chain's
+// RunBSparsePruneAndTranspose).
+// The readback segment (CopyPrunedToHost) is shared with RunPruneForASparse;
+// the sync check stays as this chain's inline judgment (syncRet is not
+// recorded).
+// -----------------------------------------------------------------------------
+// B-sparse prune segment: prunes dB (descriptor (order, ld) layout) ->
+// dPruned ((b) same layout-preserving output) + sync + readback unpack into
+// golden (npuPrunedA logical (k,n)).
+// numBatches/batchStride tail params: when >1, a single call handles the
+// whole batch (the descriptor carries the batch attributes and the prune
+// output advances per batchStride — same paradigm as the main chain's
+// RunBSparsePruneAndTranspose). The readback segment (CopyPrunedToHost) is
+// shared with RunPruneForASparse; the sync check stays as this chain's
+// inline judgment (syncRet is not recorded).
 inline bool PruneInt8CDBSparse(MatmulNpuResult& result,
     aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t* matmulDesc,
-    sparse_test::DeviceBuffer& dB, sparse_test::DeviceBuffer& dPruned, size_t kn,
+    sparse_test::DeviceBuffer& dB, sparse_test::DeviceBuffer& dPruned,
     aclsparseLtPruneAlg_t pruneAlg, aclrtStream stream,
     int32_t numBatches = 1, int64_t batchStride = 0)
 {
     constexpr size_t kInElt = 1;  // int8
-    const size_t totalElems = BatchTotalElems(kn, numBatches, batchStride);
     result.pruneRet = aclsparseLtSpMMAPrune(
         handle, matmulDesc, dB.get(), dPruned.get(), pruneAlg, stream);
     if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
@@ -438,7 +450,9 @@ inline bool PruneInt8CDBSparse(MatmulNpuResult& result,
         result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return false;
     }
-    return CopyPrunedToHost(result, dPruned, totalElems * kInElt);
+    const size_t totalElems = PruneOutCapacityElems(*matmulDesc, numBatches, batchStride);
+    return CopyPrunedToHost(result, *matmulDesc, dPruned.get(), totalElems, kInElt,
+                            numBatches, batchStride);
 }
 
 // [Int8CD 共享段] NPU 剪枝回读提取：A-sparse 取 A_pruned 前 m*k 元素；
@@ -458,6 +472,11 @@ inline std::vector<int8_t> ExtractInt8CDPruned(const MatmulNpuResult& npu,
 // matmulSearch 传 args 值）。INT8 超集链 C 为 FP 域 → bias FP32。
 // 注意：epiBufs.dBias 由 BIAS_POINTER 属性持有 device 指针，matmul 执行期
 // 读取——epiBufs 经输出参数交调用方持有，须存活至 matmul/exec 完成。
+// bias dtype 按 C dtype 参数化（B2/A4：cuSPARSELt 规则 bias = C dtype，
+// INT8 × 32I 域例外 FP32）——int8_cd16/cbf16 链传 FP16/BF16（经
+// ConvertBiasFp32ToBytes 的 FP32→C dtype 量化上传，golden 侧须用同一
+// 量化后的 bias 值，见 PrepareInt8CDCaseInputs 的 roundtrip 同步）；
+// int8_ci8/ci32（I32CD）链传默认 FP32。
 inline bool SetInt8CDVecEpiAttrs(sparse_test::SparseLtHandleGuard& handle,
     sparse_test::SparseLtMatmulDescGuard& matmulDesc, int32_t m,
     int32_t alpha_vector_scaling, int32_t beta_vector_scaling,
@@ -465,14 +484,15 @@ inline bool SetInt8CDVecEpiAttrs(sparse_test::SparseLtHandleGuard& handle,
     int32_t biasEnabled, int64_t biasStride, int32_t activationType,
     float reluUb, float reluThr, float geluScale,
     int32_t numBatches, int64_t batchStride, const std::vector<float>* biasVec,
-    VecScalingBuffers& vecBufs, EpilogueBuffers& epiBufs, MatmulNpuResult& result)
+    VecScalingBuffers& vecBufs, EpilogueBuffers& epiBufs, MatmulNpuResult& result,
+    size_t biasEltSize = sizeof(float), aclDataType biasDtype = ACL_FLOAT)
 {
     vecBufs = SetVecScalingAttrs(handle.get(), matmulDesc, m,
         alpha_vector_scaling, beta_vector_scaling, alphaVec, betaVec, result);
     if (result.descSetRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
     epiBufs = SetEpilogueAttrs(handle.get(), matmulDesc, m,
         biasEnabled, biasStride, activationType, reluUb, reluThr, geluScale,
-        numBatches, batchStride, biasVec, result, sizeof(float), ACL_FLOAT);
+        numBatches, batchStride, biasVec, result, biasEltSize, biasDtype);
     if (result.biasSetRet != ACL_SPARSE_STATUS_SUCCESS ||
         result.actSetRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
     return true;
@@ -484,9 +504,8 @@ inline bool SetInt8CDVecEpiAttrs(sparse_test::SparseLtHandleGuard& handle,
 // matAPtr/matBPtr：dense 侧取原输入，prune 成功后指向 dPruned。ok=false
 // 时 result 已置错，调用方直接返回（dPruned 由返回结构持有，存活至
 // 调用方函数尾）。
-// numBatches/batchStride/bPhysSpan 尾参：B-sparse 侧 prune 缓冲
-// 上界 = max(bPhysSpan, kn)（B 物理 span ≥ kn 恒成立，单 batch 紧凑时
-// 相等——与主链 RunBSparsePruneAndTranspose 的 bPhysSpan 语义一致）。
+// numBatches/batchStride 尾参：(b) 下 prune 缓冲容量统一按描述符
+// 物理布局推导（PruneOutCapacityElems）。
 struct Int8CDPrunePtrs {
     sparse_test::DeviceBuffer dPruned;
     void* matAPtr = nullptr;
@@ -498,9 +517,8 @@ inline Int8CDPrunePtrs PruneInt8CDSelectMatPtr(MatmulNpuResult& result,
     sparse_test::SparseLtHandleGuard& handle,
     sparse_test::SparseLtMatmulDescGuard& matmulDesc,
     sparse_test::DeviceBuffer& dA, sparse_test::DeviceBuffer& dB,
-    size_t mk, size_t kn,
     bool isSparseA, aclsparseLtPruneAlg_t pruneAlg, aclrtStream stream,
-    int32_t numBatches = 1, int64_t batchStride = 0, size_t bPhysSpan = 0)
+    int32_t numBatches = 1, int64_t batchStride = 0)
 {
     constexpr size_t kInElt = 1;  // int8
     Int8CDPrunePtrs p;
@@ -508,14 +526,15 @@ inline Int8CDPrunePtrs PruneInt8CDSelectMatPtr(MatmulNpuResult& result,
     p.matBPtr = dB.get();
     if (isSparseA) {
         p.ok = RunPruneForASparse(result, handle.get(), matmulDesc.get(), dA, p.dPruned,
-                                  mk, kInElt, pruneAlg, p.matAPtr, numBatches, batchStride);
+                                  kInElt, pruneAlg, p.matAPtr, numBatches, batchStride);
         return p;
     }
-    const size_t pruneSpan = (bPhysSpan > kn) ? bPhysSpan : kn;
-    p.dPruned = sparse_test::DeviceBuffer::alloc(
-        BatchTotalElems(pruneSpan, numBatches, batchStride) * kInElt);
+    // (b) The B_pruned buffer capacity is derived from the descriptor
+    // physical layout (layout-preserving output).
+    const size_t pruneSpan = PruneOutCapacityElems(matmulDesc.get(), numBatches, batchStride);
+    p.dPruned = sparse_test::DeviceBuffer::alloc(pruneSpan * kInElt);
     if (!PruneInt8CDBSparse(result, handle.get(), matmulDesc.cptr(), dB, p.dPruned,
-                            pruneSpan, pruneAlg, stream, numBatches, batchStride)) { return p; }
+                            pruneAlg, stream, numBatches, batchStride)) { return p; }
     p.matBPtr = p.dPruned.get();
     p.ok = true;
     return p;
@@ -620,6 +639,7 @@ inline MatmulNpuResult RunMatmulNpuInt8CD(
     const std::vector<float>* alphaVec, const std::vector<float>* betaVec,
     int32_t biasEnabled, const std::vector<float>* biasVec,
     int32_t activationType, float reluUb, float reluThr, float geluScale,
+    int64_t biasStride = 0,
     // order/batch/布局尾参（默认 = 单 batch 紧凑 ROW 基线）
     aclsparseOrder_t order = ACL_SPARSE_ORDER_ROW,
     int32_t numBatches = 1, int64_t batchStride = 0,
@@ -628,8 +648,6 @@ inline MatmulNpuResult RunMatmulNpuInt8CD(
     using namespace sparse_test;
     MatmulNpuResult result{};
     constexpr size_t kOutElt = NpuDtypeTrait<CDT>::kEltSize;
-    const size_t mk = static_cast<size_t>(m) * k;
-    const size_t kn = static_cast<size_t>(k) * n;
 
     aclrtStream stream = 0;
     // ---- 物理布局 + 描述符 + batch 属性 + 设备缓冲（铺设段见
@@ -642,10 +660,17 @@ inline MatmulNpuResult RunMatmulNpuInt8CD(
     //      epiBufs.dBias 由 attr 持有 device 指针，须存活至下方 matmul 完成 ----
     VecScalingBuffers vecBufs;
     EpilogueBuffers epiBufs;
+    // B2/A4：bias dtype = C dtype（INT8 × 32I 域例外 FP32）——FP16/BF16 输出
+    // 链传 FP16/BF16 bias（量化上传 + golden 同 roundtrip），I32CD 链 FP32。
+    const size_t cdBiasElt = (std::is_same_v<CDT, uint16_t> ||
+                              std::is_same_v<CDT, bf16_bits_t>)
+        ? sizeof(uint16_t) : sizeof(float);
+    const aclDataType cdBiasDtype = std::is_same_v<CDT, uint16_t>
+        ? ACL_FLOAT16 : (std::is_same_v<CDT, bf16_bits_t> ? ACL_BF16 : ACL_FLOAT);
     if (!SetInt8CDVecEpiAttrs(ctx.handle, *ctx.matmulDesc, m,
         alpha_vector_scaling, beta_vector_scaling, alphaVec, betaVec,
-        biasEnabled, 0, activationType, reluUb, reluThr, geluScale, numBatches, batchStride, biasVec,
-        vecBufs, epiBufs, result)) { return result; }
+        biasEnabled, biasStride, activationType, reluUb, reluThr, geluScale, numBatches, batchStride, biasVec,
+        vecBufs, epiBufs, result, cdBiasElt, cdBiasDtype)) { return result; }
 
     // ---- algSel + plan + ws ----
     std::unique_ptr<SparseLtAlgSelectionGuard> algSel;
@@ -659,9 +684,9 @@ inline MatmulNpuResult RunMatmulNpuInt8CD(
 
     // ---- 剪枝（A-sparse：A_pruned；B-sparse：B_pruned (k,n)）+ 输入指针选择 ----
     Int8CDPrunePtrs pruned = PruneInt8CDSelectMatPtr(result, ctx.handle, *ctx.matmulDesc,
-                                                     ctx.dA, ctx.dB, mk, kn, isSparseA,
+                                                     ctx.dA, ctx.dB, isSparseA,
                                                      pruneAlg, stream, numBatches,
-                                                     batchStride, ctx.lay.bPhysSize);
+                                                     batchStride);
     if (!pruned.ok) { return result; }
 
     // ---- matmul + 回读（回读尺寸 = C/D 物理 span × batch 总量）----

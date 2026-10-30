@@ -25,35 +25,11 @@
 
 #include "csv_loader.h"
 
-#include <cerrno>
 #include <cstdint>
-#include <cstdlib>
 #include <string>
 
 namespace sparse_test
 {
-
-// ============================================================================
-// int64_t 解析（rows/cols/ld 可能超过 int 范围，如 2097124）
-// 缺列/空值返回 0（表示未指定）；非空但非法的输入返回 INT64_MIN（错误标记值），
-// 避免非法输入静默返回 0 与合法 0 混淆。
-// ============================================================================
-inline int64_t parseInt64(const csv_map& row, const std::string& key)
-{
-    auto it = row.find(key);
-    if (it == row.end() || it->second.empty())
-        return 0;
-    const std::string& s = it->second;
-    errno = 0;
-    char* endptr = nullptr;
-    long long val = std::strtoll(s.c_str(), &endptr, 10);
-    // 解析合法性：消费了至少一个字符、无残余字符、未溢出（POSIX strtoll 标准用法）
-    if (endptr == s.c_str() || *endptr != '\0' || errno == ERANGE)
-    {
-        return INT64_MIN; // 非法输入的错误标记值
-    }
-    return static_cast<int64_t>(val);
-}
 
 // ============================================================================
 // 枚举字符串映射（依据类型定义与 dtype 核实）
@@ -172,12 +148,13 @@ struct MatParam
     bool isStructured = false; // 由 sparse 列是否有值决定
     bool valid = false;        // 该 mat 是否参与构造（rows/cols 是否非零且有 dtype）
 
-    // 从 CSV 行按前缀（a_/b_/c_/d_）解析
+    // 从 CSV 行按前缀（a_/b_/c_/d_）解析；rows/cols/ld 用严格版（区分
+    // 「未指定=0」与「非法输入=INT64_MIN」，支撑越界/非法负向用例）
     void fill(const csv_map& row, const std::string& prefix)
     {
-        rows = parseInt64(row, prefix + "rows");
-        cols = parseInt64(row, prefix + "cols");
-        ld = parseInt64(row, prefix + "ld");
+        rows = parseStrictInt64(row, prefix + "rows");
+        cols = parseStrictInt64(row, prefix + "cols");
+        ld = parseStrictInt64(row, prefix + "ld");
         align = static_cast<uint32_t>(parseInt(row, prefix + "align"));
         dtype = ParseDtype(parseString(row, prefix + "dtype"));
         order = ParseOrder(parseString(row, prefix + "order"));

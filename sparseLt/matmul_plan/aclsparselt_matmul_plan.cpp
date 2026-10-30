@@ -87,7 +87,8 @@ aclsparseStatus_t aclsparseLtMatmulPlanInit(
     int32_t effectiveSplitK = (asel->splitKMode == ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL) ? 1 : asel->splitK;
     // 读取 numBatches（A/B/C/D 一致性在 MatDescSetAttribute 时校验）
     int32_t numBatches = (md->matA->numBatches > 0) ? md->matA->numBatches : 1;
-    WsLayout wsl = compute_ws_layout(md_m(md), md_n(md), md_k(md), effectiveSplitK, dt, numBatches);
+    WsLayout wsl = compute_ws_layout(md_m(md), md_n(md), md_k(md), effectiveSplitK, dt, numBatches,
+                                     splt_apruned_span_elems(md, md_m(md), md_k(md)));
     uint32_t coreNum = get_cube_core_num();
     auto* td = new (std::nothrow) AclsparseltTilingData();
     if (td == nullptr) {

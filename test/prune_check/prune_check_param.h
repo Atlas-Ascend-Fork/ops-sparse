@@ -66,9 +66,10 @@ struct PruneCheckParam : public SparseTestParamBase {
     bool isColOrder() const { return order == "COL"; }
     bool isSparseA() const { return sparse_side != "B"; }   // default A when empty
     // 剪枝方向（派生因子，与 prune golden / prune_check host 完全同源）：
-    // alongRow = (trans != isRowOrder)，isRowOrder = (order == ROW)，即
-    // trans == isColOrder。沿行 = N+ROW / T+COL；沿列 = N+COL / T+ROW。
-    bool isAlongRow() const { return isTranspose() == isColOrder(); }
+    // (b) 逻辑空间分组方向：恒沿行（op 视图 K 维）。RowView/ColView 的物理
+    // 几何差异由 wrapper 装配与 host 扫描几何承载；golden/数据生成均按
+    // 逻辑沿行（原 (trans == isColOrder) 派生随 A1 语义修正废弃）。
+    bool isAlongRow() const { return true; }
     bool isDescInvalid() const { return expect_status == "DESC_INVALID"; }
 
     void fillCustom(const csv_map& row) override {

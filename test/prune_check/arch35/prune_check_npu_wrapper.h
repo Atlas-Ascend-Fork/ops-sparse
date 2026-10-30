@@ -65,52 +65,48 @@ inline int PruneCheckPerfRounds()
 namespace sparse_test {
 
 // -----------------------------------------------------------------------------
-// 稀疏侧物理布局规格（A/B 稀疏侧共用；与 PreparePhysicalA 的布局决策一致，
-// DESC_INVALID 拦截探测与正常路径复用同一推导，避免两处分叉）。
+// Sparse-side physical layout spec (shared by the A/B sparse sides; the
+// DESC_INVALID interception probe and the normal path reuse the same
+// derivation to avoid forking).
+// (b) cuSPARSELt semantics (order is the physical memory layout; the kernel
+// scan view = the row-major interpretation of the descriptor physical
+// buffer's (td.rows, td.cols, ld), bit-exact across the four combinations):
+//   RowView (!trans+ROW / trans+COL): physical is row-major under the op
+//     view — !trans+ROW: (m,k) ROW ld=k (passed through as-is);
+//     trans+COL: (k,m) COL ld=k ≡ (m,k) row-major ld=k (passed through
+//     as-is, byte-equivalent).
+//   ColView (!trans+COL / trans+ROW): physical is (k,m) row-major ld=m
+//     (the transpose of the op view; needTranspose=true: logical (m,k) ->
+//     (k,m) transpose before upload).
 // -----------------------------------------------------------------------------
 struct SparseSidePhysicalSpec {
-    int64_t physRows = 0;   // 描述符 rows（物理行数）
-    int64_t physCols = 0;   // 描述符 cols（物理列数）
-    int64_t ld = 0;         // 物理行步长（元素数）
-    size_t physElems = 0;   // 物理缓冲元素数（上传字节数 = physElems * eltSize）
-    bool needTranspose = false;  // T+ROW：上传前需逻辑 (m,k) -> 物理 (k,m) 转置
+    int64_t physRows = 0;   // descriptor rows (natural dims: trans ? k : m)
+    int64_t physCols = 0;   // descriptor cols (natural dims: trans ? m : k)
+    int64_t ld = 0;         // physical row stride (in elements; compact = physical row length)
+    size_t physElems = 0;   // physical buffer element count (row-major view rows x ld)
+    bool needTranspose = false;  // ColView: needs logical (m,k) -> physical (k,m) transpose before upload
 };
 
 // ld 覆盖说明（padding ld 用例）：ldOverride > 0 时采用
 // 自定义物理行步长（padding 布局：ld > 物理行长），合法性校验与描述符层
-// 同口径 —— ldOverride ≥ 物理行长（三分支自动推导的 s.ld 均等于物理行长，
-// 覆盖校验等价 IsLdValid 的 ROW 序 ld≥cols / COL 序 ld≥rows 约束）且为
-// 32B/elem 元素倍数（AllocateAndValidateMatDesc 整除约束，FP32:8 /
-// FP16,BF16:16 / INT8:32）。非法时 ADD_FAILURE 并保持自动推导（既有调用
-// 全部 ldOverride=0，行为不变）。
+// 同口径 —— ldOverride ≥ 物理行长（RowView k / ColView m，IsLdValid 的
+// ROW 序 ld≥cols / COL 序 ld≥rows 约束天然覆盖）且为 32B/elem 元素倍数
+//（AllocateAndValidateMatDesc 整除约束，FP32:8 / FP16,BF16:16 / INT8:32）。
+// 非法时 ADD_FAILURE 并保持自动推导。
 template <typename T>
 inline SparseSidePhysicalSpec SparseSideSpecOf(int32_t m, int32_t k, bool trans,
                                                aclsparseOrder_t order, int64_t ldOverride = 0)
 {
     SparseSidePhysicalSpec s;
-    if (!trans) {
-        // NON_TRANSPOSE：物理恒为 (m, k) 行主序、行步长 ld=k（order 仅决定
-        // 校验方向，不改变内存布局 —— prune README 同款约定）。
-        s.physRows = m;
-        s.physCols = k;
-        s.ld = k;
-        s.needTranspose = false;
-    } else if (order == ACL_SPARSE_ORDER_ROW) {
-        // TRANSPOSE + ROW（沿列）：kernel RowScan R=k × C=m —— 物理为转置
-        // (k, m) 行主序、行步长 ld=m，上传前需转置。
-        s.physRows = k;
-        s.physCols = m;
-        s.ld = m;
-        s.needTranspose = true;
-    } else {
-        // TRANSPOSE + COL（沿行）：kernel RowScan R=m × C=k（同 N+ROW 几何）
-        // —— 物理即逻辑 (m, k) 行主序、行步长 ld=k，无需转置；
-        // 描述符 (rows=k, cols=m) 仅为派生元数据。
-        s.physRows = k;
-        s.physCols = m;
-        s.ld = k;
-        s.needTranspose = false;
-    }
+    const bool isColView = (trans == (order == ACL_SPARSE_ORDER_ROW));
+    // 描述符自然维（不变）：trans ? (k,m) : (m,k)。物理 buffer 的行主序
+    // 扫描视图（kernel DeriveCheckShape 同源）：RowView (m,k) ld=k /
+    // ColView (k,m) ld=m（≡ (m,k) COL ld=m 的同一字节，needTranspose 即
+    // ColView 的装配转置）。IsLdValid 四组合天然满足。
+    s.physRows = trans ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
+    s.physCols = trans ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
+    s.ld = isColView ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
+    s.needTranspose = isColView;
     // padding ld 覆盖（ldOverride > 0）：校验后采用（语义见函数头注释）。
     if (ldOverride > 0) {
         const int64_t alignElems = static_cast<int64_t>(32 / NpuDtypeTrait<T>::kEltSize);
@@ -123,13 +119,11 @@ inline SparseSidePhysicalSpec SparseSideSpecOf(int32_t m, int32_t k, bool trans,
             s.ld = ldOverride;
         }
     }
-    // 物理缓冲元素数（kernel 扫描跨度 (rows-1)*ld+cols 的紧凑上取整）：
-    // T+COL 时扫描行数为逻辑 m（= physCols），故取 physCols×ld
-    //（对齐 prune PruneNpu 的 aPhysSize 公式；其余组合 physRows×ld 与之等价）。
-    // padding ld 覆盖时缓冲按 ld 行距分配（数据区 + padding 区全覆盖）。
-    s.physElems = (trans && order == ACL_SPARSE_ORDER_COL)
-        ? static_cast<size_t>(s.physCols) * static_cast<size_t>(s.ld)
-        : static_cast<size_t>(s.physRows) * static_cast<size_t>(s.ld);
+    // 物理缓冲元素数（行主序扫描视图 rows × ld 的满矩形——kernel 扫描跨度
+    // (rows-1)*ld+cols 的紧凑上取整；padding ld 覆盖时缓冲按 ld 行距分配，
+    // 数据区 + padding 区全覆盖）。行主序视图行数：RowView m / ColView k。
+    s.physElems = static_cast<size_t>(isColView ? k : m) *
+                  static_cast<size_t>(s.ld);
     return s;
 }
 
@@ -155,12 +149,14 @@ inline T PruneCheckPaddingGarbage()
 // padding 区 [物理行长, ld) 填非零垃圾（PruneCheckPaddingGarbage）——
 // 设备缓冲按 ld 行距分配，host 侧数据准备同步写入垃圾。
 // 紧致布局（ld == 物理行长，既有全部用例）行为不变。
+// 物理视图 = (td.rows, td.cols, ld) 行主序（host DeriveCheckShape 与 kernel
+// 扫描同源）：RowView (m,k) / ColView (k,m)，needTranspose 即 ColView。
 template <typename T>
 inline std::vector<T> PrepareSparseSideData(const std::vector<T>& hLogical,
                                             const SparseSidePhysicalSpec& spec,
                                             int32_t m, int32_t k)
 {
-    // 物理行数 / 物理行有效元素数（T+ROW 物理为转置 (k, m)，其余为逻辑 (m, k)）。
+    // 物理行数 / 物理行有效元素数（ColView 物理为转置 (k, m)，RowView 为 (m, k)）。
     const int64_t physRowCnt = spec.needTranspose ? static_cast<int64_t>(k)
                                                   : static_cast<int64_t>(m);
     const int64_t physRowLen = spec.needTranspose ? static_cast<int64_t>(m)

@@ -183,16 +183,18 @@ private:
 // ws+aPrunedOffset），batch 循环 + 同步 + 回读剪枝结果供 golden。
 // 仿 ltmatmul RunPruneForASparse，目标指针参数化（方案 B3 回退路径）。
 // -----------------------------------------------------------------------------
-// Prune 单调用化（prune host batch 增强后）：描述符携带 numBatches/batchStride，
-// 一次 aclsparseLtSpMMAPrune 调用处理全 batch——传 batch0 基址即可。host 侧
-// 不得再按 batch 切片循环（切片会使末切片基址被算子按 numBatches 二次推进而
-// 越界）。输出与输入共用 batchStride 推进；回读 totalElems（BatchTotalElems
-// 语义）的布局与切片版一致，golden 消费方式不变。
+// Single-call prune (after the prune host's batch enhancement): the
+// descriptor carries numBatches/batchStride, and one aclsparseLtSpMMAPrune
+// call handles the whole batch — passing the batch0 base address suffices.
+// (b) The prune output keeps the descriptor (order, ld) layout: totalElems
+// is derived from the physical rectangle / batch stride (by the caller via
+// PruneOutCapacityElems), and the readback is unpacked by CopyPrunedToHost
+// into logical batch-strided — the golden consumption is unchanged.
 inline bool RunPruneToTarget(MatmulNpuResult& result,
     aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
     DeviceBuffer& dIn, uint8_t* targetBase,
     size_t totalElems, size_t kInElt, aclsparseLtPruneAlg_t pruneAlg,
-    aclrtStream stream)
+    aclrtStream stream, int32_t numBatches = 1, int64_t batchStride = 0)
 {
     result.pruneRet = aclsparseLtSpMMAPrune(
         handle, &matmulDesc, dIn.get(), targetBase, pruneAlg, stream);
@@ -201,14 +203,8 @@ inline bool RunPruneToTarget(MatmulNpuResult& result,
         result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return false;
     }
-    result.npuPrunedA.resize(totalElems * kInElt);
-    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), totalElems * kInElt,
-        targetBase, totalElems * kInElt, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (result.memcpyRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return false;
-    }
-    return true;
+    return CopyPrunedToHost(result, matmulDesc, targetBase, totalElems, kInElt,
+                            numBatches, batchStride);
 }
 
 // -----------------------------------------------------------------------------
@@ -296,23 +292,31 @@ template <typename InT, typename OutT, typename CType = InT>
 inline bool PruneASparseForSearch(const MatmulSearchRunArgs<InT, OutT, CType>& args,
     SparseLtHandleGuard& handle, SparseLtMatmulDescGuard& matmulDesc,
     DeviceBuffer& dA, DeviceBuffer& dPruned, void* wsPtr,
-    size_t mk, size_t kInElt, aclrtStream stream,
+    size_t kInElt, aclrtStream stream,
     MatmulSearchNpuResult<OutT>& result, void*& matAPtr)
 {
     const int32_t presetEffSplitK = EffectiveSplitKOf(args.splitKMode, args.splitK);
     const int32_t dtypeCode = SpltDtypeCodeOf(NpuDtypeTrait<InT>::kAclDtype);
-    const size_t totalElems = BatchTotalElems(mk, args.numBatches, args.batchStride);
+    // (b) The prune output keeps the descriptor layout: the aPruned region
+    // capacity = the sparse-side physical span (the white-box offset
+    // recomputation shares the caliber with the in-library
+    // splt_apruned_span_elems).
+    const auto* mdInt = to_matmul_internal(matmulDesc.get());
+    const int64_t aPrunedSpan = splt_apruned_span_elems(mdInt, args.m, args.k);
+    const size_t totalElems = PruneOutCapacityElems(matmulDesc.get(),
+                                                    args.numBatches, args.batchStride);
     uint8_t* targetBase = nullptr;
     if (args.matANull) {
         result.aPrunedOffsetUsed = WhiteboxAPrunedOffset(args.m, args.n, args.k,
-            presetEffSplitK, dtypeCode, args.numBatches);
+            presetEffSplitK, dtypeCode, args.numBatches, aPrunedSpan);
         targetBase = static_cast<uint8_t*>(wsPtr) + result.aPrunedOffsetUsed;
     } else {
         dPruned = DeviceBuffer::alloc(totalElems * kInElt);
         targetBase = static_cast<uint8_t*>(dPruned.get());
     }
     if (!RunPruneToTarget(result, handle.get(), matmulDesc.get(), dA,
-            targetBase, totalElems, kInElt, args.pruneAlg, stream)) {
+            targetBase, totalElems, kInElt, args.pruneAlg, stream,
+            args.numBatches, args.batchStride)) {
         return false;
     }
     matAPtr = args.matANull ? nullptr : dPruned.get();
@@ -548,7 +552,6 @@ MatmulSearchNpuResult<OutT> RunMatmulSearchChain(const MatmulSearchRunArgs<InT, 
     MatmulSearchNpuResult<OutT> result{};
     constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize;
     constexpr size_t kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    const size_t mk = static_cast<size_t>(args.m) * args.k;
 
     SearchStreamGuard streamGuard;
     aclrtStream stream = streamGuard.get();
@@ -570,7 +573,7 @@ MatmulSearchNpuResult<OutT> RunMatmulSearchChain(const MatmulSearchRunArgs<InT, 
     void* matAPtr = ctx.dA.get();
     if (!isDensePath && isSparseA) {
         if (!PruneASparseForSearch<InT, OutT>(args, ctx.handle, *ctx.matmulDesc, ctx.dA,
-                dPruned, setup.wsPtr, mk, kInElt, stream, result, matAPtr)) {
+                dPruned, setup.wsPtr, kInElt, stream, result, matAPtr)) {
             return result;
         }
     }
@@ -617,12 +620,13 @@ MatmulSearchNpuResult<OutT> RunMatmulSearchBSparseChain(const MatmulSearchRunArg
     if (!SetupSearchChainAttrsPlan<InT, OutT>(ctx.handle, *ctx.matmulDesc, args,
                                               result, setup)) { return result; }
 
-    // ---- 步骤 3：B 剪枝 + 回读（pruned B 直接 (k,n) 布局，matmul/golden 共用）----
-    // prune 缓冲上界 = B 物理 span（≥ kn 恒成立；prune 输出恒紧凑 (k,n)）
+    // ---- 步骤 3：B 剪枝 + 回读（(b) pruned B 保持 B 描述符 (order, ld) 布局，
+    //      matmul 直接消费 + 回读解包为逻辑供 golden）----
+    // prune 缓冲容量按 B 描述符物理布局推导（PruneOutCapacityElems）
     DeviceBuffer dBPruned;
     void* matBPtr = nullptr;
     RunBSparsePruneAndTranspose<InT>(result, ctx.handle.get(), ctx.matmulDesc->get(),
-        ctx.dB, dBPruned, ctx.bPhysSpan, kInElt, args.pruneAlg, matBPtr,
+        ctx.dB, dBPruned, kInElt, args.pruneAlg, matBPtr,
         args.numBatches, args.batchStride);
     if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
 

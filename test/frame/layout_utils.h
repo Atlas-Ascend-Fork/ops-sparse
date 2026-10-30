@@ -101,6 +101,11 @@ struct MatmulLayoutOpts {
     aclsparseOrder_t denseOrder = ACL_SPARSE_ORDER_ROW;
     aclsparseOrder_t cdOrder = ACL_SPARSE_ORDER_ROW;
     int64_t ldCd = 0;
+    // (b) 预剪直喂开关：稀疏侧不经 SpMMAPrune，直接以 CPU golden 逻辑剪枝
+    // 结果按 (order, ldSparse) 物理散布喂 matmul——独立验证 matmul 稀疏侧
+    // (order, ld) 贯通（剥离 prune 依赖）。经 layout 参数链透传（链路行为
+    // 开关与布局覆盖同渠道）。
+    bool directFeed = false;
 
     bool hasSparseLd() const { return ldSparse > 0; }
     bool hasDenseLayout() const { return ldDense > 0 || denseOrder == ACL_SPARSE_ORDER_COL; }

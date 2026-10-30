@@ -76,7 +76,7 @@ using namespace AscendC;
 // Prune helpers below use scalar GetValue/SetValue for
 // element-wise compare/zero. Vectorization is not applied because:
 //  - 1:2 pairwise keep-max and 2:4 top-2 selection along-col (SpltPruneGroupN
-//    with stride > 1, used by SpltPruneAlongCol / SpltPruneTileAlongCol) cannot
+//    with stride > 1, used by the ColView STRIP/TILE paths) cannot
 //    be vectorized without gather; strided column access is non-contiguous and
 //    GatherMask is non-preferred on arch35 (DAV_3510).
 //  - Tail element zero-out with stride > 1 (SpltPruneGroupN, count not multiple
@@ -85,15 +85,12 @@ using namespace AscendC;
 //  - TILE 90-config enumeration (SpltPruneTile) is scalar control flow;
 //    per-config L1-norm is a 16-element reduction and per-config masking
 //    zero-out of non-kept elements — both with marginal vectorization benefit.
-//  - Trans path transpose write-back (SpltPruneTransWriteColsVec /
-//    SpltPruneTileTransRowOrder) has been vectorized via TransDataTo5HD +
-//    DataCopyPad; the along-row prune (stride=1) uses
-//    SpltPruneGroupNVec (vectorized Cast + Abs + Mul keepMask with scalar
-//    GetValue per-group comparison). Scalar GetValue/SetValue remains for
-//    along-col (stride > 1), TILE 90-config, stride > 1 tail zero-out,
-//    and __bf16 / int8_t (Cast API does not support these type pairs).
-//    int8_t Trans transpose also uses scalar GetValue/SetValue because
-//    TransDataTo5HD does not support int8_t on arch35 (hardware trap).
+//  - The RowView path (stride=1) uses SpltPruneGroupNVec (vectorized Cast +
+//    Abs + Mul keepMask with scalar GetValue per-group comparison). Scalar
+//    GetValue/SetValue remains for ColView (stride > 1), TILE 90-config,
+//    stride > 1 tail zero-out, and __bf16 / int8_t (Cast API does not support
+//    these type pairs). With (b) layout preserving, ColView direct stores
+//    perform all moves via DataCopyPad (int8_t no longer limited by TransDataTo5HD).
 // ============================================================================
 
 // ============================================================================
@@ -313,20 +310,6 @@ __aicore__ inline void SpltPruneGroupNVec(
     SpltPruneGroupNVecApply<T>(srcUB, absUB, keepMaskUB, base, count);
 }
 
-template <typename T>
-__aicore__ inline void SpltPruneLoadRowBlock(
-    LocalTensor<T>& blkUB, GlobalTensor<T>& aGM,
-    DataCopyExtParams& copyParams, DataCopyPadExtParams<T>& padParams,
-    int32_t rowStart, int32_t curRowTile, int32_t rowLen, int32_t ld)
-{
-    copyParams.blockCount = static_cast<uint32_t>(curRowTile);
-    copyParams.blockLen = static_cast<uint32_t>(rowLen * sizeof(T));
-    copyParams.srcStride = static_cast<uint32_t>((ld - rowLen) * sizeof(T));
-    copyParams.dstStride = 0;
-    DataCopyPad(blkUB, aGM[static_cast<int64_t>(rowStart) * ld], copyParams, padParams);
-    PipeBarrier<PIPE_MTE2>();
-}
-
 // SpltPruneLoadRowBlockChunk — chunked GM→UB load for trans paths with large m.
 // Loads curRowTile rows × curCols columns starting at (rowStart, colStart) from
 // the (k, m) row-major GM source (ld ≥ m). The destination UB row stride is
@@ -362,18 +345,83 @@ __aicore__ inline void SpltPruneLoadRowBlockChunk(
     PipeBarrier<PIPE_MTE2>();
 }
 
+// RowView ((N,ROW)/(T,COL)) UB->GM store: output keeps the input (order, ld)
+// layout — each row writes rowLen elements at rowStart*outLd; the GM-side
+// dstStride skips the [rowLen, outLd) padding (padding is never written, user
+// values are kept; under in-place the input padding is preserved as-is).
+// blockCount/blockLen reuse the load-side values; UB-side srcStride=0 (k*elemSize
+// is a 32B multiple — guaranteed by the descriptor 32B/elem alignment — so rows
+// are naturally contiguous in 32B slots).
+// GM-side padded 2D write precedent: SpltFusedEpilogueOutputFp32 (same dstStride
+// formula).
+// S->MTE3 sync: the RowView prune writes are NOT all on the V pipe — the
+// float/__fp16 STRIP main path lands via Mul/Cast (V), but the TILE path
+// (SpltPruneTile 90-config masking + STRIP tail fallback) and the __bf16 /
+// int8_t / short-row scalar fallbacks (SpltPruneGroupN) write blkUB with
+// scalar SetValue (S pipe). A lone V_MTE3 flag fires immediately when the V
+// pipe is idle, letting MTE3 read blkUB before the scalar writes are visible
+// (pruned-out elements written back with their original values — a
+// timing-dependent silent failure). The double barrier (V_MTE3 + S_MTE3)
+// uniformly covers every producer pipe without enumerating per path; setting
+// an extra flag for an idle pipe is harmless (devkit precedent: the
+// SetFlag/WaitFlag<HardEvent::S_MTE3> idiom in dav_m200/dav_c100
+// kernel_operator_sync_impl.h, scalar UB write -> copy_ubuf_to_gm).
 template <typename T>
 __aicore__ inline void SpltPruneStoreRowBlock(
     LocalTensor<T>& blkUB, GlobalTensor<T>& aOutGM,
     DataCopyExtParams& copyParams,
-    int32_t rowStart, int32_t rowLen)
+    int32_t rowStart, int32_t rowLen, int32_t outLd)
 {
     SetFlag<HardEvent::V_MTE3>(0);
     WaitFlag<HardEvent::V_MTE3>(0);
+    SetFlag<HardEvent::S_MTE3>(0);
+    WaitFlag<HardEvent::S_MTE3>(0);
     copyParams.srcStride = 0;
-    copyParams.dstStride = 0;
-    DataCopyPad(aOutGM[static_cast<int64_t>(rowStart) * rowLen], blkUB, copyParams);
+    copyParams.dstStride = static_cast<uint32_t>((outLd - rowLen) * sizeof(T));
+    DataCopyPad(aOutGM[static_cast<int64_t>(rowStart) * outLd], blkUB, copyParams);
     SetFlag<HardEvent::MTE3_MTE2>(0);
+    WaitFlag<HardEvent::MTE3_MTE2>(0);
+}
+
+// ColView ((N,COL)/(T,ROW)) in-place direct store: UB block (row stride
+// alignedStride) -> GM same-position block in (k,m) row-major ld (base
+// rowStart*ld + colStart). The UB-side srcStride mirrors the load-side
+// dstStride formula of SpltPruneLoadRowBlockChunk (in 32B slot units);
+// the GM-side dstStride skips the [curCols, ld) padding. The transpose
+// write-back mechanism (TransWrite* + transBuf) has been removed — kept/zeroed
+// elements land directly back at the same physical positions they were read from.
+// S->MTE3 sync: on BOTH ColView paths the prune writes are entirely scalar
+// (S pipe) — STRIP's SpltPruneGroupN runs with stride > 1 (grouping along
+// physical columns) and TILE's 90-config masking + tail handling
+// (SpltPruneTile / SpltPruneTileTransTails) all use GetValue/SetValue. The
+// V pipe is idle, so a lone V_MTE3 flag fires immediately and MTE3 could
+// start reading blkUB before the scalar writes are visible (pruned-out
+// elements written back with their original values — a timing-dependent
+// silent failure). The double barrier (V_MTE3 + S_MTE3) uniformly covers
+// both producer pipes; the extra flag on an idle pipe is harmless (devkit
+// precedent: the SetFlag/WaitFlag<HardEvent::S_MTE3> idiom in dav_m200 /
+// dav_c100 kernel_operator_sync_impl.h, scalar UB write -> copy_ubuf_to_gm).
+template <typename T>
+__aicore__ inline void SpltPruneStoreRowBlockCol(
+    LocalTensor<T>& blkUB, GlobalTensor<T>& aOutGM,
+    DataCopyExtParams& copyParams,
+    int32_t rowStart, int32_t colStart, int32_t curRowTile,
+    int32_t curCols, int32_t ld, int32_t alignedStride)
+{
+    SetFlag<HardEvent::V_MTE3>(0);
+    WaitFlag<HardEvent::V_MTE3>(0);
+    SetFlag<HardEvent::S_MTE3>(0);
+    WaitFlag<HardEvent::S_MTE3>(0);
+    copyParams.blockCount = static_cast<uint32_t>(curRowTile);  // <= TRANS_TILE(16) < 32-block cap
+    copyParams.blockLen = static_cast<uint32_t>(curCols * sizeof(T));
+    const int32_t naturalBytes = (curCols * static_cast<int32_t>(sizeof(T)) +
+                                   SPLT_UB_ALIGN_BYTES - 1) /
+                                   SPLT_UB_ALIGN_BYTES * SPLT_UB_ALIGN_BYTES;
+    copyParams.srcStride = static_cast<uint32_t>(
+        (alignedStride * static_cast<int32_t>(sizeof(T)) - naturalBytes) / SPLT_UB_ALIGN_BYTES);
+    copyParams.dstStride = static_cast<uint32_t>((ld - curCols) * sizeof(T));
+    DataCopyPad(aOutGM[static_cast<int64_t>(rowStart) * ld + colStart], blkUB, copyParams);
+    SetFlag<HardEvent::MTE3_MTE2>(0);  // cross-iteration WAR: drain before the next chunk load overwrites blkUB
     WaitFlag<HardEvent::MTE3_MTE2>(0);
 }
 
@@ -470,263 +518,33 @@ __aicore__ inline int32_t SpltAlignedStride(int32_t elems)
     return alignedBytes / static_cast<int32_t>(sizeof(T));
 }
 
-template <typename T>
-__aicore__ inline int32_t SpltPruneAlongColInit(
-    TBuf<TPosition::VECCALC>& blockBuf, TPipe& pipe,
-    LocalTensor<T>& blkUB,
-    DataCopyExtParams& copyParams, DataCopyPadExtParams<T>& padParams,
-    int32_t k)
-{
-    const int32_t alignedK = SpltAlignedStride<T>(k);
-    pipe.InitBuffer(blockBuf, static_cast<uint32_t>(SPLT_PRUNE_ROW_TILE) *
-                                static_cast<uint32_t>(alignedK) * sizeof(T));
-    blkUB = blockBuf.Get<T>();
-    copyParams = DataCopyExtParams{1, 0, 0, 0, 0};
-    padParams = DataCopyPadExtParams<T>{false, 0, 0, T(0)};
-    return alignedK;
-}
-
-template <typename T>
-__aicore__ inline int32_t SpltPruneColLoadIter(
-    LocalTensor<T>& blkUB, GlobalTensor<T>& aGM,
-    DataCopyExtParams& copyParams, DataCopyPadExtParams<T>& padParams,
-    int32_t rowStart, int32_t m, int32_t k, int32_t ld)
-{
-    int32_t curRowTile = (rowStart + SPLT_PRUNE_ROW_TILE <= m)
-                         ? SPLT_PRUNE_ROW_TILE : (m - rowStart);
-    SpltPruneLoadRowBlock<T>(blkUB, aGM, copyParams, padParams, rowStart, curRowTile, k, ld);
-    return curRowTile;
-}
-
 // ----------------------------------------------------------------------------
-// SpltPruneAlongCol — along-column pruning: each block processes ROW_TILE rows.
-// Loads GM→UB, prunes columns, stores UB→GM. Sync order: MTE2 after load,
-// V after prune, MTE3_MTE2 flag after store (cross-iteration WAR on blkUB).
-// Output is always written as contiguous (m, k) row-major
-// (stride = k), while input may have stride ld >= k (padded matrix).
-// ----------------------------------------------------------------------------
-template <typename T>
-__aicore__ inline void SpltPruneAlongCol(
-    GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
-    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum)
-{
-    constexpr int32_t groupSize = std::is_same_v<T, float> ? 2 : 4;
-    TBuf<TPosition::VECCALC> blockBuf;
-    TPipe pipe;
-    LocalTensor<T> blkUB;
-    DataCopyExtParams copyParams{1, 0, 0, 0, 0};
-    DataCopyPadExtParams<T> padParams{false, 0, 0, T(0)};
-    const int32_t alignedK = SpltPruneAlongColInit<T>(blockBuf, pipe, blkUB,
-                                                       copyParams, padParams, k);
-
-    for (int32_t rowStart = blockId * SPLT_PRUNE_ROW_TILE;
-         rowStart < m; rowStart += blockNum * SPLT_PRUNE_ROW_TILE) {
-        int32_t curRowTile = SpltPruneColLoadIter<T>(blkUB, aGM, copyParams, padParams,
-                                                      rowStart, m, k, ld);
-
-        for (int32_t j = 0; j < k; ++j) {
-            SpltPruneGroupN<T>(blkUB, j, alignedK, curRowTile, groupSize);
-        }
-
-        SpltPruneStoreRowBlock<T>(blkUB, aOutGM, copyParams, rowStart, k);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// SpltPruneTransRowOrder — sparseTrans=true, ROW order path.
-// Physical A is (k, m) row-major: data[physRow * ld + physCol], physRow ∈ [0,k),
-// physCol ∈ [0,m), ld >= m. Logical[i][j] = data[j * ld + i].
-//
-// pruneAlongRow=0 (logical along-col): for each logical column j, prune groups
-// along logical rows i. Logical column j = physical row j (contiguous m elements).
-// So this is along-row pruning on each physical row.
-//
-// Output A_pruned is (m, k) row-major: A_pruned[i * k + j] = pruned logical[i][j]
-// = pruned data[j * ld + i]. This requires a transpose write: for each tile of
-// curRowTile physical rows, load (curRowTile, m), prune each row, then transpose
-// to (m, curRowTile) and write contiguous rows to A_pruned.
-// ----------------------------------------------------------------------------
-template <typename T>
-__aicore__ inline void SpltPruneTransWriteInt8(
-    LocalTensor<T>& blkUB, LocalTensor<T>& transUB,
-    int32_t curRowTile, int32_t cols, int32_t colStart, int32_t stride)
-{
-    constexpr int32_t TRANS_TILE = 16;
-    constexpr int32_t TRANS_UB_STRIDE = (sizeof(T) == 1) ? 32 : TRANS_TILE;
-    for (int32_t r = 0; r < curRowTile; ++r) {
-        for (int32_t c = 0; c < cols; ++c) {
-            transUB.SetValue(c * TRANS_UB_STRIDE + r,
-                             blkUB.GetValue(r * stride + colStart + c));
-        }
-    }
-    PipeBarrier<PIPE_V>();
-}
-
-template <typename T>
-__aicore__ inline void SpltPruneTransWriteFp32(
-    LocalTensor<T>& blkUB, LocalTensor<T>& transUB,
-    int32_t curRowTile, int32_t cols, int32_t colStart, int32_t stride)
-{
-    constexpr int32_t TRANS_TILE = 16;
-    constexpr int32_t TRANS_UB_STRIDE = TRANS_TILE;
-    constexpr int32_t BLOCK_ELEM = 8;
-    constexpr int32_t DST_STRIDE_FACTOR = 2;
-    int32_t colGroups = (cols + BLOCK_ELEM - 1) / BLOCK_ELEM;
-    for (int32_t j = 0; j < colGroups; ++j) {
-        int32_t colBase = colStart + j * BLOCK_ELEM;
-        LocalTensor<T> srcList[TRANS_TILE];
-        LocalTensor<T> dstList[TRANS_TILE];
-        for (int32_t i = 0; i < TRANS_TILE; ++i) {
-            int32_t row = (i < curRowTile) ? i : 0;
-            srcList[i] = blkUB[row * stride + colBase];
-        }
-        constexpr int32_t dstRows = TRANS_TILE / DST_STRIDE_FACTOR;
-        for (int32_t kk = 0; kk < dstRows; ++kk) {
-            int32_t outRow = kk + j * BLOCK_ELEM;
-            dstList[DST_STRIDE_FACTOR * kk] = transUB[outRow * TRANS_UB_STRIDE];
-            dstList[DST_STRIDE_FACTOR * kk + 1] = transUB[outRow * TRANS_UB_STRIDE + BLOCK_ELEM];
-        }
-        TransDataTo5HDParams params(false, false, 1, 0, 0);
-        TransDataTo5HD<T>(dstList, srcList, params);
-        PipeBarrier<PIPE_V>();
-    }
-}
-
-template <typename T>
-__aicore__ inline void SpltPruneTransWriteFp16(
-    LocalTensor<T>& blkUB, LocalTensor<T>& transUB,
-    int32_t curRowTile, int32_t cols, int32_t colStart, int32_t stride)
-{
-    constexpr int32_t TRANS_TILE = 16;
-    constexpr int32_t TRANS_UB_STRIDE = TRANS_TILE;
-    uint16_t repeats = static_cast<uint16_t>((cols + TRANS_TILE - 1) / TRANS_TILE);
-    LocalTensor<T> srcList[TRANS_TILE];
-    LocalTensor<T> dstList[TRANS_TILE];
-    for (int32_t i = 0; i < TRANS_TILE; ++i) {
-        int32_t row = (i < curRowTile) ? i : 0;
-        srcList[i] = blkUB[row * stride + colStart];
-        dstList[i] = transUB[i * TRANS_UB_STRIDE];
-    }
-    uint16_t dstRS = (repeats <= 1) ? 0 : 16;
-    uint16_t srcRS = (repeats <= 1) ? 0 : 1;
-    TransDataTo5HDParams params(false, false, static_cast<uint8_t>(repeats), dstRS, srcRS);
-    TransDataTo5HD<T>(dstList, srcList, params);
-    PipeBarrier<PIPE_V>();
-}
-
-template <typename T>
-__aicore__ inline void SpltPruneTransWriteColsVec(
-    LocalTensor<T>& blkUB, LocalTensor<T>& transUB, GlobalTensor<T>& aOutGM,
-    DataCopyExtParams& writeParams,
-    int32_t curRowTile, int32_t stride, int32_t cols, int32_t colOffset,
-    int32_t k, int32_t rowStart)
-{
-    constexpr int32_t TRANS_TILE = 16;
-    constexpr int32_t TRANS_UB_STRIDE = (sizeof(T) == 1) ? 32 : TRANS_TILE;
-    PipeBarrier<PIPE_V>();
-    writeParams.blockCount = 1;
-    writeParams.blockLen = static_cast<uint32_t>(curRowTile * sizeof(T));
-    writeParams.srcStride = 0;
-    writeParams.dstStride = 0;
-    for (int32_t colStart = 0; colStart < cols; colStart += TRANS_TILE) {
-        int32_t curCols = (colStart + TRANS_TILE <= cols) ? TRANS_TILE : (cols - colStart);
-        if constexpr (std::is_same_v<T, int8_t>) {
-            SpltPruneTransWriteInt8<T>(blkUB, transUB, curRowTile, curCols, colStart, stride);
-        } else if constexpr (sizeof(T) == 4) {
-            SpltPruneTransWriteFp32<T>(blkUB, transUB, curRowTile, curCols, colStart, stride);
-        } else {
-            SpltPruneTransWriteFp16<T>(blkUB, transUB, curRowTile, curCols, colStart, stride);
-        }
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        for (int32_t r = 0; r < curCols; ++r) {
-            DataCopyPad(aOutGM[static_cast<int64_t>(colOffset + colStart + r) * k + rowStart],
-                        transUB[r * TRANS_UB_STRIDE], writeParams);
-        }
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
-    }
-}
-
+// SpltPruneTransInitBuffers — ColView path (shared by STRIP/TILE) UB buffer init.
+// blkUB holds a TRANS_TILE x alignedStride (= chunkM 32B-aligned) physical
+// block; the last row/block keeps a TRANS_TILE*elemSize margin (hardware
+// prefetch safety headroom).
+// (b) layout preserving: the transpose write-back transBuf/transUB and the
+// TransWrite* family have been removed, together with the STRIP-path
+// absBuf/keepMaskBuf (vectorized group masks) — ColView grouping runs along
+// physical columns (stride>1) and is a scalar path anyway.
 template <typename T>
 __aicore__ inline void SpltPruneTransInitBuffers(
-    TBuf<TPosition::VECCALC>& blockBuf, TBuf<TPosition::VECCALC>& transBuf,
-    TPipe& pipe, int32_t bufStride,
-    LocalTensor<T>& blkUB, LocalTensor<T>& transUB,
-    DataCopyExtParams& loadParams, DataCopyPadExtParams<T>& padParams,
-    DataCopyExtParams& writeParams)
+    TBuf<TPosition::VECCALC>& blockBuf, TPipe& pipe, int32_t bufStride,
+    LocalTensor<T>& blkUB,
+    DataCopyExtParams& loadParams, DataCopyPadExtParams<T>& padParams)
 {
     constexpr int32_t TRANS_TILE = 16;
-    constexpr int32_t TRANS_UB_STRIDE = (sizeof(T) == 1) ? 32 : TRANS_TILE;
-    // TransDataTo5HD 执行 32B 块对齐读取，当 alignedM == m（m 已 32B 对齐）时
-    // 末行末块恰好位于 buffer 边界，硬件预取可能越界。保留 TRANS_TILE*sizeof(T)
-    // padding 作为安全余量。
     pipe.InitBuffer(blockBuf, static_cast<uint32_t>(TRANS_TILE) *
                                 static_cast<uint32_t>(bufStride) * sizeof(T) +
                                 static_cast<uint32_t>(TRANS_TILE) * sizeof(T));
-    pipe.InitBuffer(transBuf, static_cast<uint32_t>(TRANS_TILE) *
-                                static_cast<uint32_t>(TRANS_UB_STRIDE) * sizeof(T));
     blkUB = blockBuf.Get<T>();
-    transUB = transBuf.Get<T>();
     loadParams = DataCopyExtParams{1, 0, 0, 0, 0};
     padParams = DataCopyPadExtParams<T>{false, 0, 0, T(0)};
-    writeParams = DataCopyExtParams{1, static_cast<uint32_t>(TRANS_TILE * sizeof(T)), 0, 0, 0};
-}
-
-template <typename T>
-__aicore__ inline void SpltPruneTransRowOrder(
-    GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
-    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum,
-    int32_t chunkM)
-{
-    constexpr int32_t groupSize = std::is_same_v<T, float> ? 2 : 4;
-    constexpr int32_t TRANS_TILE = 16;
-    // When m > chunkM, split the m-dimension into chunks of chunkM
-    // columns. Each chunk loads TRANS_TILE rows × chunkM cols, prunes along-row,
-    // and transposes back to GM at the correct column offset. chunkM is aligned
-    // to 32B/elemSize so alignedChunkM == chunkM (exact UB row stride).
-    // When m <= chunkM, single chunk (= m), behavior unchanged from original.
-    const int32_t effectiveChunkM = (chunkM > 0 && chunkM < m) ? chunkM : m;
-    const int32_t alignedChunkM = SpltAlignedStride<T>(effectiveChunkM);
-    TBuf<TPosition::VECCALC> blockBuf, transBuf;
-    TBuf<TPosition::VECCALC> absBuf, keepMaskBuf;
-    TPipe pipe;
-    LocalTensor<T> blkUB;
-    LocalTensor<T> transUB;
-    LocalTensor<float> absUB;
-    LocalTensor<float> keepMaskUB;
-    DataCopyExtParams loadParams{1, 0, 0, 0, 0};
-    DataCopyPadExtParams<T> padParams{false, 0, 0, T(0)};
-    DataCopyExtParams writeParams{1, static_cast<uint32_t>(TRANS_TILE * sizeof(T)), 0, 0, 0};
-    SpltPruneTransInitBuffers<T>(blockBuf, transBuf, pipe, alignedChunkM, blkUB, transUB,
-                                   loadParams, padParams, writeParams);
-    pipe.InitBuffer(absBuf, static_cast<uint32_t>(effectiveChunkM + 64) * sizeof(float));
-    pipe.InitBuffer(keepMaskBuf, static_cast<uint32_t>(effectiveChunkM + 64) * sizeof(float));
-    absUB = absBuf.Get<float>();
-    keepMaskUB = keepMaskBuf.Get<float>();
-
-    for (int32_t rowStart = blockId * TRANS_TILE;
-         rowStart < k; rowStart += blockNum * TRANS_TILE) {
-        int32_t curRowTile = (rowStart + TRANS_TILE <= k) ? TRANS_TILE : (k - rowStart);
-        // Iterate over m in chunks of effectiveChunkM columns.
-        for (int32_t colStart = 0; colStart < m; colStart += effectiveChunkM) {
-            int32_t curCols = (colStart + effectiveChunkM <= m)
-                              ? effectiveChunkM : (m - colStart);
-            SpltPruneLoadRowBlockChunk<T>(blkUB, aGM, loadParams, padParams,
-                                            rowStart, curRowTile, colStart,
-                                            curCols, ld, alignedChunkM);
-            for (int32_t r = 0; r < curRowTile; ++r) {
-                SpltPruneGroupNVec<T>(blkUB, absUB, keepMaskUB,
-                                        r * alignedChunkM, curCols, groupSize);
-            }
-            SpltPruneTransWriteColsVec<T>(blkUB, transUB, aOutGM, writeParams, curRowTile,
-                                             alignedChunkM, curCols, colStart, k, rowStart);
-        }
-    }
 }
 
 // ============================================================================
-// [TILE] TILE mode paths — SpltPruneAlongRowUnified / SpltPruneTileAlongCol / SpltPruneTileTransRowOrder.
+// [TILE] TILE mode paths — SpltPruneAlongRowUnified (RowView) /
+// SpltPruneTileTransRowOrder (ColView).
 // Each path loads data into UB, processes complete TS×TS tiles via
 // SpltPruneTile, and falls back to STRIP (SpltPruneGroupN) for
 // edge tiles that cannot form a complete TS×TS block. Data load/store and
@@ -744,40 +562,42 @@ __aicore__ inline void SpltPruneTransRowOrder(
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// SpltPruneTileTransTails — STRIP fallback for sparseTrans TILE path edge tiles.
-// Handles tail logical cols (curRowTile % TS != 0) and tail logical rows
-// (m % TS != 0). Extracted to keep SpltPruneTileTransRowOrder NBNC ≤ 50.
-// stride = alignedM (32B-aligned UB row stride in elements).
-// Removed unused absUB/keepMaskUB params (this function only uses
-// scalar SpltPruneGroupN, no Vector API).
+// SpltPruneTileTransTails — ColView TILE path edge handling (physical view
+// (k,m): rows follow the k dim, cols follow the m dim, TS equals groupSize).
+// The full tile region — extent fullTileColsK×TS along the k rows dim and
+// fullTileRowsM×TS along the m cols dim — is covered by SpltPruneTileDispatch.
+// The tails mirror the golden PruneTileColFp32 Col-STRIP edge semantics on
+// the (k,m) view:
+//   (1) tail physical columns (curCols not a whole multiple of TS, i.e.
+//       op-view tail rows of m past its whole TS multiples):
+//       full-column STRIP (SpltPruneGroupN full groups + tail zeroing).
+//   (2) tail physical rows (curRowTile not a whole multiple of TS, i.e.
+//       k tail groups past the whole TS multiples):
+//       partial-group elements zeroed (idempotent, covering all columns —
+//       trailing groups with a count below groupSize are zeroed per the
+//       2:4 convention).
+// stride is alignedChunkM (the 32B-aligned UB row stride, in elements).
 // ----------------------------------------------------------------------------
 template <typename T>
 __aicore__ inline void SpltPruneTileTransTails(
     LocalTensor<T>& blkUB,
-    int32_t curRowTile, int32_t m,
+    int32_t curRowTile, int32_t curCols,
     int32_t fullTileRowsM, int32_t fullTileColsK,
     int32_t TS, int32_t groupSize, int32_t stride)
 {
-    // Tail logical cols (= tail physical rows, curRowTile % TS != 0):
-    // along-col on logical = along-row on physical. For each tail physical row,
-    // prune groups along physical cols (stride=1) per full tile-row in m.
-    // Matches golden PruneTileColFp32: PruneColFp32 groups along logical rows
-    // (= physical cols) for each logical column (= physical row).
-    int32_t tailColStart = fullTileColsK * TS;
-    if (tailColStart < curRowTile) {
-        for (int32_t tr = 0; tr < fullTileRowsM; ++tr) {
-            int32_t iBase = tr * TS;
-            for (int32_t r = tailColStart; r < curRowTile; ++r) {
-                SpltPruneGroupN<T>(blkUB, r * stride + iBase, 1, TS, groupSize);
-            }
-        }
+    // (1) tail physical columns: full-column STRIP (grouping along physical
+    // rows k + tail zeroing). No-tail inputs degenerate naturally: the loop
+    // condition subsumes the entry check (codecheck redundant-code cleanup,
+    // behavior unchanged).
+    int32_t tailColStart = fullTileRowsM * TS;
+    for (int32_t tc = tailColStart; tc < curCols; ++tc) {
+        SpltPruneGroupN<T>(blkUB, tc, stride, curRowTile, groupSize);
     }
-    // Tail logical rows: m % TS != 0 → contiguous STRIP for each physical row.
-    int32_t tailRowStart = fullTileRowsM * TS;
-    if (tailRowStart < m) {
-        int32_t tailCount = m - tailRowStart;
-        for (int32_t r = 0; r < curRowTile; ++r) {
-            SpltPruneGroupN<T>(blkUB, r * stride + tailRowStart, 1, tailCount, groupSize);
+    // (2) tail physical rows: partial groups (count < groupSize) zeroed whole row.
+    int32_t tailRowStart = fullTileColsK * TS;
+    for (int32_t r = tailRowStart; r < curRowTile; ++r) {
+        for (int32_t c = 0; c < curCols; ++c) {
+            blkUB.SetValue(r * stride + c, SpltZeroValue<T>());
         }
     }
 }
@@ -856,104 +676,86 @@ __aicore__ inline void SpltPruneAlongRowUnified(
             }
         }
 
-        // Store
-        SpltPruneStoreRowBlock<T>(blkUB, aOutGM, copyParams, rowStart, k);
+        // Store (output keeps the (order, ld) layout: dstStride skips row-tail padding)
+        SpltPruneStoreRowBlock<T>(blkUB, aOutGM, copyParams, rowStart, k, ld);
     }
 }
 
 // ----------------------------------------------------------------------------
-// SpltPruneTileAlongCol — TILE along-col path: each block processes 16 rows.
-// Within 16 rows, groups TS rows × TS cols tiles. Tail cols/rows → STRIP.
-// Uses alignedK (32B-aligned UB row stride) for all scalar
-// element access and buffer allocation. See SpltAlignedStride for details.
+// [codecheck dedup] ColView STRIP/TILE shared load/store scaffold. The
+// 21-line bit-identical scaffolding of the former SpltPruneTransRowOrder
+// (STRIP) and SpltPruneTileTransRowOrder (TILE) bodies (chunkM derivation /
+// UB init / rowTile×chunk loops / SpltPruneLoadRowBlockChunk load /
+// SpltPruneStoreRowBlockCol in-place writeback) was hoisted here; per-chunk
+// grouping dispatches on isTile — statements and evaluation order stay
+// bit-identical.
 // ----------------------------------------------------------------------------
+// SpltPruneTransGroupChunk — STRIP per-chunk grouping.
+// Grouping along physical columns (= op-view rows, the K dim):
+// fixed physical column c, group elements spanning physical rows
+// (stride=alignedChunkM) — same shape as the golden Col variant on
+// the (k,m) view; trailing partial groups are zeroed inside
+// SpltPruneGroupN.
 template <typename T>
-__aicore__ inline void SpltPruneTileAlongCol(
-    GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
-    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum)
+__aicore__ inline void SpltPruneTransGroupChunk(
+    LocalTensor<T>& blkUB, int32_t curRowTile, int32_t curCols,
+    int32_t alignedChunkM, int32_t groupSize)
+{
+    for (int32_t c = 0; c < curCols; ++c) {
+        SpltPruneGroupN<T>(blkUB, c, alignedChunkM, curRowTile, groupSize);
+    }
+}
+
+// SpltPruneTileTransGroupChunk — TILE per-chunk grouping: complete TS×TS
+// tile core (SpltPruneTileDispatch enumerating the 90/2 configs) + edge
+// fallback (tail physical columns via full-column STRIP, tail physical rows'
+// partial groups zeroed, SpltPruneTileTransTails).
+template <typename T>
+__aicore__ inline void SpltPruneTileTransGroupChunk(
+    LocalTensor<T>& blkUB, int32_t curRowTile, int32_t curCols,
+    int32_t alignedChunkM, int32_t groupSize)
 {
     constexpr int32_t TS = std::is_same_v<T, float> ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16;
-    constexpr int32_t groupSize = std::is_same_v<T, float> ? 2 : 4;
-    DataCopyExtParams copyParams{1, 0, 0, 0, 0};
-    DataCopyPadExtParams<T> padParams{false, 0, 0, T(0)};
-    TBuf<TPosition::VECCALC> blockBuf;
-    TPipe pipe;
-    LocalTensor<T> blkUB;
-    const int32_t alignedK = SpltPruneAlongColInit<T>(blockBuf, pipe, blkUB,
-                                                       copyParams, padParams, k);
-
-    for (int32_t rowStart = blockId * SPLT_PRUNE_ROW_TILE;
-         rowStart < m; rowStart += blockNum * SPLT_PRUNE_ROW_TILE) {
-        int32_t curRowTile = SpltPruneColLoadIter<T>(blkUB, aGM, copyParams, padParams,
-                                                      rowStart, m, k, ld);
-
-        int32_t fullTileRows = curRowTile / TS;
-        int32_t fullTileCols = k / TS;
-        // Complete TS×TS tiles.
-        for (int32_t tr = 0; tr < fullTileRows; ++tr) {
-            int32_t rowBase = tr * TS;
-            for (int32_t tc = 0; tc < fullTileCols; ++tc) {
-                SpltPruneTileDispatch<T>(blkUB, rowBase, tc * TS, alignedK);
-            }
+    int32_t fullTileRowsM = curCols / TS;
+    int32_t fullTileColsK = curRowTile / TS;
+    for (int32_t tr = 0; tr < fullTileRowsM; ++tr) {
+        int32_t iBase = tr * TS;
+        for (int32_t tc = 0; tc < fullTileColsK; ++tc) {
+            SpltPruneTileDispatch<T>(blkUB, tc * TS, iBase, alignedChunkM);
         }
-        // Tail columns (k % TS != 0): along-col STRIP — for each tail
-        // column, prune groups of TS rows (stride=alignedK). Matches golden PruneColFp32.
-        int32_t tailStart = fullTileCols * TS;
-        if (tailStart < k) {
-            for (int32_t tc = tailStart; tc < k; ++tc) {
-                for (int32_t tr = 0; tr < fullTileRows; ++tr) {
-                    int32_t rowBase = tr * TS;
-                    SpltPruneGroupN<T>(blkUB, rowBase * alignedK + tc, alignedK, TS, groupSize);
-                }
-            }
-        }
-        // Tail rows (curRowTile % TS != 0): along-col STRIP — for each
-        // column, prune the tail row group (stride=alignedK, count < groupSize → zeroed).
-        int32_t tailRowStart = fullTileRows * TS;
-        if (tailRowStart < curRowTile) {
-            int32_t tailRowCount = curRowTile - tailRowStart;
-            for (int32_t tc = 0; tc < k; ++tc) {
-                SpltPruneGroupN<T>(blkUB, tailRowStart * alignedK + tc, alignedK,
-                                    tailRowCount, groupSize);
-            }
-        }
-
-        SpltPruneStoreRowBlock<T>(blkUB, aOutGM, copyParams, rowStart, k);
     }
+    SpltPruneTileTransTails<T>(blkUB,
+                                 curRowTile, curCols, fullTileRowsM,
+                                 fullTileColsK, TS, groupSize, alignedChunkM);
 }
 
-// ----------------------------------------------------------------------------
-// SpltPruneTileTransRowOrder — TILE sparseTrans path: each block processes 16
-// physical rows. Tile in UB is transposed (stride=m). Tail handling delegated
-// to SpltPruneTileTransTails to keep NBNC ≤ 50.
-// Uses alignedM (32B-aligned UB row stride) for all scalar
-// element access and buffer allocation. See SpltAlignedStride for details.
-// ----------------------------------------------------------------------------
+// SpltPruneTransChunkLoop — the shared scaffold body (both entry points pass
+// isTile as a literal constant, so the dispatch branch is compile-time
+// removable).
 template <typename T>
-__aicore__ inline void SpltPruneTileTransRowOrder(
+__aicore__ inline void SpltPruneTransChunkLoop(
     GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
     int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum,
-    int32_t chunkM)
+    int32_t chunkM, bool isTile)
 {
-    constexpr int32_t TS = std::is_same_v<T, float> ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16;
     constexpr int32_t groupSize = std::is_same_v<T, float> ? 2 : 4;
     constexpr int32_t TRANS_TILE = 16;
     // When m > chunkM, split the m-dimension into chunks of chunkM
-    // columns. chunkM is aligned to 32B/elemSize (a multiple of TS), so full
-    // chunks have complete TS×TS tiles. The last chunk may have a partial
-    // tile row (curCols % TS != 0), handled by SpltPruneTileTransTails.
+    // columns. Each chunk loads TRANS_TILE rows × chunkM cols, prunes along
+    // physical columns (op-view rows), and writes back in-place layout via
+    // SpltPruneStoreRowBlockCol. chunkM is aligned to 32B/elemSize so
+    // alignedChunkM == chunkM (exact UB row stride).
     // When m <= chunkM, single chunk (= m), behavior unchanged from original.
     const int32_t effectiveChunkM = (chunkM > 0 && chunkM < m) ? chunkM : m;
     const int32_t alignedChunkM = SpltAlignedStride<T>(effectiveChunkM);
-    TBuf<TPosition::VECCALC> blockBuf, transBuf;
+    TBuf<TPosition::VECCALC> blockBuf;
     TPipe pipe;
     LocalTensor<T> blkUB;
-    LocalTensor<T> transUB;
     DataCopyExtParams loadParams{1, 0, 0, 0, 0};
     DataCopyPadExtParams<T> padParams{false, 0, 0, T(0)};
-    DataCopyExtParams writeParams{1, static_cast<uint32_t>(TRANS_TILE * sizeof(T)), 0, 0, 0};
-    SpltPruneTransInitBuffers<T>(blockBuf, transBuf, pipe, alignedChunkM, blkUB, transUB,
-                                   loadParams, padParams, writeParams);
+    DataCopyExtParams storeParams{1, 0, 0, 0, 0};
+    SpltPruneTransInitBuffers<T>(blockBuf, pipe, alignedChunkM, blkUB,
+                                   loadParams, padParams);
 
     for (int32_t rowStart = blockId * TRANS_TILE;
          rowStart < k; rowStart += blockNum * TRANS_TILE) {
@@ -965,41 +767,75 @@ __aicore__ inline void SpltPruneTileTransRowOrder(
             SpltPruneLoadRowBlockChunk<T>(blkUB, aGM, loadParams, padParams,
                                             rowStart, curRowTile, colStart,
                                             curCols, ld, alignedChunkM);
-
-            int32_t fullTileRowsM = curCols / TS;
-            int32_t fullTileColsK = curRowTile / TS;
-            for (int32_t tr = 0; tr < fullTileRowsM; ++tr) {
-                int32_t iBase = tr * TS;
-                for (int32_t tc = 0; tc < fullTileColsK; ++tc) {
-                    SpltPruneTileDispatch<T>(blkUB, tc * TS, iBase, alignedChunkM);
-                }
+            if (isTile) {
+                SpltPruneTileTransGroupChunk<T>(blkUB, curRowTile, curCols,
+                                                 alignedChunkM, groupSize);
+            } else {
+                SpltPruneTransGroupChunk<T>(blkUB, curRowTile, curCols,
+                                              alignedChunkM, groupSize);
             }
-            SpltPruneTileTransTails<T>(blkUB,
-                                         curRowTile, curCols, fullTileRowsM,
-                                         fullTileColsK, TS, groupSize, alignedChunkM);
-
-            SpltPruneTransWriteColsVec<T>(blkUB, transUB, aOutGM, writeParams, curRowTile,
-                                             alignedChunkM, curCols, colStart, k, rowStart);
+            SpltPruneStoreRowBlockCol<T>(blkUB, aOutGM, storeParams, rowStart, colStart,
+                                           curRowTile, curCols, ld, alignedChunkM);
         }
     }
 }
 
 // ----------------------------------------------------------------------------
+// SpltPruneTransRowOrder — ColView ((N,COL)/(T,ROW)) STRIP path.
+// The sparse-side physical buffer is (k, m) row-major (row stride ld >= m):
+// Logical[i][j] = data[j * ld + i]. 2:4 grouping always runs along op-view
+// rows (the K dim) = along physical columns (fixed physical column c, group
+// elements spanning physical rows with stride alignedChunkM).
+// Output keeps the input layout: SpltPruneStoreRowBlockCol writes the
+// same-position block back at the original physical positions.
+// ----------------------------------------------------------------------------
+template <typename T>
+__aicore__ inline void SpltPruneTransRowOrder(
+    GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
+    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum,
+    int32_t chunkM)
+{
+    SpltPruneTransChunkLoop<T>(aGM, aOutGM, m, k, ld, blockId, blockNum,
+                               chunkM, false);
+}
+
+// ----------------------------------------------------------------------------
+// SpltPruneTileTransRowOrder — ColView TILE path: each block handles 16
+// physical rows (k dim); the m dim is chunked by chunkM. The tile core
+// enumerates the 90/2 configs on the UB physical view (k,m) (the config set is
+// transpose-closed and L1-invariant — plan section 2.1.3);
+// SpltPruneStoreRowBlockCol writes back at the original physical positions.
+// Tails are delegated to SpltPruneTileTransTails.
+// ----------------------------------------------------------------------------
+template <typename T>
+__aicore__ inline void SpltPruneTileTransRowOrder(
+    GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
+    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum,
+    int32_t chunkM)
+{
+    SpltPruneTransChunkLoop<T>(aGM, aOutGM, m, k, ld, blockId, blockNum,
+                               chunkM, true);
+}
+
+// ----------------------------------------------------------------------------
 // SpltPruneImpl — main prune implementation.
 // Sets up GlobalTensor for A and A_pruned, then dispatches to the appropriate
-// pruning path based on pruneAlg, sparseTrans and pruneAlongRow tiling parameters.
+// pruning path based on pruneAlg and pruneAlongRow tiling parameters.
 //
-// Dispatch logic:
-//   pruneAlg=TILE → SpltPruneAlongRowUnified / AlongCol / TransRowOrder
-//   pruneAlg=STRIP → SpltPruneAlongRowUnified / AlongCol / TransRowOrder (existing)
-//
-// Within each alg, path selection:
-//   pruneAlongRow=1 → AlongRow (logical rows contiguous in GM)
-//   pruneAlongRow=0, sparseTrans=1 → TransRowOrder (physical (k,m), transpose R/W)
-//   pruneAlongRow=0, sparseTrans=0 → AlongCol
-//
-// A_pruned is always written as contiguous (m, k) row-major (m*k elements).
-// The input GM buffer may be larger (padded with stride ld).
+// View semantics (aligned with cuSPARSELt; order is the physical memory layout):
+//   RowView = (N,ROW)/(T,COL) (pruneAlongRow=1): the physical buffer is
+//     row-major under the op view (row stride ld >= k) -> SpltPruneAlongRowUnified;
+//   ColView = (N,COL)/(T,ROW) (pruneAlongRow=0): the physical buffer is (k,m)
+//     row-major (row stride ld >= m) -> STRIP goes to SpltPruneTransRowOrder,
+//     TILE goes to SpltPruneTileTransRowOrder.
+// 2:4 grouping always runs along op-view rows (the K dim). Output keeps the
+// input (order, ld) layout (padding is never written); in-place (d_in == d_out)
+// is supported for all combinations: both views read then write block by block,
+// the read/write regions overlap, and the per-core block-grid partitioning is
+// disjoint across cores.
+// GM length of d_in/d_out = single-batch access span (RowView (m-1)*ld+k /
+// ColView (k-1)*ld+m; batch base addresses are advanced by the host according
+// to batchStride).
 // ----------------------------------------------------------------------------
 template <typename T>
 __aicore__ inline void SpltPruneImpl(GM_ADDR aGm, GM_ADDR aPrunedGm, AclsparseltTilingData td)
@@ -1008,33 +844,31 @@ __aicore__ inline void SpltPruneImpl(GM_ADDR aGm, GM_ADDR aPrunedGm, Aclsparselt
     const int32_t k = td.k;
     const int32_t ld = td.ld;
     const int32_t pruneAlongRow = td.pruneAlongRow;
-    const int32_t sparseTrans = td.sparseTrans;
     const int32_t pruneAlg = td.pruneAlg;
     const int32_t chunkM = td.chunkM;
     const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
     const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
 
+    const bool isColView = (pruneAlongRow == 0);
+    const int64_t spanElems = isColView
+        ? (static_cast<int64_t>(k) - 1) * static_cast<int64_t>(ld) + static_cast<int64_t>(m)
+        : (static_cast<int64_t>(m) - 1) * static_cast<int64_t>(ld) + static_cast<int64_t>(k);
     GlobalTensor<T> aGM;
-    const int32_t physMaxDim = (m > k) ? m : k;
     aGM.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(aGm),
-                        static_cast<uint64_t>(physMaxDim) * static_cast<uint64_t>(ld));
+                        static_cast<uint64_t>(spanElems));
     GlobalTensor<T> aOutGM;
     aOutGM.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(aPrunedGm),
-                           static_cast<uint64_t>(m) * static_cast<uint64_t>(k));
+                           static_cast<uint64_t>(spanElems));
 
     if (pruneAlongRow != 0) {
+        // RowView：(N,ROW)/(T,COL)
         SpltPruneAlongRowUnified<T>(aGM, aOutGM, m, k, ld, pruneAlg, blockId, blockNum);
-    } else if (sparseTrans != 0) {
+    } else {
+        // ColView：(N,COL)/(T,ROW)
         if (pruneAlg == SPLT_PRUNE_ALG_TILE) {
             SpltPruneTileTransRowOrder<T>(aGM, aOutGM, m, k, ld, blockId, blockNum, chunkM);
         } else {
             SpltPruneTransRowOrder<T>(aGM, aOutGM, m, k, ld, blockId, blockNum, chunkM);
-        }
-    } else {
-        if (pruneAlg == SPLT_PRUNE_ALG_TILE) {
-            SpltPruneTileAlongCol<T>(aGM, aOutGM, m, k, ld, blockId, blockNum);
-        } else {
-            SpltPruneAlongCol<T>(aGM, aOutGM, m, k, ld, blockId, blockNum);
         }
     }
 }

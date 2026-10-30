@@ -171,6 +171,20 @@ static aclsparseStatus_t SetGeluScaling(aclsparseLtMatmulDescriptor* md,
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+static aclsparseStatus_t SetSparseMatPointer(aclsparseLtMatmulDescriptor* md,
+                                             const void* data, size_t dataSize)
+{
+    if (dataSize != sizeof(void*)) {
+        OP_LOGE(kSparseLtLogTag, "SPARSE_MAT_POINTER: size mismatch, got %zu", dataSize);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    // 仅存储不参与执行（cuSPARSELt CUSPARSELT_MATMUL_SPARSE_MAT_POINTER 的
+    // 调用序列兼容）：Matmul/Search 以函数参数 matA/matB 为准（参数优先），
+    // 本属性不参与算法选择与执行，不接 matA=null 回退链。
+    md->sparseMatPointer = *static_cast<void* const*>(data);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 // ============================================================================
 // Per-attribute GetAttribute helpers (extracted to reduce CCN of the
 // aclsparseLtMatmulDescGetAttribute switch from 28 to ~10).
@@ -265,13 +279,24 @@ static aclsparseStatus_t GetActivationGelu(const aclsparseLtMatmulDescriptor* md
 }
 
 static aclsparseStatus_t GetGeluScaling(const aclsparseLtMatmulDescriptor* md,
-                                         void* data, size_t dataSize)
+                                        void* data, size_t dataSize)
 {
     if (dataSize != sizeof(float)) {
         OP_LOGE(kSparseLtLogTag, "ACTIVATION_GELU_SCALING: size mismatch, got %zu", dataSize);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *static_cast<float*>(data) = md->geluScaling;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t GetSparseMatPointer(const aclsparseLtMatmulDescriptor* md,
+                                             void* data, size_t dataSize)
+{
+    if (dataSize != sizeof(void*)) {
+        OP_LOGE(kSparseLtLogTag, "SPARSE_MAT_POINTER: size mismatch, got %zu", dataSize);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *static_cast<void**>(data) = md->sparseMatPointer;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -314,6 +339,8 @@ extern "C" aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
             return SetActivationGelu(md, data, dataSize);
         case ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING:
             return SetGeluScaling(md, data, dataSize);
+        case ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER:
+            return SetSparseMatPointer(md, data, dataSize);
         default:
             OP_LOGE(kSparseLtLogTag, "MatmulDescSetAttribute: unsupported attr %d",
                     static_cast<int32_t>(matmulAttribute));
@@ -360,6 +387,8 @@ extern "C" aclsparseStatus_t aclsparseLtMatmulDescGetAttribute(
             return GetActivationGelu(md, data, dataSize);
         case ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING:
             return GetGeluScaling(md, data, dataSize);
+        case ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER:
+            return GetSparseMatPointer(md, data, dataSize);
         default:
             OP_LOGE(kSparseLtLogTag, "MatmulDescGetAttribute: unsupported attr %d",
                     static_cast<int32_t>(matmulAttribute));

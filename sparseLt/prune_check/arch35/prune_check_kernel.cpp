@@ -369,17 +369,22 @@ __aicore__ inline void PruneCheckKernel<U>::CopyIn(const TilePosition& tile)
     }
     // 多行单次搬运：blockLen 恒为 32B 倍数（维度对齐保证），dstStride 单位 32B，
     // 行距强制为 256B 对齐 pitch（prune SpltPruneLoadRowBlockChunk 凑 pitch 同型算法）。
-    // 源地址 = d_in + (batch×batchStride + rowOffset×ld + colOffset)，三项均为
-    // 32B/dataBytes 元素倍数（host #6/#8/#9 保证）→ d_in 32B 对齐时各 tile 源
-    // 地址恒 32B 对齐（DataCopyPad GM 源地址对齐要求）。
+    // 源地址 = d_in + (batch×batchStride + rowOffset×ld + colOffset)：batch 项为
+    // 16B/dataBytes 元素倍数（host #6 保证，batch 对齐域 16B 与 prune 同口径）、
+    // 行/列项为 32B/dataBytes 元素倍数（host #9 维度对齐保证）→ d_in 16B 对齐
+    //（#8）时各 tile 源地址恒 16B 对齐（DataCopyPad 实测容忍 16B 对齐 GM 源：
+    // D5 轮 d_in 16B 基址与逐 batch 16B 源探针全过，回归锚点 DinAlign16B 族
+    // 与 MultiBatchStride16BGranularity* 批量用例）。
     const uint32_t blockLen = static_cast<uint32_t>(tile.validCols * sizeof(U));
     const uint32_t naturalBytes = (blockLen + 31) / 32 * 32;
     const AscendC::DataCopyExtParams copyParams{static_cast<uint16_t>(tile.validRows), blockLen,
         static_cast<int64_t>((tilingData_.ld - tile.validCols) * sizeof(U)),
         static_cast<int64_t>((tilingData_.inputPitch - naturalBytes) / 32), 0};
     const AscendC::DataCopyPadExtParams<U> padParams{true, 0, 0, static_cast<U>(0)};
-    // batch 基址偏移 batchStride 元素（host #6 已保证 32B/dataBytes 对齐，
-    // 各 batch 源地址对齐性质与 batch 0 一致）；numBatches==1 时偏移恒 0。
+    // batch 基址偏移 batchStride 元素（host #6 已保证 16B/dataBytes 对齐，
+    // 各 batch 源地址保持 ≥ 16B 对齐——16B 非 32B 逐 batch 源已经 D5 轮
+    // 实测，与 batch 0 的对齐性质在 DataCopyPad 实测容忍域内一致）；
+    // numBatches==1 时偏移恒 0。
     AscendC::DataCopyPad(inputLocal_,
                 inputGm_[tile.batch * tilingData_.batchStride + tile.rowOffset * tilingData_.ld +
                           tile.colOffset],

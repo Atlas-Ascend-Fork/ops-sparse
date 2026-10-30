@@ -97,14 +97,11 @@ inline void PrepareMatmulChainBuffers(
     physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
     bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
     bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
+    // (b) A structured: logical (m,k) -> descriptor (order, ldSparse) layout
+    // (PreparePhysicalA internally does the natural compact + (order, ld)
+    // assembly).
     std::vector<InT> hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, order, aLd,
-        ctx.numBatches, ctx.batchStride);
-    if (opts.ldSparse > 0) {
-        aLd = opts.ldSparse;
-        hA_phys = PackBatchStridedPhysical<InT>(hA_phys,
-            static_cast<int32_t>(physRowsA), static_cast<int32_t>(physColsA),
-            order, aLd, ctx.numBatches, ctx.batchStride);
-    }
+        ctx.numBatches, ctx.batchStride, opts.ldSparse);
     std::vector<InT> hB_phys = PreparePhysicalB<InT>(hB, k, n, transB,
         ctx.numBatches, ctx.batchStride);
     bLd = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
@@ -272,41 +269,174 @@ inline bool PreparePlanAndWorkspace(MatmulNpuResult& result,
 }
 
 // -----------------------------------------------------------------------------
-// [Prune 回读共享段] 剪枝结果回读 host：npuPrunedA 扩容 + D2H memcpy，
-// 失败时置 pruneRet=EXECUTION_FAILED（ltmatmul RunPruneForASparse 与
-// PruneInt8CDBSparse 共用）。同步检查段保留在各调用方（A-sparse 链
-// 记录 result.syncRet，Int8CD 链内联判断）。
+// [(b) prune output layout preserving] shared derivation and unpack segment
+// (shared by the ltmatmul A/B-side chains + the int8cd chain + matmulSearch).
+// The prune output keeps the sparse-side descriptor (order, ld) physical
+// layout; matmul consumes that layout directly (cube ldA/ldB + isColView
+// transpose flags), while golden consumption must unpack back to logical
+// compact (npuPrunedA keeps the existing "logical (m,k)/(k,n) row-major +
+// batch-strided" contract — zero changes for all downstream consumers).
 // -----------------------------------------------------------------------------
-inline bool CopyPrunedToHost(MatmulNpuResult& result,
-    sparse_test::DeviceBuffer& dPruned, size_t totalBytes)
+
+// Sparse-side kernel view (m,k) and descriptor layout derivation (A-sparse:
+// (md_m, md_k); B-sparse: (md_k, md_n); trans decides the transpose relation
+// between descriptor natural dims and logical dims).
+inline void SparseSideLayoutOf(aclsparseLtConstMatmulDescriptor_t matmulDesc,
+                               int64_t& m, int64_t& k, bool& trans,
+                               aclsparseOrder_t& order, int64_t& ld)
 {
-    result.npuPrunedA.resize(totalBytes);
-    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), totalBytes,
-        dPruned.get(), totalBytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    const auto* md = to_matmul_internal(matmulDesc);
+    const bool sparseA = md_isSparseA(md);
+    const auto* sparse = sparseA ? md->matA : md->matB;
+    trans = sparseA ? md_transA(md) : md_transB(md);
+    m = sparseA ? md_m(md) : md_k(md);
+    k = sparseA ? md_k(md) : md_n(md);
+    order = sparse->order;
+    ld = sparse->ld;
+}
+
+// Prune output buffer capacity (in elements): batch = nb*stride; single
+// batch = the descriptor physical rectangle (ROW rows*ld / COL cols*ld,
+// >= the access span — the d_out "same shape and ld as d_in" contract).
+inline size_t PruneOutCapacityElems(aclsparseLtConstMatmulDescriptor_t matmulDesc,
+                                    int32_t numBatches, int64_t batchStride)
+{
+    int64_t m, k, ld;
+    bool trans;
+    aclsparseOrder_t order;
+    SparseSideLayoutOf(matmulDesc, m, k, trans, order, ld);
+    if (numBatches > 1 && batchStride > 0) {
+        return static_cast<size_t>(numBatches) * static_cast<size_t>(batchStride);
+    }
+    const int64_t rows = trans ? k : m;
+    const int64_t cols = trans ? m : k;
+    const int64_t rect = (order == ACL_SPARSE_ORDER_ROW) ? rows * ld : cols * ld;
+    return static_cast<size_t>(rect);
+}
+
+// Physical (order,ld) batch-strided readback -> logical batch-strided: each
+// batch's [b*stride, b*stride+mk) receives the unpacked compact logical
+// prune result; the rest is zeroed.
+// Logical<->physical mapping (verified over the four combinations):
+// logical(i,j) = M(trans? (j,i) : (i,j)), where M(r,c) sits at ROW r*ld+c /
+// COL c*ld+r.
+inline std::vector<int8_t> UnpackPrunedToLogicalBytes(const std::vector<int8_t>& phys,
+    aclsparseLtConstMatmulDescriptor_t matmulDesc, size_t elemSize,
+    int32_t numBatches, int64_t batchStride)
+{
+    // G.EXP.22-CPP divide-by-zero defense: elemSize == 0 breaks the caller
+    // contract (the dtype side is always in {1,2,4}, passed in via
+    // CopyPrunedToHost's kInElt = sizeof(dtype)). In that domain the inner t
+    // loop never executes and no element is copied — the output is always
+    // phys.size() zero bytes. Return that equivalent result directly instead
+    // of entering the phys.size()/elemSize division below; keeping the output
+    // size intact preserves the downstream byte-offset readback indexing.
+    if (elemSize == 0) {
+        return std::vector<int8_t>(phys.size(), 0);
+    }
+    int64_t m, k, ld;
+    bool trans;
+    aclsparseOrder_t order;
+    SparseSideLayoutOf(matmulDesc, m, k, trans, order, ld);
+    const int32_t nb = (numBatches > 1) ? numBatches : 1;
+    const int64_t stride = (numBatches > 1 && batchStride > 0)
+        ? batchStride : static_cast<int64_t>(phys.size() / elemSize);
+    std::vector<int8_t> out(phys.size(), 0);
+    for (int32_t b = 0; b < nb; ++b) {
+        const int64_t base = static_cast<int64_t>(b) * stride * static_cast<int64_t>(elemSize);
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(phys.data()) + base;
+        uint8_t* dst = reinterpret_cast<uint8_t*>(out.data()) + base;
+        for (int64_t i = 0; i < m; ++i) {
+            for (int64_t j = 0; j < k; ++j) {
+                const int64_t r = trans ? j : i;
+                const int64_t c = trans ? i : j;
+                const int64_t physOff = (order == ACL_SPARSE_ORDER_COL)
+                    ? (c * ld + r) : (r * ld + c);
+                for (size_t t = 0; t < elemSize; ++t) {
+                    dst[(i * k + j) * static_cast<int64_t>(elemSize) + static_cast<int64_t>(t)] =
+                        src[physOff * static_cast<int64_t>(elemSize) + static_cast<int64_t>(t)];
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// [Prune readback shared segment] Read the prune result back to host
+// (physical layout) + unpack into the logical layout.
+// devPtr supports either a standalone DeviceBuffer or a pointer inside the
+// workspace (the mat_a_null fallback path).
+// On failure, sets pruneRet=EXECUTION_FAILED (shared by ltmatmul
+// RunPruneForASparse, PruneInt8CDBSparse, and matmulSearch
+// RunPruneToTarget).
+inline bool CopyPrunedToHost(MatmulNpuResult& result,
+    aclsparseLtConstMatmulDescriptor_t matmulDesc,
+    const void* devPtr, size_t totalElems, size_t elemSize,
+    int32_t numBatches = 1, int64_t batchStride = 0)
+{
+    std::vector<int8_t> phys(totalElems * elemSize);
+    result.memcpyRet = aclrtMemcpy(phys.data(), phys.size(), devPtr, phys.size(),
+                                   ACL_MEMCPY_DEVICE_TO_HOST);
     if (result.memcpyRet != ACL_SUCCESS) {
         result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return false;
     }
+    result.npuPrunedA = UnpackPrunedToLogicalBytes(phys, matmulDesc, elemSize,
+                                                   numBatches, batchStride);
     return true;
 }
 
 // -----------------------------------------------------------------------------
-// RunPruneForASparse: run prune on A-sparse path, update matAPtr + npuPrunedA.
-// When num_batches > 1, prune each batch separately (loop with batch stride
-// offset). The pruned buffer is num_batches * batch_stride * kInElt bytes.
+// [(b) pre-pruned direct feed] CPU logical prune result -> npuPrunedA
+// (batch-strided logical layout, consistent with the post-unpack contract
+// of the prune readback) — shared by the directFeed branches of the A/B-side
+// chains; the golden WithNpuPrune consumption path needs zero changes.
 // -----------------------------------------------------------------------------
-// prune 单调用化：描述符携带 numBatches/batchStride，一次调用处理全
-// batch（传 batch0 基址）。host 侧切片循环会使末切片基址被算子按 numBatches
-// 二次推进而越界——禁止切片。输出布局（batch-strided）与切片版一致。
-// 回读段（CopyPrunedToHost）与 PruneInt8CDBSparse 共享。
+template <typename InT>
+inline void FeedDirectPrunedToResult(MatmulNpuResult& result,
+                                     const std::vector<InT>& hPrunedLogical,
+                                     int32_t numBatches, int64_t batchStride)
+{
+    const size_t matElems = hPrunedLogical.size();
+    const size_t es = sizeof(InT);
+    if (numBatches <= 1 || batchStride <= 0) {
+        result.npuPrunedA.resize(matElems * es);
+        if (matElems > 0) {
+            std::copy(reinterpret_cast<const int8_t*>(hPrunedLogical.data()),
+                      reinterpret_cast<const int8_t*>(hPrunedLogical.data()) + matElems * es,
+                      result.npuPrunedA.begin());
+        }
+        return;
+    }
+    const size_t strideBytes = static_cast<size_t>(batchStride) * es;
+    result.npuPrunedA.assign(static_cast<size_t>(numBatches) * strideBytes, 0);
+    for (int32_t b = 0; b < numBatches; ++b) {
+        std::copy(reinterpret_cast<const int8_t*>(hPrunedLogical.data()),
+                  reinterpret_cast<const int8_t*>(hPrunedLogical.data()) + matElems * es,
+                  result.npuPrunedA.begin() + static_cast<size_t>(b) * strideBytes);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// RunPruneForASparse: run prune on A-sparse path, update matAPtr + npuPrunedA.
+// (b) the prune output keeps the descriptor (order, ld) layout: dPruned
+// capacity = the physical rectangle (single batch) / nb*batchStride; matmul
+// consumes that layout directly (matAPtr passed through as-is), and the
+// readback is unpacked by CopyPrunedToHost into logical batch-strided for
+// golden.
+// Single-call prune: the descriptor carries numBatches/batchStride, and one
+// call handles the whole batch (pass the batch0 base address; slicing would
+// make the last slice's base get advanced again by the operator per
+// numBatches and go out of bounds — slicing is forbidden).
+// -----------------------------------------------------------------------------
 inline bool RunPruneForASparse(MatmulNpuResult& result,
     aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
     sparse_test::DeviceBuffer& dA, sparse_test::DeviceBuffer& dPruned,
-    size_t mk, size_t kInElt, aclsparseLtPruneAlg_t pruneAlg, void*& matAPtr,
+    size_t kInElt, aclsparseLtPruneAlg_t pruneAlg, void*& matAPtr,
     int32_t num_batches = 1, int64_t batch_stride = 0)
 {
     aclrtStream stream = 0;
-    const size_t totalElems = BatchTotalElems(mk, num_batches, batch_stride);
+    const size_t totalElems = PruneOutCapacityElems(matmulDesc, num_batches, batch_stride);
     dPruned = sparse_test::DeviceBuffer::alloc(totalElems * kInElt);
     result.pruneRet = aclsparseLtSpMMAPrune(
         handle, &matmulDesc, dA.get(), dPruned.get(), pruneAlg, stream);
@@ -316,7 +446,8 @@ inline bool RunPruneForASparse(MatmulNpuResult& result,
         result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return false;
     }
-    if (!CopyPrunedToHost(result, dPruned, totalElems * kInElt)) { return false; }
+    if (!CopyPrunedToHost(result, matmulDesc, dPruned.get(), totalElems, kInElt,
+                          num_batches, batch_stride)) { return false; }
     matAPtr = dPruned.get();
     return true;
 }
@@ -426,8 +557,34 @@ inline MatmulNpuResult RunMatmulChain(
     DeviceBuffer dPruned;
     void* matAPtr = ctx.dA.get();
     if (!isDensePath && isSparseA) {
-        if (!RunPruneForASparse(result, ctx.handle.get(), ctx.matmulDesc->get(),
-                ctx.dA, dPruned, ctx.mk, kInElt, args.pruneAlg, matAPtr,
+        if (args.layout.directFeed) {
+                // (b) pre-pruned direct feed: CPU golden logical prune ->
+            // (order, ldSparse) physical scatter, fed to matmul directly
+            // (bypassing SpMMAPrune — independently validating the matmul
+            // sparse-side (order, ld) pass-through; npuPrunedA is left empty
+            // so golden takes the CPU prune path, consuming the same data
+            // as the NPU).
+            std::vector<InT> hPrunedLogical;
+            SpMMAPruneGolden<InT>(args.hA, hPrunedLogical, args.m, args.k, 0, 1,
+                                  args.opA == ACL_SPARSE_OP_TRANSPOSE,
+                                  args.order == ACL_SPARSE_ORDER_ROW,
+                                  args.pruneAlg == ACLSPARSELT_PRUNE_SPMMA_TILE
+                                      ? "TILE" : "STRIP");
+            int64_t feedLd = 0;
+            const std::vector<InT> hPrunedPhys = PreparePhysicalA<InT>(
+                hPrunedLogical, args.m, args.k,
+                args.opA == ACL_SPARSE_OP_TRANSPOSE, args.order, feedLd,
+                args.numBatches, args.batchStride, args.layout.ldSparse);
+            dPruned = DeviceBuffer::copyFrom(hPrunedPhys.data(),
+                                             hPrunedPhys.size() * kInElt);
+            matAPtr = dPruned.get();
+            // npuPrunedA = CPU logical prune result (batch-strided) — the
+            // golden WithNpuPrune path consumes the same data (the NPU side
+            // is fed via the physical scatter).
+            FeedDirectPrunedToResult(result, hPrunedLogical, args.numBatches,
+                                     args.batchStride);
+        } else if (!RunPruneForASparse(result, ctx.handle.get(), ctx.matmulDesc->get(),
+                ctx.dA, dPruned, kInElt, args.pruneAlg, matAPtr,
                 args.numBatches, args.batchStride)) { return result; }
     }
     // 回读尺寸 = C/D 物理 span（batch 布局含 stride padding；紧凑时 == mn*nb）

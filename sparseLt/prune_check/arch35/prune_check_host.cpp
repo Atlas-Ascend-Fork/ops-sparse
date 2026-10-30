@@ -38,6 +38,11 @@ constexpr uint64_t kAddressLimit = static_cast<uint64_t>(std::numeric_limits<int
 // rows/cols/ld 的 32 字节对齐要求按元素字节数换算为元素对齐（结构化描述符 init
 // 已保证，此处对 kernel 直接消费的扫描维度做防御性复检，防伪造描述符）。
 constexpr int kMatrixAlignmentBytes = 32;
+// batch 维基址对齐域：16 字节（与 prune V2 同口径，依据见 DeriveBatchParams
+// #6 注释——「可剪可查」链路契约 + D5 实测证据）。rows/cols/ld 维持 32B 域
+//（kMatrixAlignmentBytes，描述符层契约不动），仅 batch 维按 cuSPARSELt
+// 16B 指针惯例对齐。
+constexpr int kBatchAlignmentBytes = 16;
 constexpr uint64_t kVectorBytes = 256;
 // UB 工作上限（具名常量，来源推导）：平台实际容量经 GetUbSize() 动态查询
 //（PlatformAscendCManager::GetCoreMemSize(UB)，本算子与 spmma_compress 共用该
@@ -100,9 +105,18 @@ aclsparseStatus_t SelectSparseSide(const aclsparseLtMatmulDescriptor* md,
 // ----------------------------------------------------------------------------
 // DeriveBatchParams — 校验表 #6：批量参数。numBatches < 1 → INVALID_VALUE
 //（SetAttribute 已保证 ≥ 1，此处为防伪造描述符的防御复检）；numBatches > 1 时
-// batchStride 须 > 0 且为 32B/dataBytes 元素数的整数倍（与 rows/cols/ld 同款
-// 对齐：batch 基址偏移 batchStride×dataBytes 须维持 32B 倍数性质，保证各
-// batch 的 DataCopyPad 源地址对齐性质与 batch 0 一致）。numBatches == 1 时
+// batchStride 须 ≥ 0：0 为跨批广播（cuSPARSELt batch_stride=0 语义：全批复检
+// batch 0，等价单矩阵校验，td.batchStride 保持 0）；正值须为 16B/dataBytes
+// 元素数的整数倍（batch 对齐域 16B，与 prune V2 同口径，非 32B 域。依据：
+// 其一，一致性——prune 输出保持输入 (order,ld) 布局，下游 prune_check 必须
+// 能复检同布局输入（cuSPARSELt Prune→PruneCheck 链路契约），prune 按 16B
+// 域放行的 batchStride 本算子不得拒绝，否则同一矩阵「可剪不可查」；其二，
+// 实测证据——本算子 tile 装载与 D5 轮实验同为 DataCopyPad GM 源读取：P6
+// 逐 batch 源 16B 非 32B 基址读取全对（biasStride=4 FP32=16B 步长 ×
+// batch=2）+ DinAlign16B 族 d_in 16B 基址 valid/violating 两态全对
+//（.cannbot/sparseLt-fix/tmp/d5-16b-experiment.md），batch 基址偏移
+// batchStride×dataBytes 为 16B 倍数 + d_in 基址 16B 对齐（#8）即保证各
+// batch 的 DataCopyPad 源地址 ≥ 16B 对齐）；负值拒绝。numBatches == 1 时
 // batchStride 不被消费（恒按 0 处理），单 batch 数值路径不变。
 // 须在 #5 dtype 白名单之后调用（对齐约束的除数依赖 dataBytes）。
 // ----------------------------------------------------------------------------
@@ -124,11 +138,25 @@ aclsparseStatus_t DeriveBatchParams(const aclsparseLtMatDescriptor* sparse, uint
             return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
         }
         const int64_t batchStride = sparse->batchStride;
-        const uint64_t batchDivisor = static_cast<uint64_t>(kMatrixAlignmentBytes / dataBytes);
-        if (batchStride <= 0 || static_cast<uint64_t>(batchStride) % batchDivisor != 0) {
+        // 负 stride 恒非法（kernel 按 batch 基址 + batchStride 寻址，负值回走
+        // 越界）；stride == 0 为跨批广播（cuSPARSELt batch_stride=0 语义：
+        // 全批复检 batch 0，tile.batch*0 恒落基址，等价单矩阵校验）——
+        // td.batchStride 保持 0（上方已初始化），(numBatches-1)*0+span 无
+        // 溢出面，后续对齐校验随 >0 分支保留。
+        if (batchStride < 0) {
+            OP_LOGE(kLogTag, "invalid batchStride=%lld < 0 for numBatches=%d",
+                    static_cast<long long>(batchStride),
+                    static_cast<int>(sparse->numBatches));
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+        }
+        if (batchStride == 0) {
+            return ACL_SPARSE_STATUS_SUCCESS;  // 广播：全批复检 batch 0
+        }
+        const uint64_t batchDivisor = static_cast<uint64_t>(kBatchAlignmentBytes / dataBytes);
+        if (static_cast<uint64_t>(batchStride) % batchDivisor != 0) {
             OP_LOGE(kLogTag,
                     "invalid batchStride=%lld for numBatches=%d: must be > 0 and a multiple of "
-                    "%llu elements (32B/element size)",
+                    "%llu elements (16B/element size)",
                     static_cast<long long>(batchStride),
                     static_cast<int>(sparse->numBatches),
                     static_cast<unsigned long long>(batchDivisor));
@@ -180,21 +208,20 @@ aclsparseStatus_t DeriveCheckShape(const aclsparseLtMatmulDescriptor* md, bool s
     const bool sparseTrans = sparseA ? md_transA(md) : md_transB(md);
     const bool isRowOrder = sparse->order == ACL_SPARSE_ORDER_ROW;
     const bool alongRowPrune = (sparseTrans != isRowOrder);
-    // 扫描几何（d_in 一律为行主序物理存储、行步长 ld；order 仅决定校验方向）：
-    //   alongRowPrune=1（N+ROW / T+COL）→ RowScan：R=m × C=k，行内连续分组；
-    //   alongRowPrune=0 且 trans（T+ROW）→ RowScan：R=k × C=m，行内连续分组；
-    //   alongRowPrune=0 且非 trans（N+COL）→ ColScan：R=m × C=k，同列跨行分组。
+    // 扫描几何（对齐 cuSPARSELt：order 为物理内存布局，d_in 按描述符
+    // (order, ld) 物理布局访问）：
+    //   RowView（alongRowPrune=1，N+ROW / T+COL）：物理在 op 视图下行主序
+    //     → RowScan：R=m × C=k，行内连续分组；
+    //   ColView（alongRowPrune=0，N+COL / T+ROW）：物理为 (k,m) 行主序
+    //     （行距 ld ≥ m，op 视图的转置）→ ColScan：R=k × C=m，同列跨行
+    //     分组（沿物理行 k、固定物理列 = 沿 op 视图行/K 维）。
     if (alongRowPrune) {
         td.rows = static_cast<uint64_t>(m);
         td.cols = static_cast<uint64_t>(k);
         td.alongRow = true;
-    } else if (sparseTrans) {
+    } else {
         td.rows = static_cast<uint64_t>(k);
         td.cols = static_cast<uint64_t>(m);
-        td.alongRow = true;
-    } else {
-        td.rows = static_cast<uint64_t>(m);
-        td.cols = static_cast<uint64_t>(k);
         td.alongRow = false;
     }
     td.ld = static_cast<uint64_t>(sparse->ld);
@@ -255,13 +282,16 @@ aclsparseStatus_t ValidateCheckBuffers(const void* dIn, int* dValid, PruneCheckP
         OP_LOGE(kLogTag, "d_in/d_valid is null");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    // #8：d_in 32 字节对齐（实现要求，严于官方 16B 惯例）：d_in 为 kernel
-    // DataCopyPad 的 GM 源基地址，硬件要求 32B；16B 非 32B 对齐会进入未定义
-    // 搬运路径（可能 507035 或读错数据）。rows/cols/ld/batchStride 均为
-    // 32B/dataBytes 元素倍数 → 各 tile 源地址 = d_in + 32B 倍数，对齐性质
-    // 由基址保证。
-    if ((reinterpret_cast<uintptr_t>(dIn) % 32) != 0) {
-        OP_LOGE(kLogTag, "d_in not 32-byte aligned");
+    // #8：d_in 16 字节对齐（对齐 cuSPARSELt "All pointers must be aligned
+    // to 16 bytes"）：d_in 为 kernel DataCopyPad 的 GM 源基地址——实测
+    // DataCopyPad 容忍 16B 对齐 GM 源（16B 非 32B 基址探针全过：FP16/INT8
+    // × valid/violating 两态，回归锚点见 prune_check_test.cpp 的
+    // DinAlign16B 用例族；原 32B 口径为历史收紧，D5 轮实验证伪后回摆
+    // 16B）。rows/cols/ld 为 32B/dataBytes 元素倍数（#9）、batchStride 为
+    // 16B/dataBytes 元素倍数（#6，与 prune 同口径）→ 各 tile 源地址 =
+    // d_in + 16B 倍数，16B 对齐性质由基址与偏移共同保证。
+    if ((reinterpret_cast<uintptr_t>(dIn) % 16) != 0) {
+        OP_LOGE(kLogTag, "d_in not 16-byte aligned");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     auto& td = params.tiling;
@@ -281,10 +311,12 @@ aclsparseStatus_t ValidateCheckBuffers(const void* dIn, int* dValid, PruneCheckP
                 static_cast<unsigned long long>(td.ld));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    // #10（D-2）：物理行长 = 扫描列数（RowScan 行长 C；ColScan 每物理行亦为 C 列，
-    // 与方案 #10 公式 (pruneAlongRow==0 且 sparseTrans==1) ? m : k 等价）。
+    // #10（D-2）：物理行长 = 扫描列数（RowScan 行长 C=k / ColScan 每物理行
+    // 亦为 C=m 列——新语义下 td.cols 恒等于物理行长：RowView=k / ColView=m）。
     // prune 在此场景静默 clamp 到 physRowLen（隐含紧致排布假设，可能越界读）；
     // 校验算子读错地址 = 错误结论 + 潜在 fault，故显式 INVALID_VALUE。
+    // 合法描述符恒满足（ROW 序 ld ≥ cols / COL 序 ld ≥ rows 恰覆盖两种视图
+    // 的物理行长），该检查保持纯防御定位（与 prune 侧 B3 显式拒绝同口径）。
     if (td.ld < td.cols) {
         OP_LOGE(kLogTag, "ld=%llu < physical row length=%llu",
                 static_cast<unsigned long long>(td.ld),

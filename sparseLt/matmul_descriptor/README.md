@@ -315,9 +315,9 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
 - matC 和 matD 必须为 dense 类型
 - matC 与 matD 的 ld 和 order 必须相同
 - matC、matD 的 rows 和 cols 都必须小于等于 2097120
-- 当 matA 的数据类型为 INT8/FP8/FP4 时，opA/opB 与 orderA/orderB 的组合仅支持四种合法形式（见[操作与布局组合约束](#操作与布局组合约束)）
+- 当 matA 的数据类型为 INT8/FP8/FP4 时，opA/opB 与 orderA/orderB 的组合须满足组合约束（按**并集**口径，见[操作与布局组合约束](#操作与布局组合约束)）
 - computeType 取值为 ACL_SPARSE_COMPUTE_16F、ACL_SPARSE_COMPUTE_32F 或 ACL_SPARSE_COMPUTE_32I
-- computeType 与矩阵数据类型（valueType）相互独立，两者可分别指定、互不影响
+- computeType 与矩阵数据类型（valueType）绑定（对齐 cuSPARSELt 数据类型表）：32F 对应 FP32/FP16/BF16；16F 仅对应 FP16（本实现按 FP32 累加执行，精度与 32F 路径一致、优于 cuSPARSELt 16F 的半精度累加，超集行为）；32I 对应 INT8。A/B 任一侧绑定不匹配返回 ACL_SPARSE_STATUS_NOT_SUPPORTED。FP8/FP4 等主四型之外的 valueType 不参与绑定校验（描述符层超集，执行层照旧拒绝）。详见[支持数据类型](#支持数据类型)的 computeType 表
 
 ---
 
@@ -375,11 +375,13 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorDestroy(
 
 ### computeType（aclsparseComputeType_t）
 
-| 计算精度 | 枚举 |
-|----------|------|
-| 16F | ACL_SPARSE_COMPUTE_16F |
-| 32F | ACL_SPARSE_COMPUTE_32F |
-| 32I | ACL_SPARSE_COMPUTE_32I |
+| 计算精度 | 枚举 | 适配输入 dtype（A/B valueType） |
+|----------|------|-------------------------------|
+| 16F | ACL_SPARSE_COMPUTE_16F | 仅 FP16（本实现按 FP32 累加执行，精度与 32F 路径一致、优于 cuSPARSELt 16F 的半精度累加，超集行为） |
+| 32F | ACL_SPARSE_COMPUTE_32F | FP32 / FP16 / BF16 |
+| 32I | ACL_SPARSE_COMPUTE_32I | INT8 |
+
+> computeType 与 A/B valueType 绑定不匹配返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（如 16F+FP32、32F+INT8、32I+FP16 等错配组合）。主四型之外的 valueType（FP8/FP4/HIFLOAT8 等）不参与绑定校验（描述符层超集，执行层 dtype 白名单照旧拒绝）。
 
 ## 约束说明
 
@@ -389,16 +391,20 @@ rows、cols、ld 必须为对应 valueType 对齐倍数的整数倍。Dense 与 
 
 ### 操作与布局组合约束
 
-当 matA 的 valueType 属于 {ACL_INT8, ACL_FLOAT8_E4M3FN, ACL_FLOAT8_E5M2, ACL_FLOAT8_E8M0, ACL_FLOAT4_E2M1, ACL_FLOAT4_E1M2} 时施加此约束。
+当 matA 的 valueType 属于 {ACL_INT8, ACL_FLOAT8_E4M3FN, ACL_FLOAT8_E5M2, ACL_FLOAT8_E8M0, ACL_FLOAT4_E2M1, ACL_FLOAT4_E1M2} 时施加此约束（并集口径）。
 
 缩写：N = ACL_SPARSE_OP_NON_TRANSPOSE，T = ACL_SPARSE_OP_TRANSPOSE。
 
-| orderA | orderB | 要求 opA | 要求 opB |
-|--------|--------|---------|---------|
-| COL | COL | T | N |
-| ROW | ROW | N | T |
-| ROW | COL | N | N |
-| COL | ROW | T | T |
+每个 order 对允许两个合法 op 对（基准对 + 反转对）：
+
+| orderA | orderB | 合法 (opA, opB) 组合一 | 合法 (opA, opB) 组合二 |
+|--------|--------|------------------------|------------------------|
+| COL | COL | (T, N) 基准 | (N, T) 反转 |
+| ROW | ROW | (N, T) 基准 | (T, N) 反转 |
+| ROW | COL | (N, N) 基准 | (T, T) 反转 |
+| COL | ROW | (T, T) 基准 | (N, N) 反转 |
+
+> 反转对为 cuSPARSELt "the opposite if B is structured" 的 B-sparse 合法集（S_c：B 为 structured 时官方原文要求取 opposite）。本实现对 A/B 稀疏侧统一按并集放行（超集政策：接受 cuSPARSELt 拒绝的组合，前提结果正确，均经 INT8 精度用例背书）。A-structured 侧的反转对在 cuSPARSELt 中非法，本实现作为超集接受。
 
 ## 返回值
 
@@ -407,7 +413,7 @@ rows、cols、ld 必须为对应 valueType 对齐倍数的整数倍。Dense 与 
 | ACL_SPARSE_STATUS_SUCCESS | 操作成功完成。 |
 | ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR | 传入的库句柄为 nullptr，或销毁接口传入的描述符指针本身为 nullptr。 |
 | ACL_SPARSE_STATUS_INVALID_VALUE | 参数校验失败。 |
-| ACL_SPARSE_STATUS_NOT_SUPPORTED | 矩阵数据类型（valueType）不在支持列表内，或计算精度（computeType）非法。 |
+| ACL_SPARSE_STATUS_NOT_SUPPORTED | 矩阵数据类型（valueType）不在支持列表内、计算精度（computeType）非法，或 computeType 与 A/B valueType 绑定不匹配。 |
 | ACL_SPARSE_STATUS_ALLOC_FAILED | 内存分配失败。 |
 
 ## 调用示例

@@ -12,6 +12,8 @@
 #define TEST_FRAME_CSV_LOADER_H_
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -42,6 +44,28 @@ inline int64_t parseInt64(const csv_map& row, const std::string& key) {
     auto it = row.find(key);
     if (it == row.end()) return 0;
     return static_cast<int64_t>(std::strtoll(it->second.c_str(), nullptr, 10));
+}
+
+// Strict int64 parsing: a missing column/empty value returns 0
+// (unspecified); a non-empty but invalid value (no valid characters,
+// leftover characters, or overflow) returns the INT64_MIN error sentinel,
+// preventing silent 0 for illegal input from being confused with a legal 0.
+// Coexists with the lenient parseInt64 (strtoll direct conversion, no
+// leftover-character validation): negative cases that must distinguish
+// "unspecified" from "illegal input" (e.g. descriptor rows/cols/ld
+// out-of-range injection) use the strict version, while ordinary
+// missing-means-0 parameter parsing keeps the lenient version.
+inline int64_t parseStrictInt64(const csv_map& row, const std::string& key) {
+    auto it = row.find(key);
+    if (it == row.end() || it->second.empty()) { return 0; }
+    const std::string& s = it->second;
+    errno = 0;
+    char* endptr = nullptr;
+    const long long val = std::strtoll(s.c_str(), &endptr, 10);
+    if (endptr == s.c_str() || *endptr != '\0' || errno == ERANGE) {
+        return INT64_MIN; // error sentinel for illegal input
+    }
+    return static_cast<int64_t>(val);
 }
 
 inline double parseDouble(const csv_map& row, const std::string& key) {

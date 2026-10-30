@@ -7,7 +7,12 @@
 > padding ld 补格更新：2026-10-14——检视意见 193726682：ld > 物理行长的
 > 正向路径零覆盖，新增 PruneCheckPaddingLdTest 4 条（RowScan/ColScan ×
 > 合法/违规两态）+ wrapper ldOverride 扩展，K31 登记 srcStride padding
-> 消费点）。
+> 消费点；
+> batchStride 对齐域 32B→16B 更新：2026-10-30——PR 检视「可剪不可查」：
+> #6 batch 对齐除数 32B→16B（与 prune V2 一致；d_in 16B 口径经 D5 实测，
+> 逐 batch 源 16B 基址同类证据），负向用例探针 16384+8→16384+4（原值
+> 16B 域合法化），新增 16B 域两态 4 条（FP16/INT8 × valid/violating）+
+> Prune→PruneCheck 链路 1 条（H8/K29 登记））。
 > 环境：Ascend950PR_9589
 >（NpuArch=3510，**64 AI Vector**）、CANN 9.2.0（环境入口
 > `source /usr/local/Ascend/cann/set_env.sh`，非默认安装路径用
@@ -36,7 +41,7 @@
 | CSV 白盒行（level=WB） | `arch35/prune_check_test.csv` case 101-112 | 12 | kernel 侧分支：tiling 列尾块 / grid-stride / 扫描几何×dtype / groupMask / 多写者 |
 | CSV 最小对齐粒度边界行（level=L1） | `arch35/prune_check_test.csv` case 69-80 | 12 | 各 dtype 32B/elem 最小对齐倍数（且非更大粒度倍数：FP32{8,24}/BF16{16,48}/INT8{32,96}）shape × 耦合盲区：BF16×B 侧四组合全扫描（T+COL 两态必含）、INT8×B 侧 T+ROW+N+COL 两态、{BF16,INT8}×T+COL×A 侧、FP32×B 侧+T+COL，两态均衡（合法/违规各 6 条）；构造性实测 35/35 PASS（BF16 四组合均可构造；INT8 B 侧仅 T+ROW/N+COL 可构造，T+COL/N+ROW 被 `IsValidOpLayoutCombination` 拒） |
 | TEST_F 白盒用例 | `arch35/prune_check_test.cpp` `PruneCheckWhiteboxTest` | 10 | host 侧校验表 #3(matB)/#6(numBatches<1 防御)/#9/#11/#12 防御分支 + 跨返回码有序性 + 错误注入（含 ld 上界断言） |
-| TEST_F 批量语义用例 | `arch35/prune_check_test.cpp` `PruneCheckBatchTest` | 16 | A 侧 12 条：E13 重做（numBatches=2 全 batch 合法→SUCCESS/d_valid=0）+ 批量功能（batch0/末 batch/全部违规、T+ROW 转置物理、FP32、padding batchStride、numBatches=16 跨 batch grid-stride）+ 批量参数拦截（batchStride 0/负/非 32B 对齐、#11 全量跨度溢出、tiling totalTiles 溢出）+ numBatches 一致性（描述符层）；**B 侧批量补格 4 条（B 侧装配链：BATCH_STRIDE 落 matB，host 读 md->matB）**：numBatches=2 全 batch 合法（FP16 N+COL，ColScan×batch）→ 0、T+ROW 转置物理×3 batch 仅末违规 → 1、batchStride 非 32B 对齐（B 侧装配）→ INVALID_VALUE、FP32 N+COL 仅第二 batch 违规 → 1 |
+| TEST_F 批量语义用例 | `arch35/prune_check_test.cpp` `PruneCheckBatchTest` | 21 | A 侧 17 条：E13 重做（numBatches=2 全 batch 合法→SUCCESS/d_valid=0）+ 批量功能（batch0/末 batch/全部违规、T+ROW 转置物理、FP32、padding batchStride、numBatches=16 跨 batch grid-stride）+ 批量参数拦截（batchStride 0/负/非 16B 对齐、#11 全量跨度溢出、tiling totalTiles 溢出）+ numBatches 一致性（描述符层）+ **16B 域 batchStride 两态 4 条（FP16/INT8 × valid/violating，batch 1 源 16B 非 32B 基址锚点）+ Prune→PruneCheck 链路 1 条（可剪可查：剪前检出 → prune → 剪后必过，同描述符同 stride）**；**B 侧批量补格 4 条（B 侧装配链：BATCH_STRIDE 落 matB，host 读 md->matB）**：numBatches=2 全 batch 合法（FP16 N+COL，ColScan×batch）→ 0、T+ROW 转置物理×3 batch 仅末违规 → 1、batchStride 非 16B 对齐（B 侧装配）→ INVALID_VALUE、FP32 N+COL 仅第二 batch 违规 → 1 |
 | TEST_F padding ld 用例 | `arch35/prune_check_test.cpp` `PruneCheckPaddingLdTest` | 4 | **ld > 物理行长的正向路径（检视意见 193726682 补格）**：FP16 128×144、ld=160（每行 padding 16 元素非零垃圾），N+ROW（RowScan）/N+COL（ColScan）A 侧各 2 条 —— 数据区合法 + padding 全非零 → d_valid=0（padding 忽略正向佐证）、数据区违规 + padding 全非零 → d_valid=1（两态载体）；golden 双口径交叉（逻辑 golden == PruneCheckGoldenBatch 物理 ld golden）；wrapper 侧 `SparseSideSpecOf`/`PrepareSparseSideData`/`PruneCheckNpu(BSparse)` 扩展 ldOverride 透传 |
 | 分支覆盖说明（本文） | `prune_check_whitebox_coverage.md` | — | 分支清单、映射、不可达项说明 |
 
@@ -112,7 +117,7 @@ host tiling（`prune_check_host.cpp` L348-399）：`kTileRows=16`、`kMaxBlockDi
 | K26 | launcher else `→ prune_check_u8` | L446-447 | INT8 全部用例 |
 | K27 | `MTE2_V` 搬入→计算可见性同步 | L388 | 全部 SUCCESS 用例必经 |
 | **K28** | **batch tile 领取派生**（外层 batch 循环 + 内层 tile-in-matrix grid-stride，`tim = blockIdx + k·blockNum`；行带/列块二维坐标计数器增量推进——`colChunk += colStep` 条件减法进位 + `rowBand += rowStep`，除法仅初始化每 kernel O(1) 次，热循环零除模；numBatches==1 时 batchIdx 恒 0 退化为单 batch，覆盖集合与原「线性 tileId 整除还原」实现等价） | L312-321, L340-349 | 全部用例必经（numBatches=1 退化路径由既有 92 条 CSV 承载）；**batchIdx>0 寻址由批量用例承载：MultiBatchLastBatchViolationTransposed（末 batch）/ MultiBatchFp32SecondBatchViolation（第二 batch）/ MultiBatchGridStrideAcrossBatches（batchIdx 0-15）+ B 侧对偶 MultiBatchBSparseLastBatchViolationTransposed（末 batch）/ MultiBatchBSparseFp32ColScanSecondBatchViolation（第二 batch）** |
-| **K29** | **batch 基址偏移**（CopyIn 源 `tile.batch×batchStride + rowOffset×ld + colOffset`；host #6 保证 batchStride 32B/dataBytes 对齐 → 各 batch 源地址对齐性质与 batch 0 一致） | L383-386 | 同 K28 批量用例（含 T+ROW 转置物理 × batch 偏移组合、padding batchStride=20480 非紧凑布局；**B 侧批量含 T+ROW 转置物理 × B 侧 batch 偏移、N+COL ColScan × batch 偏移**） |
+| **K29** | **batch 基址偏移**（CopyIn 源 `tile.batch×batchStride + rowOffset×ld + colOffset`；host #6 保证 batchStride 16B/dataBytes 对齐（32B→16B，与 prune 一致）→ 各 batch 源地址保持 ≥ 16B 对齐，16B 非 32B 逐 batch 源实测可用） | L383-386 | 同 K28 批量用例（含 T+ROW 转置物理 × batch 偏移组合、padding batchStride=20480 非紧凑布局；**B 侧批量含 T+ROW 转置物理 × B 侧 batch 偏移、N+COL ColScan × batch 偏移；16B 域 batchStride 用例族：MultiBatchStride16BGranularity*（batch 1 源 16B 非 32B 基址两态）+ PruneThenCheckChainStride16BGranularity（链路）**） |
 | **K30** | **Init 全量跨度含 batch 项**（`(numBatches−1)×batchStride + (rows−1)×ld + cols` 作 SetGlobalBuffer 长度） | L284-285 | 全部用例必经（numBatches=1 时与扩展前一致）；批量跨度语义由批量功能用例承载（A/B 两侧） |
 | **K31** | **CopyIn srcStride padding 跳过（ld > 物理行长，padding 能力唯一消费点）**：`DataCopyExtParams.srcStride = (ld − validCols)×sizeof(U)` 使行间源步长跨过 padding 区 —— padding 数据不进入 UB / 不参与判定（README「ld 大于物理行长时 padding 区数据不参与判定」的实现载体）。既有全部用例 ld == 物理行长：单列块 shape（cols ≤ tileCols）srcStride=0、多列块 shape 的块间推进不涉及行尾 padding —— **ld > 物理行长的正向路径此前零覆盖（检视意见 193726682）** | L375-379 | **padding ld P1（RowScan）/ P2（ColScan）**：FP16 128×144、ld=160，数据区合法 + padding 区 [144,160) 全非零垃圾（1.0 位模式）→ d_valid=0（若 padding 参与判定，每行 padding 16 元素构成 4 个全非零组 / padding 列垂直组全非零 → 必然 d_valid=1，断言冲突即暴露）；**P3/P4（加固）**：数据区违规 + padding 全非零 → d_valid=1（两态载体，判定只看数据区）。golden 双口径交叉（逻辑 golden == PruneCheckGoldenBatch 物理 ld golden，padding 不进入分组判定） |
 
@@ -161,7 +166,7 @@ A 侧 N+ROW/T+COL 的占位 matB 为 dense COL(k,128,ld=128)，k>128 时违反
 | H5 | #4 无唯一稀疏侧（双稀疏/双稠密）→ NOT_SUPPORTED（D-1） | L90-94 | 既有 E8b / E9b（伪造；描述符层 E8/E9） |
 | H6 | #5 dtype 白名单（FP32/FP16/BF16/INT8 + default→NOT_SUPPORTED） | L155-169 | 四支持 dtype 由 CSV 全覆盖；default 分支既有 E10（INT32） |
 | H7 | **#6 批量参数：numBatches<1 → INVALID_VALUE**（SetAttribute 拒绝 <1，防伪造复检） | DeriveBatchParams L113-116 | **WB ForgedZeroBatchesRejected**（伪造 0/-1；公共 API 不可构造） |
-| H8 | **#6 批量参数：numBatches>1 时 batchStride≤0 / 非 32B/elem 倍数 → INVALID_VALUE**（公共 API 可构造） | DeriveBatchParams L119-138（DeriveCheckShape L171-174 调用，dtype #5 先行） | **批量 MultiBatchStrideZeroRejected（0）/ MultiBatchStrideNegativeRejected（负）/ MultiBatchStrideUnalignedRejected（16384+8 非 16 倍数）+ B 侧 MultiBatchBSparseStrideUnalignedRejected（batchStride 经 B 侧 matB 装配，host 读 md->matB 后拦截）**。B 侧批量功能用例（合法 batchStride → SUCCESS/d_valid 三向一致）同时证明 B 侧装配链无「读字段错侧」缺陷（错侧读 matA 默认 batchStride=0 会被 #6 拒绝而非 SUCCESS） |
+| H8 | **#6 批量参数：numBatches>1 时 batchStride<0 / 非 16B/elem 倍数 → INVALID_VALUE**（公共 API 可构造；对齐域 32B→16B——与 prune V2 一致「可剪可查」，D5 逐 batch 16B 源实测） | DeriveBatchParams L119-138（DeriveCheckShape L171-174 调用，dtype #5 先行） | **批量 MultiBatchStrideNegativeRejected（负）/ MultiBatchStrideUnalignedRejected（16384+4 非 16B/elem=8 倍数；原 16384+8 随 32B→16B 合法化，探针迁非 16B 域）+ B 侧 MultiBatchBSparseStrideUnalignedRejected（batchStride 经 B 侧 matB 装配，host 读 md->matB 后拦截）+ 16B 域正向 MultiBatchStride16BGranularity{,Violating,Int8Valid,Int8Violating}（FP16/INT8 两态）+ PruneThenCheckChainStride16BGranularity（链路：剪前检出→prune→剪后必过）**。B 侧批量功能用例（合法 batchStride → SUCCESS/d_valid 三向一致）同时证明 B 侧装配链无「读字段错侧」缺陷（错侧读 matA 默认 batchStride=0 会被 #6 拒绝而非 SUCCESS） |
 | H9 | #7 d_in / d_valid null | L254-257 | 既有 E5 / E6 |
 | H10 | #8 d_in 32B 对齐（实现要求，严于官方 16B 惯例：d_in 为 kernel DataCopyPad 的 GM 源基地址，硬件要求 32B；16B 非 32B 进入未定义搬运路径） | L258-266 | 既有 E7（非 16B/32B 对齐）+ **E7b（16B 对齐但非 32B → INVALID_VALUE，32B 修复新增）** |
 | H11 | #9 `rows==0`/`cols==0`/`ld==0` | L268-283 | **WB ForgedZeroScanDimsRejected**（3 子条件逐一伪造；E12 仅覆盖描述符层拦截，PruneCheck 防御复检此前不可达） |
@@ -213,7 +218,7 @@ A 侧 N+ROW/T+COL 的占位 matB 为 dense COL(k,128,ld=128)，k>128 时违反
 ## 6. 执行与验收
 
 - 构建/运行：`source /usr/local/Ascend/cann/set_env.sh && bash build.sh --ops=prune_check --run --soc=ascend950`（CANN 环境入口按实际安装路径调整，`${install_path}/cann/set_env.sh`；默认 ascend910b3 会因 ENABLE_SPARSELT 拦截跳过，须显式 `--soc=ascend950`）
-- 预期规模：80（CSV 既有 L0/L1 68 + 最小对齐粒度边界 12）+ 12（CSV WB）+ 18（TEST_F 既有 = E 系列 17（含 E7b：d_in 16B 对齐非 32B → INVALID_VALUE）+ 缺陷暴露 1，E13 由批量重做取代）+ 10（TEST_F WB，含 ForgedLdUpperBoundRejected + ForgedZeroBatchesRejected）+ 16（TEST_F 批量：E13 重做 + A 侧 B 系列 11 + **B 侧批量补格 4**）+ **4（TEST_F padding ld：PruneCheckPaddingLdTest，检视意见 193726682 补格——RowScan/ColScan × 合法/违规两态，ld=160 > 物理行长 144）** = **140 条**
+- 预期规模：80（CSV 既有 L0/L1 68 + 最小对齐粒度边界 12）+ 12（CSV WB）+ 18（TEST_F 既有 = E 系列 17（含 E7b：d_in 16B 对齐非 32B → INVALID_VALUE）+ 缺陷暴露 1，E13 由批量重做取代）+ 10（TEST_F WB，含 ForgedLdUpperBoundRejected + ForgedZeroBatchesRejected）+ 16（TEST_F 批量：E13 重做 + A 侧 B 系列 11 + **B 侧批量补格 4**）+ **4（TEST_F padding ld：PruneCheckPaddingLdTest，检视意见 193726682 补格——RowScan/ColScan × 合法/违规两态，ld=160 > 物理行长 144）** + **5（TEST_F batchStride 16B 域：两态 4 条 FP16/INT8 × valid/violating + Prune→PruneCheck 链路 1 条，2026-10-30 对齐域修复新增）** = **145 条**
 - 回归约束：全量 140 条必须全部通过（含 padding ld 补格前 136 条的零回归：CSV 92 条不变 + TEST_F 既有 44 条语义不变），d_valid 三向一致（EXACT 零容差）与返回码枚举断言全数满足。
 - 实测结论：见 §8
 
@@ -272,22 +277,40 @@ A 侧 N+ROW/T+COL 的占位 matB 为 dense COL(k,128,ld=128)，k>128 时违反
 
 ## 8. 全量运行结论（实测回填）
 
-**当前基线（2026-10-14，padding ld 补格后）**：
+**当前基线（2026-10-30，batchStride 对齐域 32B→16B 修复后）**：
 
 ```
 $ source /usr/local/Ascend/cann/set_env.sh   # 非默认安装路径: ${install_path}/cann/set_env.sh
 $ bash build.sh --ops=prune_check --run --soc=ascend950
 
-[==========] 140 tests from 6 test suites ran. (76040 ms total)
-[  PASSED  ] 140 tests.
+[==========] 149 tests from 6 test suites ran. (73667 ms total)
+[  PASSED  ] 149 tests.
 ```
 
-- **140/140 PASSED**（四次全量复跑同口径 140/140：62903 / 81788 / 66289 /
-  76040 ms，最终态完整日志
-  `.cannbot/aclsparseLtSpMMAPruneCheck/tmp/prune_check_final_run.log`）：
-  CSV 92 条（L0/L1 80 + WB 12，零回归）+ TEST_F 48 条（E 系列 17 + 缺陷暴露 1 +
-  白盒 10 + 批量 16 + **padding ld 4**）全部通过，d_valid 三向一致（EXACT
-  零容差）与返回码枚举断言全数满足。
+- **149/149 PASSED**：CSV 92 条（L0/L1 80 + WB 12，零回归）+ TEST_F 57 条
+  （E 系列 17 + 缺陷暴露 1 + 白盒 10 + 批量 21（含 **16B 域 batchStride 5**：
+  两态 4 + 链路 1）+ padding ld 4）全部通过，d_valid 三向一致（EXACT 零容差）
+  与返回码枚举断言全数满足。
+- **本批新增实测**（16B 域 batchStride 5/5 PASS，重点观察项均无异常）：
+  ① FP16 batchStride=16392（=span 16384 + 8，16B 粒度非 32B 域）两态：全 batch
+  合法 → SUCCESS/d_valid=0（batch 1 源基址 +32784B（16B 非 32B）无伪违规）、
+  违规落 batch 1 → d_valid=1（16B 基址违规检出）；② INT8 对偶 batchStride=16400
+  （+16 元素）两态同判别语义（u8 kernel 路径）；③ 链路用例
+  PruneThenCheckChainStride16BGranularity：剪前复检（违规检出 → 1）→ prune
+  （STRIP，同描述符同 stride，SUCCESS）→ 输出 batch 间隙 [16384,16392) 哨兵
+  原样保留（布局保持）→ 剪后复检 SUCCESS/d_valid=0（prune 产物必过 check）
+  ——修复前第 1/4 步均被 #6 32B 域拒绝（INVALID_VALUE，「可剪不可查」），
+  现为回归锚点。全量回归 7 套件 945/945（基线 940 + 本批 5）。
+- **负向边界迁移实测**：MultiBatchStrideUnalignedRejected /
+  MultiBatchBSparseStrideUnalignedRejected 探针 16384+8 → 16384+4（非
+  16B/elem=8 元素倍数）→ INVALID_VALUE（#6 对齐子分支，A/B 侧装配各承载；
+  原 16384+8 在 16B 域下合法放行，由正向两态用例承载）。
+
+**历史基线（2026-10-14，padding ld 补格后）**：140/140 PASSED（四次全量复跑
+同口径 140/140：62903 / 81788 / 66289 / 76040 ms；CSV 92 条零回归 + TEST_F
+48 条 = E 系列 17 + 缺陷暴露 1 + 白盒 10 + 批量 16 + padding ld 4），本批
+padding ld 实测明细：
+
 - **本批新增实测**（padding ld 4/4 PASS，重点观察项均无异常）：
   ① P1 RowScan（FP16 128×144，ld=160，N+ROW A 侧）：数据区合法 + padding 区
   [144,160) 全非零垃圾（1.0 位模式）→ SUCCESS/d_valid=0 —— kernel CopyIn 的

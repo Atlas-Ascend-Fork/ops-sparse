@@ -46,18 +46,30 @@ A_pruned = Prune_2:4(A)
 
 > 说明：FP32 统一采用 1:2 模式（分组为 2、保留 1）以简化实现，与 NVIDIA cuSPARSELt 规范的 1:2 一致；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
 
-#### 剪枝方向
+#### 剪枝方向与物理布局（对齐 cuSPARSELt）
 
-剪枝方向由矩阵 A 描述符的 order 与 Matmul 描述符的 opA 共同决定：
+2:4 分组**恒沿 op(稀疏侧) 的 K（收缩）维度** = op 视图的行方向。order 为
+**物理内存布局**（非方向开关）：ROW 序元素 (i,j) 位于 `i*ld+j`（ld ≥ cols），
+COL 序位于 `j*ld+i`（ld ≥ rows），与 cuSPARSELt 的 Dense/Structured
+DescriptorInit ld 约束一致。四组合的物理形态：
 
-| opA | order | 剪枝方向 | 含义 |
-|-----|-------|---------|------|
-| NON_TRANSPOSE | ROW | 沿行方向 | 每组在行的 K 维度上取 top-N |
-| NON_TRANSPOSE | COL | 沿列方向 | 每组在列的 M 维度上取 top-N |
-| TRANSPOSE | ROW | 沿列方向 | 同上（opA 与 order 共同决定） |
-| TRANSPOSE | COL | 沿行方向 | 同上 |
+| opA | order | 描述符 (rows,cols) | ld 约束 | 物理 buffer 形态（op 视图口径） | 视图 |
+|-----|-------|-------------------|---------|-------------------------------|------|
+| N | ROW | (m,k) | ld ≥ k | (m,k) 行主序，行距 ld | RowView |
+| T | COL | (k,m) | ld ≥ k | (m,k) 行主序，行距 ld | RowView |
+| N | COL | (m,k) | ld ≥ m | (k,m) 行主序，行距 ld（op 视图的转置） | ColView |
+| T | ROW | (k,m) | ld ≥ m | (k,m) 行主序，行距 ld（op 视图的转置） | ColView |
 
-> **order 语义说明**：当前实现中 order 仅影响剪枝方向（沿行或沿列），不改变内存访问模式。kernel 始终以行主序访问内存。矩阵须以行主序存储。
+- **RowView**（(N,ROW)/(T,COL)）：分组沿 op 视图行（K 维），内存连续。
+- **ColView**（(N,COL)/(T,ROW)）：分组沿 op 视图行 = 沿 (k,m) 物理视图的列
+  （跨物理行、步长 ld）。
+- 视图判别式：`pruneAlongRow = (opA==T) != (order==ROW)`（=1 → RowView，
+  =0 → ColView）——与既有公式一致，语义按物理布局重解释。
+- B-sparse 对称：op 视图为 (k,n)，描述符/ld 约束按 B 的 rows/cols 对应成立。
+
+> **order 语义说明**（(b) 口径）：order 是物理内存布局——COL 为列主序存储，
+> kernel 按 (order, ld) 描述的物理形态访问内存（ColView 组合按 (k,m) 行主序
+> 读取）。矩阵须按稀疏侧描述符的 (order, ld) 物理布局存储，而非恒行主序。
 
 #### 剪枝算法（pruneAlg）
 
@@ -74,7 +86,9 @@ pruneAlg 参数选择剪枝算法，两种算法均保证 50% 稀疏度，但剪
 - **FP32（2×2 tile）**：将矩阵划分为 2×2 的 tile，枚举 2 种有效配置（对角线和反对角线，每行每列恰好 1 个非零），选 L1-norm 最大的配置。
 - **Edge tile 回退**：当矩阵行列尾部不构成完整 tile 时，尾部元素回退到 STRIP 算法逐分组剪枝。
 
-> TILE 与 STRIP 的剪枝方向逻辑一致：均由 opA 与 order 共同决定沿行或沿列剪枝。TILE 的三个子路径（沿行 / 沿列 / transA 行序）与 STRIP 一一对应。
+> TILE 与 STRIP 的分组方向逻辑一致：均沿 op 视图行（K 维）。TILE 的 tile
+> 枚举在物理视图上进行（RowView 于 (m,k)、ColView 于 (k,m)），配置集对
+> 转置封闭、L1 范数转置不变，结果对 op 视图合法。
 
 ## 接口说明
 
@@ -115,11 +129,24 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 - d_in 与 d_out 须 16 字节对齐，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - d_in 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - d_out 不可为 nullptr（无 workspace 回退路径），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- 支持 in-place 操作：d_in 与 d_out 可指向同一 Device 内存。**例外**：转置路径（opA=TRANSPOSE 且 order=ROW，即沿列剪枝的转置场景）不支持 in-place，因为输出布局 (m,k) 与输入布局 (k,m) 不同，多核并行写入会覆盖后续 block 的读取区域；此时若 d_in == d_out 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- **in-place 全组合支持**（对齐 cuSPARSELt）：d_in 与 d_out 可指向同一
+  Device 内存——输出保持输入布局（见下），RowView 逐行块 / ColView 逐物理
+  块先读后写且读写区域重合、核间按块网格划分互不相交，padding 区由
+  load/store 的 stride 对称跳过（in-place 下输入 padding 原样保留）。
+- **批量剪枝（batch）**：稀疏侧 numBatches > 1 时（经 `aclsparseLtMatDescSetAttribute` 设置 `ACLSPARSELT_MAT_NUM_BATCHES`，A/B/C/D 四侧须一致），单次 `aclsparseLtSpMMAPrune` 调用完成全部 batch 的剪枝——逐 batch launch，`batchStride`（`ACLSPARSELT_MAT_BATCH_STRIDE`，元素数）为 d_in/d_out 共用的 batch 间步长，各 batch 矩阵按该步长偏移排列在同一连续 Device 内存中。**`batchStride = 0` 表示跨批广播（对齐 cuSPARSELt batch_stride=0 语义）：全部 batch 读写 batch 0，等价单矩阵剪枝**（prune 幂等：out-of-place 时逐批重复写同值，in-place 同理；缓冲仅需单批容量）；`batchStride < 0` 返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。正值还须 ≥ 该侧物理跨度（order 感知）且 `batchStride × 元素字节数` 为 16 字节倍数，批量跨度溢出同样拒绝（对齐/溢出校验口径见 [prune_check/README.md](../prune_check/README.md) 批量约束，执行期校验）。numBatches = 1 时 batchStride 不参与判定。
 - **K 维度对齐约束**：K 须满足结构化描述符初始化（`aclsparseLtStructuredDescriptorInit`）的对齐要求——FP32 为 8 的倍数、FP16/BF16 为 16 的倍数、INT8 为 32 的倍数。描述符初始化只校验 rows、cols、ld 是否满足对应倍数，不会自动向上对齐；调用方须在初始化前自行完成 padding。经 API 成功初始化后，K 必然为对应分组大小的倍数。
-- **UB 容量约束**：沿行剪枝时，STRIP 需单行数据（k × elemSize）不超过单核 UB 容量，TILE 需 TS 行数据（TS × k × elemSize，TS=4 for FP16 / 2 for FP32，每行按 32 字节对齐）不超过单核 UB 容量；沿列剪枝时行块数据（k × elemSize × 16，每行按 32 字节对齐）须不超过单核 UB 容量。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- **UB 容量约束**：RowView 时，STRIP 需单行数据（k × elemSize）不超过
+  单核 UB 容量，TILE 需 TS 行数据（TS × k × elemSize，TS=4 for FP16 /
+  2 for FP32，每行按 32 字节对齐）不超过单核 UB 容量；ColView（(N,COL)/
+  (T,ROW)）按 chunkM 列分块装载，仅需单块（TRANS_TILE × chunkM）不超过
+  UB 容量（大 k 的 (N,COL) 因此从整行全量校验的 NOT_SUPPORTED 域变为支持，
+  与 (T,ROW) 对称）。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 - **异步执行**：算子异步启动，内部不执行 `aclrtSynchronizeStream`；调用方如需读取 d_out 结果，须自行同步 stream。
-- **内存布局**：矩阵 A 须以行主序存储（详见"剪枝方向"中的 order 语义说明）。
+- **内存布局**：d_in 按稀疏侧描述符 (order, ld) 物理布局访问（详见"剪枝
+  方向与物理布局"）。**输出布局契约（对齐 cuSPARSELt）**：d_out 与 d_in
+  **同形同 ld**——须容纳描述符物理跨度（ROW 序 rows×ld / COL 序 cols×ld
+  个元素）的矩阵；被置零元素落在与读取相同的物理位置，padding 区不写
+  （非 in-place 时保持 d_out 原值；in-place 时保留输入 padding）。
 
 ### 返回码
 
@@ -127,8 +154,8 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 |--------|------|
 | `ACL_SPARSE_STATUS_SUCCESS` | 操作成功 |
 | `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为 nullptr |
-| `ACL_SPARSE_STATUS_INVALID_VALUE` | matmulDescr/matA/d_in/d_out 为 nullptr、数据指针未 16 字节对齐 |
-| `ACL_SPARSE_STATUS_NOT_SUPPORTED` | pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量、转置路径 in-place（d_in == d_out） |
+| `ACL_SPARSE_STATUS_INVALID_VALUE` | matmulDescr/matA/d_in/d_out 为 nullptr、数据指针未 16 字节对齐、稀疏侧描述符 ld < 物理行长（RowView 为 k / ColView 为 m，伪描述符防御拒绝——合法描述符恒不触发） |
+| `ACL_SPARSE_STATUS_NOT_SUPPORTED` | pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量 |
 
 ## 调用示例
 

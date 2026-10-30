@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <cfloat>
+#include <algorithm>  // std::min (validSplitK computation in fill_splitk_tiling_dims)
 
 #ifndef __gm__
 #define __gm__
@@ -57,7 +58,11 @@
 
 // Workspace layout (all regions 64B aligned):
 //   [ tilingOff .. aPrunedOff )  : AclsparseltTilingData
-//   [ aPrunedOff .. tempOff )    : A_pruned (m * k * sizeof(T))
+//   [ aPrunedOff .. tempOff )    : A_pruned ((b) A-sparse uses the sparse-side
+//                                  physical span sparseSpan*elemSize — prune
+//                                  output keeps the descriptor (order, ld)
+//                                  layout including padding; non-A-sparse stays
+//                                  m * k * sizeof(T), this region is unused)
 //   [ tempOff .. end )           : temp_result (splitK * m * n * sizeof(float))
 #define SPLT_WS_HEADER_BYTES 64
 #define SPLT_WS_ALIGN 64
@@ -105,7 +110,9 @@ typedef struct AclsparseltTilingData {
     int32_t k;
     // leading dimension of matrix A (may be > k when padded).
     // Prune kernel uses ld for row offsets (row*ld) instead of row*k to handle
-    // padded matrices correctly. Matmul path ignores ld (A_pruned is contiguous).
+    // padded matrices correctly. After the A_pruned layout-preserving change,
+    // matmul addresses the sparse side via ldA/ldB; td.ld is still consumed
+    // only by prune (the matmul path ignores it).
     int32_t ld;
     // cube tiling parameters
     int32_t baseM;
@@ -133,10 +140,13 @@ typedef struct AclsparseltTilingData {
     // Consumed by the prune kernel to dispatch between TILE and STRIP paths.
     // Default 0 (TILE) when zero-initialized; prune host explicitly sets this.
     int32_t pruneAlg;
-    // sparseTrans/transB flags: 1 = op(A)/op(B) is transpose.
-    // sparseTrans is consumed by the prune kernel to read the physical (k,m) layout
-    // and produce A_pruned as (m,k) row-major. transB is consumed by the matmul
-    // kernel to declare the GM B tensor as (n,k) and transpose during CopyGM2L1.
+    // sparseTrans/transB flags (consumed by cube): PlanInit snapshot = the op
+    // component base value (transA/transB); at execution time
+    // splt_apply_gm_layout flips on top for order==COL -> the final value =
+    // isColView(side). 0 -> NDExt (row-major view); 1 -> DNExt (column-major
+    // view, CopyGM2L1 automatically selects the transposing fractal
+    // conversion). The prune kernel no longer consumes sparseTrans (dispatch
+    // looks only at pruneAlongRow; the field is kept for logging/debugging).
     int32_t sparseTrans;
     int32_t transB;
     // scalars (filled at Matmul time; prune/compress ignore them)
@@ -197,16 +207,26 @@ typedef struct AclsparseltTilingData {
     // —— cube GM 布局直通 ld（ld padding 直读接入）——
     // cube A/B 输入的物理行距（元素单位），直通 GM 布局 NDExt/DNExt 的
     // 行距参数（NDExt 第二参数 / DNExt 第一参数），MTE2 搬运按行距跳过
-    // 行尾 padding，dense 侧带 ld 的输入无需任何预处理：
-    //   ldA：A-sparse 恒 k（A_pruned 为 prune 紧凑输出）；B-sparse 为
-    //        dense A 的物理 ld（COL 时即物理转置视图的行步长）。
-    //   ldB：B-sparse 恒 n（B_pruned 紧凑）；A-sparse 为 dense B 的物理 ld。
+    // 行尾 padding，带 ld 的输入无需任何预处理：
+    //   ldA / ldB：两侧恒直读描述符 ld（(b) 布局保持——稀疏侧 A_pruned /
+    //        B_pruned 为 prune 的描述符布局输出（含 padding），dense 侧为
+    //        描述符布局输入，两者同规则）。COL 的转置视图翻转由执行期
+    //        splt_apply_gm_layout 翻转 cube 转置标志承载（最终标志 =
+    //        isColView(该侧)，ld 口径不变；ldA/ldB 为 PlanInit 快照，
+    //        与 ldC/ldD 同口径）。
     // 紧凑场景（ld == 物理列数）与既有紧凑布局参数逐位一致（零回归锚点）。
     // ld 为 int64 描述符字段，此处收窄为 int32——描述符层
     // （Dense/StructuredDescriptorInit）已显式拒绝 ld > INT32_MAX，收窄无
     // 截断（与 ldC/ldD 同口径）。
     int32_t  ldA;
     int32_t  ldB;
+    // —— B4 splitK 空段治理（末尾追加，向后兼容）——
+    // 有效段数 = 起点落在 [0,k) 内的段数 = ceil(k/kSegLen)（kSeg 对齐 baseK
+    // 使其 ≤ splitK；effectiveSplitK==1 时 kSeg 已 clamp 到 k，恒为 1）。
+    // epilogue 归约上界（temp [validSplitK, splitK) 空段不读）；temp memset
+    // 已完全去除，依赖「每个有效段的每个 (m,n) 元素必被 cube 写入」不变量
+    //（证明链见 matmul_host memset 删除处注释）。
+    int32_t  validSplitK;
 } AclsparseltTilingData;
 
 
@@ -256,6 +276,7 @@ __aicore__ inline void splt_load_tiling_core_fields(
     // cube GM 布局直通 ld
     td.ldA = gmTd->ldA;
     td.ldB = gmTd->ldB;
+    td.validSplitK = gmTd->validSplitK;
 }
 
 __aicore__ inline void splt_load_tiling_scalar_batch_fields(
@@ -528,8 +549,39 @@ struct WsLayout {
     int64_t totalBytes;
 };
 
+// (b) sparse-side physical span (in elements): order==ROW -> rows*ld;
+// COL -> cols*ld.
+// Verified over the four combinations (A-sparse): (N,ROW) m*ld / (T,COL)
+// m*ld / (N,COL) k*ld / (T,ROW) k*ld — i.e. the full-rectangle buffer
+// capacity of the descriptor physical matrix (rows, cols, ld) (>= the
+// kernel access span (maxDim-1)*ld+minDim). Once prune outputs preserve
+// the input layout, the buffer capacity of A_pruned/B_pruned is exactly
+// this span (the header's d_out contract: "same shape and ld as d_in").
+// Dimensions are in the int32 domain per the md_* caliber, so the product
+// is <= 2^62 with no overflow surface.
+inline int64_t splt_sparse_span_elems(const aclsparseLtMatDescriptor* sparse)
+{
+    return (sparse->order == ACL_SPARSE_ORDER_ROW)
+        ? sparse->rows * sparse->ld : sparse->cols * sparse->ld;
+}
+
+// (b) workspace A_pruned fallback-region capacity (in elements): under
+// A-sparse this region carries the prune output (descriptor layout with
+// padding) -> it takes the sparse-side physical span; under non-A-sparse
+// (B-sparse / dense x dense) the region is never consumed (matA is always
+// passed explicitly), keeping the existing m*k capacity (zero disturbance
+// to the workspace size).
+inline int64_t splt_apruned_span_elems(const aclsparseLtMatmulDescriptor* md,
+                                       int32_t m, int32_t k)
+{
+    return md_isSparseA(md)
+        ? splt_sparse_span_elems(md->matA)
+        : static_cast<int64_t>(m) * static_cast<int64_t>(k);
+}
+
 inline WsLayout compute_ws_layout(int32_t m, int32_t n, int32_t k, int32_t splitK,
-                                  int32_t dataType, int32_t numBatches)
+                                  int32_t dataType, int32_t numBatches,
+                                  int64_t aPrunedSpanElems)
 {
     // four-branch elemSize (FP32=4, INT8=1, INT32=4, FP16/BF16=2).
     const int64_t elemSize =
@@ -541,7 +593,10 @@ inline WsLayout compute_ws_layout(int32_t m, int32_t n, int32_t k, int32_t split
     WsLayout w;
     w.tilingOff = SPLT_WS_HEADER_BYTES;
     w.aPrunedOff = align_up(w.tilingOff + sizeof(AclsparseltTilingData), SPLT_WS_ALIGN);
-    w.tempOff = align_up(w.aPrunedOff + static_cast<int64_t>(m) * static_cast<int64_t>(k) * elemSize, SPLT_WS_ALIGN);
+    // (b) A_pruned 区容量 = aPrunedSpanElems（A-sparse 为稀疏侧物理跨度——
+    // prune 输出保持描述符布局（含 padding），matA=null 回退时用户须先以
+    // d_out=该区调用 SpMMAPrune 填充描述符布局；非 A-sparse 维持 m*k）。
+    w.tempOff = align_up(w.aPrunedOff + aPrunedSpanElems * elemSize, SPLT_WS_ALIGN);
     // When splitK==1, the fused kernel path (SpltFusedMatmulCubeImpl +
     // SpltFusedEpilogueImpl) writes directly L0C->UB->GM, bypassing the temp
     // buffer entirely. Skip the temp_result allocation (splitK*m*n*4 bytes) to

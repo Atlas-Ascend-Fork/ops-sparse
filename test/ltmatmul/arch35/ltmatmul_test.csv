@@ -1,4 +1,4 @@
-case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side,bias_enabled,bias_stride,activation_type,relu_upper_bound,relu_threshold,gelu_scaling,num_batches,batch_stride,ld_sparse,ld_dense,dense_order,cd_order,ld_cd
+case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side,bias_enabled,bias_stride,activation_type,relu_upper_bound,relu_threshold,gelu_scaling,num_batches,batch_stride,ld_sparse,ld_dense,dense_order,cd_order,ld_cd,direct_feed
 1,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-01-A-sparse-FP16-fused,row,A
 2,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-02-A-sparse-FP32-fused,row,A
 3,256,128,256,FP16,-,sparse×dense,1.0,0.0,true,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-03-A-sparse-FP16-transA,row,A
@@ -132,3 +132,80 @@ case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config
 607,64,160,96,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L8a-FP32-Asp-Bcol-ld176-kgt-n,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,176,col,row,0
 # L8b（k<n 方向）：FP32 A-sparse × B dense COL+ld112 × β=0.5
 608,64,96,160,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,L8b-FP32-Asp-Bcol-ld112-kltn,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,112,col,row,0
+# MIN1（A1(b) 前置风险退役）：dense-B (T,ROW) padded ld=192 → cube 侧 B 声明
+# DNExt(ldB=192, n=128)×INT8 且带 ld padding——(b) 落地后 B-sparse ColView 的
+# B_pruned 缓冲恰为 (n,k) 行主序 ld≥k 形态，经同一 DNExt 声明装载。
+# 事实核查：114 系（紧凑 ldB==k）已证 DNExt×INT8；607/608 已证 DNExt padded
+#（FP32）；本例补「padded DNExt × INT8」组合。A 侧 DNExt×INT8 结构上不可达
+#（INT8 布局组合约束强制 A 侧恒 RowView——COL+COL/ROW+ROW/ROW+COL/COL+ROW
+# 四行 opA 取值均使 (opA, orderA) 落在 RowView 域）。
+609,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,MIN1-DNExt-INT8-denseB-TROW-ld192,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,192,row,row,0
+# MIN2-MIN5（(b) §6.4-3 预剪直喂）：稀疏侧不经 SpMMAPrune——CPU golden 逻辑
+# 剪枝结果按 (order, ld_sparse) 物理散布直接喂 matmul，独立验证 matmul 稀疏侧
+# (order, ld) 贯通（剥离 prune 依赖；golden 经 npuPrunedA 消费同一份 CPU 剪枝
+# 数据）。覆盖：A-sparse (T,ROW) padded ld（INT8 侧结构不可达 ColView 的 FP16
+# 替代）× TILE、A-sparse (N,COL) padded ld FP32、B-sparse (N,COL) padded ld
+# INT8（稀疏侧 DNExt×INT8 锚点）、B-sparse (T,ROW) padded ld FP16。
+610,48,96,64,FP16,-,sparse×dense,1.0,0.5,true,false,0,1,0,TILE,0,0,-1,1,L1,MIN2-DF-A-TROW-ld64-TILE,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,64,0,row,row,0,1
+611,48,96,64,FP32,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,MIN3-DF-A-NCOL-ld56,col,A,0,0,0,3.402823466e38,0.0,1.0,1,0,56,0,row,row,0,1
+612,48,96,64,INT8,INT8,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-5,5,L1,MIN4-DF-B-NCOL-ld128,col,B,0,0,0,3.402823466e38,0.0,1.0,1,0,128,0,row,row,0,1
+613,48,96,64,FP16,-,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,0,0,-1,1,L1,MIN5-DF-B-TROW-ld112,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,112,0,row,row,0,1
+# B2/A4 验收用例（bias = C dtype 键于 (T, CType)）：
+#   614：int8_cf16 + bias + bias_stride>0（128，%16==0 覆盖收紧后的逐 batch
+#        32B 对齐域）+ 多 batch——FP16 bias 量化 roundtrip + per-batch 独立
+#        bias 切片链路；
+#   615：int8_cbf16 + bias + 大 m（m=8192 > UB 全量加载阈值）——biasChunkMode
+#        降级边界（UB 预算含 m*2 biasRawBuf 后的降级触发）；
+#   616：int8_ci32（32I 域 bias=FP32）+ bias_stride>0 + 多 batch——int8cd 链
+#        biasStride 透传修复的回归锚点（原链硬编码 0，golden 按 batch 切片
+#        与 kernel 广播错配 → ~25% 失配）。
+614,48,96,64,INT8,FP16,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,B2A4-int8cf16-bias-stride128-batch2,row,B,1,128,1,3.402823466e38,0.0,1.0,2,9216,0,0,0,0
+615,8192,96,64,INT8,BF16,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,B2A4-int8cbf16-bias-bigM-chunkmode,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0,0,0,0,0
+616,48,96,64,INT8,I32CD,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,B2A4-int8ci32-bias-stride128-batch2,row,B,1,128,1,3.402823466e38,0.0,1.0,2,9216,0,0,0,0
+# B5 验收用例（INT8 通用路径 int32 域缩放，Muls<int32_t>）：
+#   617：INT8×C/D=INT32、alpha=3.0（非 2 幂整值——2 幂乘法落在、beta=0、无 bias/act、k=2048、
+#        range ±127（|sum| 上界≈127*127*2048≈3.3e7 > 2^24）——fused（splitK=1）
+#        走 RunTile 的 int32Scaled 分支，断言与 int64 精确 golden 逐位一致
+#        （range [64,127] 全正：E|sum| ≈ 95·95·2048 ≈ 1.85e7 > 2^24 确定性触发；
+#        旧 FP32 域实现下该域必然舍入超差）；
+#       float 可精确表示域，须非 2 幂触发真实舍入）；
+#   618：同形状 two-stage（splitK=2）——epilogue TryInt32FastPath 第二档；
+#   619：对照组 alpha=2.5（非整值）——回落 FP32 域（README 边界行为锚点，
+#        golden float 域，容差比对）。
+617,48,2048,64,INT8,INT32,sparse×dense,3.0,0.0,false,true,0,1,0,STRIP,0,0,64,127,L1,B5-int32domain-alpha2-fused,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0
+618,48,2048,64,INT8,INT32,sparse×dense,3.0,0.0,false,true,0,2,1,STRIP,0,0,64,127,L1,B5-int32domain-alpha2-twostage,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0
+619,48,2048,64,INT8,INT32,sparse×dense,2.5,0.0,false,true,0,1,0,STRIP,0,0,64,127,L1,B5-fp32domain-alpha25-fused,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0
+# B4 验收用例（splitK 空段治理：validSplitK 归约 + memset 完全去除）：
+#   620：FP16 baseK=64、k=64/splitK=2 → kSegLen=64，段 1 起点 64>=64 整段空
+#        （validSplitK=1）——epilogue 只累加段 0；
+#   621：FP16 k=96/splitK=3 → kSegLen=64，段 2（起点 128）空（validSplitK=2）
+#        —— 段 1 仅 32 有效 k（96-64）；
+#   622：INT8 k=128/splitK=4（baseK=64）→ kSegLen=64，段 2/3 空（validSplitK=2）
+#        + batch=2（temp 跨 batch 段，历史"只清 batch 0"缺陷形态回归锚点）；
+#   623：FP16 k=96/splitK=3 × batch=3（空段 × 多 batch 组合）。
+# splitK>1 恒 two-stage（split_k_mode=1），不触及 fused；断言依赖「有效段
+# cube 全量写」不变量（memset 已去除——旧实现在佐证轮失败）。
+620,64,64,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L1,B4-emptysg-k64-sk2,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0,0
+621,64,96,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,3,1,STRIP,0,0,-1,1,L1,B4-emptysg-k96-sk3,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0,0
+622,64,128,64,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,4,1,STRIP,0,0,-5,5,L1,B4-emptysg-int8-k128-sk4-batch2,row,A,0,0,0,3.402823466e38,0.0,1.0,2,16384,0,0,0,0,0,0,0
+623,64,96,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,3,1,STRIP,0,0,-1,1,L1,B4-emptysg-k96-sk3-batch3,row,A,0,0,0,3.402823466e38,0.0,1.0,3,9216,0,0,0,0,0,0,0
+# ---- D6 op×order 并集口径 INT8 精度用例（B-sparse 官方合法集 S_c ×4 +
+# (Col,Col)+TN 补例 + A-sparse 反转 ×4 + S_c×D=INT32 变体）----
+# 并集表：每个 order 对允许基准 op 对或其反转对（cuSPARSELt "the opposite
+# if B is structured"）。624-627 = B-sparse S_c（官方合法、旧单表拒绝）；
+# 628 = B-sparse (Col,Col)+TN（旧表合法但 B-sparse 侧零覆盖补例）；
+# 629-632 = A-sparse 反转对（官方 A-structured 拒绝，超集接受，精度背书）；
+# 633 = 624 的 D=INT32 变体（宽化输出域）。α=1/β=0/无 bias/activation。
+# 容差档：624-632（D=INT8）走框架 atol=1/rtol=0 的 MERE 档（INT8 输出
+# 无 EXACT 断言通道，实测 0 失配 = de facto 逐位一致）；633（D=INT32）
+# 为 int32 累加直写的 EXACT 档。
+624,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,D6-Bsp-Sc-ColCol-NT,col,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,col,row,0,0
+625,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,true,false,0,1,0,STRIP,0,0,-5,5,L1,D6-Bsp-Sc-RowRow-TN,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0,0
+626,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,true,true,0,1,0,STRIP,0,0,-5,5,L1,D6-Bsp-Sc-RowCol-TT,col,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0,0
+627,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-5,5,L1,D6-Bsp-Sc-ColRow-NN,row,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,col,row,0,0
+628,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,true,false,0,1,0,STRIP,0,0,-5,5,L1,D6-Bsp-Sr-ColCol-TN,col,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,col,row,0,0
+629,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,D6-Asp-Rev-ColCol-NT,col,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,col,row,0,0
+630,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,true,false,0,1,0,STRIP,0,0,-5,5,L1,D6-Asp-Rev-RowRow-TN,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0,0
+631,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,true,true,0,1,0,STRIP,0,0,-5,5,L1,D6-Asp-Rev-RowCol-TT,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,col,row,0,0
+632,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-5,5,L1,D6-Asp-Rev-ColRow-NN,col,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,row,row,0,0
+633,128,128,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,D6-Bsp-Sc-ColCol-NT-I32,col,B,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,col,row,0,0

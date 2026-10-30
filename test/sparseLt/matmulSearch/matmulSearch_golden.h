@@ -67,17 +67,20 @@ inline int32_t SpltDtypeCodeOf(aclDataType valueType)
 // fused 类（s==1）totalBytes=tempOff，与库内跳过 temp 分配逻辑一致。
 // -----------------------------------------------------------------------------
 inline int64_t WhiteboxWsBytes(int32_t m, int32_t n, int32_t k, int32_t effSplitK,
-                               int32_t dataTypeCode, int32_t numBatches)
+                               int32_t dataTypeCode, int32_t numBatches,
+                               int64_t aPrunedSpanElems)
 {
-    const WsLayout w = compute_ws_layout(m, n, k, effSplitK, dataTypeCode, numBatches);
+    const WsLayout w = compute_ws_layout(m, n, k, effSplitK, dataTypeCode, numBatches,
+                                         aPrunedSpanElems);
     return w.totalBytes;
 }
-
 // aPruned 区偏移（B3：matA=nullptr 回退 ws+aPrunedOffset，剪枝目标偏移白盒求取）。
 inline int64_t WhiteboxAPrunedOffset(int32_t m, int32_t n, int32_t k, int32_t effSplitK,
-                                     int32_t dataTypeCode, int32_t numBatches)
+                                     int32_t dataTypeCode, int32_t numBatches,
+                                     int64_t aPrunedSpanElems)
 {
-    const WsLayout w = compute_ws_layout(m, n, k, effSplitK, dataTypeCode, numBatches);
+    const WsLayout w = compute_ws_layout(m, n, k, effSplitK, dataTypeCode, numBatches,
+                                         aPrunedSpanElems);
     return w.aPrunedOff;
 }
 
@@ -127,7 +130,8 @@ struct CandidateVerdict {
 inline CandidateVerdict AssertCandidateLegal(int32_t selCfg, int32_t selSplitK,
     int32_t selSplitKMode, int32_t K, int32_t maxCfgId,
     int64_t wsLimit, int32_t m, int32_t n, int32_t k,
-    int32_t dataTypeCode, int32_t numBatches, bool defaultPresetFusedOnly)
+    int32_t dataTypeCode, int32_t numBatches, bool defaultPresetFusedOnly,
+    int64_t aPrunedSpanElems)
 {
     CandidateVerdict v;
     v.selCfg = selCfg;
@@ -162,7 +166,8 @@ inline CandidateVerdict AssertCandidateLegal(int32_t selCfg, int32_t selSplitK,
     }
 
     // ---- workspace 方案 A 裁剪：wsReq(effSplitK) <= wsLimit ----
-    v.wsReq = WhiteboxWsBytes(m, n, k, v.effSplitK, dataTypeCode, numBatches);
+    v.wsReq = WhiteboxWsBytes(m, n, k, v.effSplitK, dataTypeCode, numBatches,
+                              aPrunedSpanElems);
     v.wsFitOk = (v.wsReq <= wsLimit);
 
     // ---- 推论断言（默认预置 fused-only 窗口）----
@@ -209,12 +214,13 @@ struct PlanConsistencyVerdict {
 
 inline PlanConsistencyVerdict AssertPlanConsistency(int64_t wsPre, int64_t wsPost,
     int32_t m, int32_t n, int32_t k, int32_t effSplitK,
-    int32_t dataTypeCode, int32_t numBatches)
+    int32_t dataTypeCode, int32_t numBatches, int64_t aPrunedSpanElems)
 {
     PlanConsistencyVerdict v;
     v.wsPre = wsPre;
     v.wsPost = wsPost;
-    v.wsExpected = WhiteboxWsBytes(m, n, k, effSplitK, dataTypeCode, numBatches);
+    v.wsExpected = WhiteboxWsBytes(m, n, k, effSplitK, dataTypeCode, numBatches,
+                                   aPrunedSpanElems);
     v.equalOk = (wsPost == v.wsExpected);
     v.monotonicOk = (wsPost <= wsPre);
     return v;

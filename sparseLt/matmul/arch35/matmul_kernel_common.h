@@ -49,17 +49,25 @@ template <typename T> struct SpltL0CTypeTrait { using type = float; };  // FP32/
 template <> struct SpltL0CTypeTrait<int8_t> { using type = int32_t; };  // INT8
 
 // ============================================================================
-// bias dtype 映射（依据 cuSPARSELt 规范）：
+// bias dtype mapping (per the cuSPARSELt spec, keyed on (T, CType)):
 // "bias 向量的数据类型与矩阵 C 相同，唯一例外是 INT8 输入、INT8/INT32 输出、
 //  INT32 计算的场景——此时 bias 的数据类型为 FP32。"
 //   FP32 路径：bias = FP32（= C dtype）→ 直接加载，无需 Cast
 //   FP16 路径：bias = FP16（= C dtype）→ 加载 FP16，Cast 到 FP32
 //   BF16 路径：bias = BF16（= C dtype）→ 加载 BF16，Cast 到 FP32
-//   INT8 路径：bias = FP32（cuSPARSELt 规范）→ 直接加载，无需 Cast
+//   INT8 × C/D ∈ {INT8, INT32}（32I 计算域）：bias = FP32 → 直接加载
+//   INT8 × C/D=FP16/BF16：bias = FP16/BF16（= C dtype）→ 加载后 Cast 到
+//   FP32（INT8 输入不改变 bias=C dtype 规则，例外仅限 32I 计算域）
+// 五组合正确 bias dtype 表：int8×(C8,D8)→FP32；int8×(C8,D32)→FP32；
+// int8×(C32,D32)→FP32；int8×(C16,D16)→FP16；int8×(CBF16,DBF16)→BF16。
+// 非 INT8 路 CType == T，主模板退化为原行为（零回归锚点）。
 // ============================================================================
-template <typename T> struct SpltBiasDTypeTrait { using type = T; };  // FP32/FP16/BF16: bias = C dtype
-template <> struct SpltBiasDTypeTrait<int8_t> { using type = float; };  // INT8: bias = FP32
-template <typename T> using SpltBiasDType = typename SpltBiasDTypeTrait<T>::type;
+template <typename T, typename CType>
+struct SpltBiasDTypeTrait { using type = CType; };  // primary template: bias = C dtype
+template <> struct SpltBiasDTypeTrait<int8_t, int8_t> { using type = float; };   // 32I-domain exception
+template <> struct SpltBiasDTypeTrait<int8_t, int32_t> { using type = float; };  // 32I-domain exception
+template <typename T, typename CType>
+using SpltBiasDType = typename SpltBiasDTypeTrait<T, CType>::type;
 
 // 逐元素标量 Cast 循环（GetValue/SetValue）。对支持 static_cast 的
 // 类型（FP16、INT8 等）使用 static_cast。
@@ -462,6 +470,37 @@ __aicore__ inline void SpltSplitKAccInt32(
 __aicore__ inline float SpltGetScalarFromUB(LocalTensor<float>& ubTensor, int32_t index)
 {
     return ubTensor.GetValue(static_cast<uint32_t>(index));
+}
+
+// ============================================================================
+// FastPath 判定共享谓词（B1）：fused RunTile 与 fused InitBuffers 共用；
+// epilogue INT32 快速路径（SpltEpilogueTryInt32FastPath）同式。
+// beta 向量缩放开启时 host 置 td.beta=0.0f 哨兵（betaVec 的 beta*C 由
+// 向量分支承载），beta==0.0f 恒真——必须以 betaVectorScaling==0 显式排除
+// (alphaVec=0, betaVec=1) 混合态，否则 FastPath 直接 Cast(acc)→D 会整体
+// 丢失 beta*C。单一定义根除"RunTile 改判而 InitBuffers 未同步 → General
+// Path Get 未分配 TBuf"的漂移风险。
+// ============================================================================
+__aicore__ inline bool SpltFastPathCond(float alpha, float beta,
+    int32_t alphaVectorScaling, int32_t betaVectorScaling,
+    uint64_t biasDevPtr, int32_t activationType)
+{
+    return alphaVectorScaling == 0 && betaVectorScaling == 0
+        && alpha == 1.0f && beta == 0.0f
+        && biasDevPtr == 0 && activationType == 0;
+}
+
+// ============================================================================
+// B5：alpha 的 int32 域整值判定。float→int32 收窄前显式域检查（C++ 语义
+// 下超域 float→int32 转换为 UB）：[-2^31, 2^31) 内的 float 精确比较
+// (alpha == (float)(int32_t)alpha) 判整值。超过 2^24 的整值 float 本身是
+// 2 的幂间距（尾数 24bit），回转比较仍正确判定"可精确表示的整值"；不可精
+// 确表示的非整值自动回落 FP32 域（调用方语义）。
+// ============================================================================
+__aicore__ inline bool SpltAlphaIsIntegralInt32(float alpha)
+{
+    return alpha >= -2147483648.0f && alpha < 2147483648.0f
+        && alpha == static_cast<float>(static_cast<int32_t>(alpha));
 }
 
 // 将完整 bias 向量从 GM 加载到 FP32 UB（count 个元素）。

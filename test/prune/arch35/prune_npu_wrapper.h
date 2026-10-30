@@ -17,9 +17,11 @@
 // Prune NPU wrapper (decoupled from alg_set_attribute / matmul test headers).
 //
 // Reuses RAII guards from matmulDescriptorInit_npu_wrapper.h (SparseLtHandleGuard,
-// MatDescrGuard, MatmulDescrGuard). Provides NpuDtypeTrait and the
-// PreparePhysicalA helper (extracted from the source repo's
-// alg_set_attribute_npu_wrapper.h) so that prune tests do not pull in any
+// MatDescrGuard, MatmulDescrGuard). Provides NpuDtypeTrait and the (b)
+// layout-preserving comparison infrastructure (PrunePadSentinel /
+// PruneEffLdOf / ScatterLogicalToPhysicalSentinel — logical (m,k) ->
+// descriptor (order, ld) physical scatter + sentinel padding) so that
+// prune tests do not pull in any
 // alg_set_attribute or matmul code. EventGuard 复用 test/frame/event_guard.h
 // 共享定义（prune / ltmatmul 计时共用，含 R6/P2 返回值检查加固语义）。
 //
@@ -100,29 +102,67 @@ struct NpuDtypeTrait<int8_t> {
 // 原 11 行本地拷贝与 ltmatmul_test_utils.h 重复，codecheck 重复代码清零）。
 
 // -----------------------------------------------------------------------------
-// Physical matrix preparation (transpose logic for TRANSPOSE+ROW order).
-// TransposeToRowMajor is provided by the shared header transpose_utils.h.
+// (b) layout-preserving comparison infrastructure: logical (m,k) op view ->
+// descriptor (order, ld) physical scatter (batch-copied), with non-data
+// regions (row/column-tail padding + batch gaps) pre-filled with sentinels.
+// Input assembly and expected-output construction share the same scatter
+// (expected = the golden logical result under the same mapping; padding ==
+// sentinel is the behavioral anchor for "kernel does not write padding",
+// and under in-place it also verifies the input padding is preserved
+// as-is). Data position mapping (verified over the four combinations):
+// logical(i,j) = M(trans ? (j,i) : (i,j)), where M(r,c) sits at ROW r*ld+c
+// / COL c*ld+r.
 // -----------------------------------------------------------------------------
 
-template <typename T>
-inline std::vector<T> PreparePhysicalA(const std::vector<T>& hA,
-    int32_t m, int32_t k, bool transA, aclsparseOrder_t order, int64_t& aLd)
+// Sentinel bit pattern (deterministic; just needs to be distinguishable
+// from the data region).
+template <typename T> inline T PrunePadSentinel();
+template <> inline float PrunePadSentinel<float>() { return 12345.678f; }
+template <> inline uint16_t PrunePadSentinel<uint16_t>() { return 0x5A5Au; }
+template <> inline bf16_bits_t PrunePadSentinel<bf16_bits_t>() { return bf16_bits_t(0x5A5Au); }
+template <> inline int8_t PrunePadSentinel<int8_t>() { return static_cast<int8_t>(0x5A); }
+
+// Sparse-side effective ld: ld > 0 (padded override) or the natural compact
+// value (COL ? rows : cols).
+inline int64_t PruneEffLdOf(int32_t m, int32_t k, bool trans,
+                            aclsparseOrder_t order, int64_t ld)
 {
-    if (!transA) {
-        // For NON_TRANSPOSE, the prune kernel always reads the
-        // matrix as row-major (m, k) with stride ld, regardless of order.
-        // The order field only selects the pruning direction (alongRow vs
-        // alongCol), not the data layout. Setting aLd=k (the actual row-major
-        // stride) ensures correct data access when m != k.
-        aLd = static_cast<int64_t>(k);
-        return hA;
+    const int64_t rows = trans ? k : m;
+    const int64_t cols = trans ? m : k;
+    const int64_t natural = (order == ACL_SPARSE_ORDER_COL) ? rows : cols;
+    return (ld > 0) ? ld : natural;
+}
+
+// Logical (m,k) -> (order, ld) physical scatter + sentinel (see above).
+// When nb>1, the same logical data is copied batch by batch (consistent
+// with the existing single-copy semantics of LayOutBatchStrided).
+template <typename T>
+inline std::vector<T> ScatterLogicalToPhysicalSentinel(const std::vector<T>& hLogical,
+    int32_t m, int32_t k, bool trans, aclsparseOrder_t order, int64_t ld,
+    int32_t nb, int64_t stride)
+{
+    const int64_t rows = trans ? k : m;
+    const int64_t cols = trans ? m : k;
+    const bool isBatch = (nb > 1 && stride > 0);
+    const int64_t strideEff = isBatch ? stride
+        : static_cast<int64_t>((order == ACL_SPARSE_ORDER_COL) ? cols * ld : rows * ld);
+    const int32_t nbEff = isBatch ? nb : 1;
+    std::vector<T> out(static_cast<size_t>(nbEff) * static_cast<size_t>(strideEff),
+                       PrunePadSentinel<T>());
+    for (int32_t b = 0; b < nbEff; ++b) {
+        const int64_t base = static_cast<int64_t>(b) * strideEff;
+        for (int64_t i = 0; i < m; ++i) {
+            for (int64_t j = 0; j < k; ++j) {
+                const int64_t r = trans ? j : i;
+                const int64_t c = trans ? i : j;
+                const int64_t off = (order == ACL_SPARSE_ORDER_COL)
+                    ? (c * ld + r) : (r * ld + c);
+                out[static_cast<size_t>(base + off)] =
+                    hLogical[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(j)];
+            }
+        }
     }
-    aLd = (order == ACL_SPARSE_ORDER_COL)
-        ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
-    if (order == ACL_SPARSE_ORDER_ROW) {
-        return TransposeToRowMajor<T>(hA, m, k, aLd);
-    }
-    return hA;
+    return out;
 }
 
 }  // namespace sparse_test
@@ -133,23 +173,13 @@ inline std::vector<T> PreparePhysicalA(const std::vector<T>& hA,
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
-// [batch] 铺设 nb×stride 全量 host 缓冲（batch b 占 [b*stride, b*stride+span)，
-// 其余 padding 置零）；四 mat 描述符设 NUM_BATCHES/BATCH_STRIDE（一致性校验
-// 要求在 MatmulDescriptorInit 前设置）。输入为相同单份数据——验证输出 batch
-// 布局推进与逐 batch 参考一致性（batch 正向基线）。
+// [batch] Laying out the full nb x stride host buffer (batch b occupies
+// [b*stride, b*stride+span), the remaining padding zeroed) — superseded by
+// ScatterLogicalToPhysicalSentinel's batch-copy mechanism (with sentinel
+// padding); the local copy is deleted. The four mat descriptors set
+// NUM_BATCHES/BATCH_STRIDE (the consistency validation requires them to be
+// set before MatmulDescriptorInit).
 // -----------------------------------------------------------------------------
-template <typename T>
-inline std::vector<T> LayOutBatchStrided(const std::vector<T>& phys,
-    int32_t nb, int64_t stride)
-{
-    if (nb <= 1) { return phys; }
-    std::vector<T> out(static_cast<size_t>(nb) * static_cast<size_t>(stride), T{0});
-    for (int32_t b = 0; b < nb; ++b) {
-        std::copy(phys.begin(), phys.end(),
-                  out.begin() + static_cast<size_t>(b) * static_cast<size_t>(stride));
-    }
-    return out;
-}
 
 inline void SetBatchAttrsOnMat(aclsparseLtConstHandle_t handle,
     aclsparseLtMatDescriptor_t* matDesc, int32_t nb, int64_t stride)
@@ -316,9 +346,14 @@ inline void InitPruneBSparseDescrs(PruneDescrGroup& g,
 // pruneAlg: ACLSPARSELT_PRUNE_SPMMA_STRIP or ACLSPARSELT_PRUNE_SPMMA_TILE.
 // alg_config_id / split_k are accepted for CSV signature compatibility but
 // are NOT used by prune (prune is independent of algorithm selection).
-// ld 尾参：structured A 的 ld 覆盖（0 = 紧凑 = 既有行为；>min 时
-// 输入按 (order, ld) padded 物理布局摆放，pad 置零——prune 以 row*ld 读 padded
-// 矩阵，输出恒紧凑 (m,k) 行主序）。
+// ld tail param: structured-side ld override (0 = compact; >min = padded
+// input, and under (b) the output keeps the same layout). inPlace tail
+// param: d_in == d_out (supported for all combinations under (b)).
+// (b) The output keeps the input (order, ld) layout: d_out capacity = the
+// physical rectangle (single batch) / nb*batchStride; when not in-place,
+// d_out is pre-filled with sentinels (the comparison asserts padding is
+// not overwritten by the kernel); the full physical buffer is read back for
+// the comparison side to unpack under the same layout.
 template <typename T>
 inline PruneNpuResult PruneNpu(
     aclrtStream stream,
@@ -328,45 +363,35 @@ inline PruneNpuResult PruneNpu(
     aclsparseOperation_t opA, aclsparseOrder_t order,
     aclsparseLtPruneAlg_t pruneAlg = ACLSPARSELT_PRUNE_SPMMA_STRIP,
     int32_t numBatches = 1, int64_t batchStride = 0,
-    int64_t ld = 0)
+    int64_t ld = 0, bool inPlace = false)
 {
     using namespace sparse_test;
     PruneNpuSetup<T> ctx(alg_config_id, split_k);
     auto& result = ctx.result;
 
     const bool transA = (opA == ACL_SPARSE_OP_TRANSPOSE);
-
-    int64_t aLd;
-    std::vector<T> hA_phys = PreparePhysicalA<T>(hA, m, k, transA, order, aLd);
-
     const int64_t physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
     const int64_t physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
-    if (ld > 0) {
-        // padded 输入：物理重排到 (order, ld) 布局（pad 置零）
-        aLd = ld;
-        hA_phys = PackBatchStridedPhysical<T>(hA_phys,
-            static_cast<int32_t>(physRowsA), static_cast<int32_t>(physColsA),
-            order, aLd, numBatches, batchStride);
-    }
-    const size_t mk = static_cast<size_t>(m) * k;
-    // For NON_TRANSPOSE, data is always row-major (m, k) with stride
-    // aLd=k regardless of order (see PreparePhysicalA). Use the row-major size
-    // formula (physRowsA * aLd) for NON_TRANSPOSE. The COL formula
-    // (physColsA * aLd) is only valid for TRANSPOSE+COL where aLd=k and the
-    // physical layout is column-major (k, m) with ld=k.
-    const size_t aPhysSize = (transA && order == ACL_SPARSE_ORDER_COL)
-        ? static_cast<size_t>(physColsA) * static_cast<size_t>(aLd)
-        : static_cast<size_t>(physRowsA) * static_cast<size_t>(aLd);
-
-    // batch：铺设 nb×stride 全量（物理变换后的单份复制）；span 取物理布局跨度
+    const int64_t aLd = PruneEffLdOf(m, k, transA, order, ld);
     const bool isBatch = (numBatches > 1 && batchStride > 0);
-    const size_t totalElems = isBatch
-        ? static_cast<size_t>(numBatches) * static_cast<size_t>(batchStride)
-        : aPhysSize;
-    const std::vector<T> hA_laid = isBatch
-        ? LayOutBatchStrided<T>(hA_phys, numBatches, batchStride) : hA_phys;
-    DeviceBuffer dA = DeviceBuffer::copyFrom(hA_laid.data(), totalElems * ctx.kElt);
-    DeviceBuffer dAPruned = DeviceBuffer::alloc(totalElems * ctx.kElt);
+
+    // Input assembly: logical (m,k) -> (order, ld) physical +
+    // padding/gap sentinels.
+    const std::vector<T> hA_phys = ScatterLogicalToPhysicalSentinel<T>(
+        hA, m, k, transA, order, aLd, numBatches, batchStride);
+    const size_t totalElems = hA_phys.size();
+    DeviceBuffer dA = DeviceBuffer::copyFrom(hA_phys.data(), totalElems * ctx.kElt);
+
+    // Output buffer: when not in-place, pre-fill with sentinels (the kernel
+    // writes only the data region); in-place reuses the input buffer (the
+    // sentinel padding is exactly the input padding, verifying it is
+    // preserved as-is).
+    DeviceBuffer dOut;
+    if (!inPlace) {
+        const std::vector<T> sentinelBuf(totalElems, PrunePadSentinel<T>());
+        dOut = DeviceBuffer::copyFrom(sentinelBuf.data(), totalElems * ctx.kElt);
+    }
+    void* outPtr = inPlace ? dA.get() : dOut.get();
 
     // 描述符组（matA structured + matB/C/D dense 占位 + batch 属性 + matmulDesc）
     PruneDescrGroup descrs;
@@ -374,12 +399,13 @@ inline PruneNpuResult PruneNpu(
                               order, opA, transA, isBatch, numBatches, batchStride);
 
     if (!RunPruneExecution(descrs.handle.ptr(), descrs.md.get(),
-                           dA.get(), dAPruned.get(), pruneAlg, stream, result)) {
+                           dA.get(), outPtr, pruneAlg, stream, result)) {
         return result;
     }
 
     hAPruned.resize(totalElems);
-    dAPruned.copyToHost(hAPruned.data(), totalElems * ctx.kElt);
+    DeviceBuffer& outBuf = inPlace ? dA : dOut;
+    outBuf.copyToHost(hAPruned.data(), totalElems * ctx.kElt);
     return result;
 }
 
@@ -390,6 +416,9 @@ inline PruneNpuResult PruneNpu(
 // detects matB as structured (sparsity=50_PERCENT) and prunes B.
 // alg_config_id / split_k are accepted for CSV signature compatibility but
 // are NOT used by prune.
+// (b) The output keeps the B descriptor (order, ld) layout (same as
+// PruneNpu; the ld tail param is the B-side ld override, and the inPlace
+// tail param is the same as PruneNpu).
 template <typename T>
 inline PruneNpuResult PruneNpuBSparse(
     aclrtStream stream,
@@ -398,7 +427,8 @@ inline PruneNpuResult PruneNpuBSparse(
     int32_t alg_config_id, int32_t split_k,
     aclsparseOperation_t opB, aclsparseOrder_t order,
     aclsparseLtPruneAlg_t pruneAlg = ACLSPARSELT_PRUNE_SPMMA_STRIP,
-    int32_t numBatches = 1, int64_t batchStride = 0)
+    int32_t numBatches = 1, int64_t batchStride = 0,
+    int64_t ld = 0, bool inPlace = false)
 {
     using namespace sparse_test;
     PruneNpuSetup<T> ctx(alg_config_id, split_k);
@@ -411,27 +441,23 @@ inline PruneNpuResult PruneNpuBSparse(
     const int64_t aCols = static_cast<int64_t>(mB);
     const int64_t aLd = aCols;
 
-    // B physical layout: same logic as PreparePhysicalA for A-sparse
-    // (transB + order determine whether to physically transpose hB).
-    int64_t bLd = 0;
-    std::vector<T> hB_phys = PreparePhysicalA<T>(hB, mB, kB, transB, order, bLd);
     const int64_t bPhysRows = transB ? static_cast<int64_t>(kB) : static_cast<int64_t>(mB);
     const int64_t bPhysCols = transB ? static_cast<int64_t>(mB) : static_cast<int64_t>(kB);
-    const size_t mk = static_cast<size_t>(mB) * static_cast<size_t>(kB);
-    // Same row-major size fix as PruneNpu (see PreparePhysicalA).
-    const size_t bPhysSize = (transB && order == ACL_SPARSE_ORDER_COL)
-        ? static_cast<size_t>(bPhysCols) * static_cast<size_t>(bLd)
-        : static_cast<size_t>(bPhysRows) * static_cast<size_t>(bLd);
-
-    // batch：铺设 nb×stride 全量（物理变换后的单份复制）
+    const int64_t bLd = PruneEffLdOf(mB, kB, transB, order, ld);
     const bool isBatch = (numBatches > 1 && batchStride > 0);
-    const size_t totalElems = isBatch
-        ? static_cast<size_t>(numBatches) * static_cast<size_t>(batchStride)
-        : bPhysSize;
-    const std::vector<T> hB_laid = isBatch
-        ? LayOutBatchStrided<T>(hB_phys, numBatches, batchStride) : hB_phys;
-    DeviceBuffer dB = DeviceBuffer::copyFrom(hB_laid.data(), totalElems * ctx.kElt);
-    DeviceBuffer dBPruned = DeviceBuffer::alloc(totalElems * ctx.kElt);
+
+    // Input assembly: logical (mB,kB) -> (order, bLd) physical + sentinels.
+    const std::vector<T> hB_phys = ScatterLogicalToPhysicalSentinel<T>(
+        hB, mB, kB, transB, order, bLd, numBatches, batchStride);
+    const size_t totalElems = hB_phys.size();
+    DeviceBuffer dB = DeviceBuffer::copyFrom(hB_phys.data(), totalElems * ctx.kElt);
+
+    DeviceBuffer dOut;
+    if (!inPlace) {
+        const std::vector<T> sentinelBuf(totalElems, PrunePadSentinel<T>());
+        dOut = DeviceBuffer::copyFrom(sentinelBuf.data(), totalElems * ctx.kElt);
+    }
+    void* outPtr = inPlace ? dB.get() : dOut.get();
 
     // 描述符组（matA dense 占位 + matB structured + matC/matD dense 占位 +
     // batch 属性 + matmulDesc）
@@ -441,12 +467,13 @@ inline PruneNpuResult PruneNpuBSparse(
                               batchStride);
 
     if (!RunPruneExecution(descrs.handle.ptr(), descrs.md.get(),
-                           dB.get(), dBPruned.get(), pruneAlg, stream, result)) {
+                           dB.get(), outPtr, pruneAlg, stream, result)) {
         return result;
     }
 
     hBPruned.resize(totalElems);
-    dBPruned.copyToHost(hBPruned.data(), totalElems * ctx.kElt);
+    DeviceBuffer& outBuf = inPlace ? dB : dOut;
+    outBuf.copyToHost(hBPruned.data(), totalElems * ctx.kElt);
     return result;
 }
 

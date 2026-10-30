@@ -460,8 +460,10 @@ TEST_F(PruneCheckExceptionTest, NullDvalid) {
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// E7: d_in 非 32B 对齐（合法 DeviceBuffer 内偏移 4B，同时非 16B/32B 对齐）
-// -> INVALID_VALUE（校验表 #8；d_valid 不强制对齐由全部用例天然覆盖）。
+// E7: d_in 非 16B 对齐（合法 DeviceBuffer 内偏移 4B，地址 ≡ 4 mod 16，
+// 同时非 16B/32B 对齐）-> INVALID_VALUE（校验表 #8 的 16B 口径；16B 口径
+// 的负向边界锁定——偏移 4B 构造在 16B 与 32B 口径下均非法，行为不变；
+// d_valid 不强制对齐由全部用例天然覆盖）。
 TEST_F(PruneCheckExceptionTest, MisalignedDin) {
     PruneCheckTestCtx ctx;
     // 独立缓冲（偏移后地址 ≡ 4 mod 16，缓冲本身多分配防越界）。
@@ -469,31 +471,22 @@ TEST_F(PruneCheckExceptionTest, MisalignedDin) {
         sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(uint16_t) + 32);
     void* misaligned = sparse_test::MisalignedOffsetPtr(buf);
     const uintptr_t addr = reinterpret_cast<uintptr_t>(misaligned);
-    ASSERT_NE(addr % 32u, 0u) << "misaligned pointer construction failed";
+    ASSERT_NE(addr % 16u, 0u) << "misaligned (non-16B) pointer construction failed";
     auto ret = aclsparseLtSpMMAPruneCheck(
         ctx.handle.ptr(), sparse_test::matmulDescCptr(ctx.md), misaligned,
         static_cast<int*>(ctx.dValid.get()), stream_);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// E7b: d_in 16B 对齐但非 32B 对齐（合法 DeviceBuffer 内偏移 16B，地址
-// ≡ 16 mod 32）-> INVALID_VALUE（校验表 #8：d_in 为 kernel DataCopyPad 的
-// GM 源基地址，硬件要求 32B 对齐；16B 非 32B 会进入未定义搬运路径——可能
-// 507035 或读错数据，须在 host 侧拦截）。
-TEST_F(PruneCheckExceptionTest, HalfAlignedDin) {
-    PruneCheckTestCtx ctx;
-    // 独立缓冲（偏移后地址 ≡ 16 mod 32，缓冲本身多分配防越界）。
-    sparse_test::DeviceBuffer buf =
-        sparse_test::DeviceBuffer::alloc(128 * 128 * sizeof(uint16_t) + 64);
-    void* halfAligned = sparse_test::HalfAlignedOffsetPtr(buf);
-    const uintptr_t addr = reinterpret_cast<uintptr_t>(halfAligned);
-    ASSERT_EQ(addr % 16u, 0u) << "16B-aligned pointer construction failed";
-    ASSERT_NE(addr % 32u, 0u) << "non-32B pointer construction failed";
-    auto ret = aclsparseLtSpMMAPruneCheck(
-        ctx.handle.ptr(), sparse_test::matmulDescCptr(ctx.md), halfAligned,
-        static_cast<int*>(ctx.dValid.get()), stream_);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
-}
+// E7b（D5 轮 16B 口径，原 HalfAlignedDin 用例退役）：d_in 的对齐校验
+// 已由 32B 放宽为 16B（对齐 cuSPARSELt "All pointers must be aligned to
+// 16 bytes"；实测 DataCopyPad 容忍 16B 对齐 GM 源）。原用例构造的
+// "16B 对齐但非 32B"输入（HalfAlignedOffsetPtr 偏移 16B）在 16B 口径下
+// 合法放行——其 ctx 的 d_in 为未初始化 Device 内存（原用例在校验层即被
+// 拒，不触达 kernel），翻转正向无法断言 d_valid 值，故删除；16B 基址的
+// 放行正向由下方 DinAlign16B 用例族完整承载（合法数据 + valid/violating
+// 两态断言）。16B 口径下的负向边界（非 16B 对齐）由上方 MisalignedDin
+// 用例承载（偏移 4B 构造 ≡ 4 mod 16，覆盖非 16B 域）。
 
 namespace {
 
@@ -706,12 +699,16 @@ TEST_F(PruneCheckExceptionTest, EmptyShapeDescriptorRejected) {
               ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// E14（开发方案 D-2，黑盒可构造）: ld < 物理行长 -> INVALID_VALUE（校验表
-// #10）。构造 N+COL 且 m ≤ ld < k：matA structured FP16 (16, 4096, ld=2048,
-// COL)（整除与 IsLdValid 均满足，描述符可构造），physRowLen = k = 4096 >
-// ld = 2048。prune 对该场景静默 clamp，本算子以错误代替 clamp（防越界读）。
-TEST_F(PruneCheckExceptionTest, LdBelowPhysRowLenRejected) {
+// E14（(b) 语义修订，原名 LdBelowPhysRowLenRejected）：N+COL 且 m ≤ ld < k
+// 的形状在 (b) 下为**合法输入**——(N,COL) 属 ColView（物理 (k,m) 行主序
+// ld≥m），ld=2048 ≥ 物理行长 m=16，#10 恒满足（原「physRowLen = k」按
+// (m,k) 行主序误读推导，随 A1 语义修正废弃；#10 保留为纯伪造描述符防御）。
+// 本用例转为 (b) 正向锚点：合法 VALID_SPARSE 输入按 ColView 物理布局装配
+// → SUCCESS + d_valid 与 golden 一致（旧实现下该形状被 #10 误拒/错读）。
+TEST_F(PruneCheckExceptionTest, ColViewWideLdAccepted) {
     sparse_test::SparseLtHandleGuard handle;
+    const int32_t m = 16;
+    const int32_t k = 4096;
     sparse_test::MatDescrGuard matA;
     ASSERT_EQ(matA.initStructured(handle.ptr(), 16, 4096, 2048, 16, ACL_FLOAT16,
                                   ACL_SPARSE_ORDER_COL,
@@ -735,14 +732,26 @@ TEST_F(PruneCheckExceptionTest, LdBelowPhysRowLenRejected) {
                       matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(),
                       ACL_SPARSE_COMPUTE_32F),
               ACL_SPARSE_STATUS_SUCCESS);
-    // d_in 覆盖 (rows=16) × ld=2048 的物理缓冲。
-    sparse_test::DeviceBuffer dIn =
-        sparse_test::DeviceBuffer::alloc(16 * 2048 * sizeof(uint16_t));
+    // 逻辑 (m,k) VALID_SPARSE 数据 → ColView 物理 (k,m) 行主序 ld=2048 装配
+    //（padding 区非零垃圾——若被误扫必然违规，判别性前提）。
+    auto hLogical = sparse_test::GenPruneCheckInput<uint16_t>(
+        "VALID_SPARSE", m, k, true /*alongRow*/, "", -1.0f, 1.0f, SeedForCase(9614));
+    const int goldenValid = sparse_test::PruneCheckGolden<uint16_t>(hLogical, m, k, false, true);
+    ASSERT_EQ(goldenValid, 0) << "golden self-check: VALID_SPARSE must be valid";
+    const auto spec = sparse_test::SparseSideSpecOf<uint16_t>(
+        m, k, /*trans=*/false, ACL_SPARSE_ORDER_COL, /*ldOverride=*/2048);
+    const auto hPhys = sparse_test::PrepareSparseSideData<uint16_t>(hLogical, spec, m, k);
+    sparse_test::DeviceBuffer dIn = sparse_test::DeviceBuffer::copyFrom(
+        hPhys.data(), hPhys.size() * sizeof(uint16_t));
     sparse_test::DeviceBuffer dValid = sparse_test::DeviceBuffer::alloc(sizeof(int));
     auto ret = aclsparseLtSpMMAPruneCheck(
         handle.ptr(), sparse_test::matmulDescCptr(md), dIn.get(),
         static_cast<int*>(dValid.get()), stream_);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_SUCCESS);
+    int hValid = -1;
+    dValid.copyToHost(&hValid, sizeof(int));
+    EXPECT_EQ(hValid, goldenValid);
 }
 
 // =============================================================================
@@ -860,7 +869,7 @@ void RunBatchFunctionalCase(aclrtStream stream, int32_t m, int32_t k,
 {
     const bool trans = (op == ACL_SPARSE_OP_TRANSPOSE);
     const bool isRowOrder = (order == ACL_SPARSE_ORDER_ROW);
-    const bool alongRow = (trans != isRowOrder);
+    const bool alongRow = true;  // (b)：逻辑空间恒沿行
     const auto spec = sparse_test::SparseSideSpecOf<T>(m, k, trans, order);
     const auto hPhys = AssembleBatchPhysical<T>(batches, spec, m, k, alongRow,
                                                 batchStride, seedBase);
@@ -957,9 +966,30 @@ TEST_F(PruneCheckBatchTest, MultiBatchFp32SecondBatchViolation) {
                                   64 * 64, 1, 9604);
 }
 
-// numBatches=2 且 batchStride=0（未设置 / 显式置 0）→ 校验表 #6 INVALID_VALUE。
-TEST_F(PruneCheckBatchTest, MultiBatchStrideZeroRejected) {
-    RunBatchStrideInvalidCase<uint16_t>(stream_, 128, 128, true, 2, 0);
+// D2 广播语义（PBC2）：numBatches>1 且 batchStride=0——全批复检 batch 0，
+// 等价单矩阵校验。AssembleBatchPhysical 在 stride=0 下逐批覆盖同区（缓冲
+// 最终为末批数据），kernel 广播读 batch 0（即该缓冲）、golden 批循环偏移
+// 恒 0 同读——三方一致断言等价单矩阵语义。末批 pattern 为违规 → d_valid=1。
+// 修复前 batchStride<=0 被 DeriveBatchParams 拒绝（原
+// MultiBatchStrideZeroRejected 的负向期望），本用例与下方全合法变体共同
+// 锁定广播放行的两态行为；负值拒绝边界由 MultiBatchStrideNegativeRejected
+// 保留锁定。
+TEST_F(PruneCheckBatchTest, MultiBatchBroadcastStrideZeroViolating) {
+    const std::vector<BatchPatternSpec> batches = {{"VALID_SPARSE", ""},
+                                                   {"VALID_SPARSE", ""},
+                                                   {"SINGLE_VIOLATION", "LAST"}};
+    RunBatchFunctionalCase<uint16_t>(stream_, 128, 128, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                     ACL_SPARSE_ORDER_ROW, true, batches,
+                                     /*batchStride=*/0, /*expectValid=*/1, 9620);
+}
+
+// D2 广播全合法变体：广播缓冲内容为全合法矩阵 → d_valid=0（两态锚点）。
+TEST_F(PruneCheckBatchTest, MultiBatchBroadcastStrideZeroAllValid) {
+    const std::vector<BatchPatternSpec> batches = {{"SINGLE_VIOLATION", "MIDDLE"},
+                                                   {"VALID_SPARSE", ""}};
+    RunBatchFunctionalCase<uint16_t>(stream_, 128, 128, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                     ACL_SPARSE_ORDER_ROW, true, batches,
+                                     /*batchStride=*/0, /*expectValid=*/0, 9621);
 }
 
 // numBatches=2 且 batchStride<0 → 校验表 #6 INVALID_VALUE（int64 负值在判
@@ -968,10 +998,16 @@ TEST_F(PruneCheckBatchTest, MultiBatchStrideNegativeRejected) {
     RunBatchStrideInvalidCase<uint16_t>(stream_, 128, 128, true, 2, -16384);
 }
 
-// numBatches=2 且 batchStride=16392（=16384+8，非 32B/elem=16 元素倍数）→
-// 校验表 #6 对齐子分支 INVALID_VALUE（batch 基址偏移破坏 32B 倍数性质）。
+// numBatches=2 且 batchStride=16388（=16384+4，非 16B/elem=8 元素倍数）→
+// 校验表 #6 对齐子分支 INVALID_VALUE（batch 基址偏移破坏 16B 倍数性质）。
+// [边界迁移] batch 对齐域 32B→16B（与 prune V2 一致，「可剪可查」）后，
+// 原 32B 域负向探针 16384+8（16B 粒度非 32B）已合法化——其正向放行由
+// MultiBatchStride16BGranularity* 两态用例与
+// PruneThenCheckChainStride16BGranularity 链路用例承载；本负向探针迁至
+// 非 16B 域（+4，与 D5 轮 d_in 负向边界迁移同型：HalfAlignedDin 退役、
+// MisalignedDin 偏 4B 承载）。
 TEST_F(PruneCheckBatchTest, MultiBatchStrideUnalignedRejected) {
-    RunBatchStrideInvalidCase<uint16_t>(stream_, 128, 128, true, 2, 16384 + 8);
+    RunBatchStrideInvalidCase<uint16_t>(stream_, 128, 128, true, 2, 16384 + 4);
 }
 
 // numBatches=2 且 batchStride=INT64_MAX 向下取 16 倍数（>0 且 16 倍数，#6 全
@@ -1025,30 +1061,250 @@ TEST_F(PruneCheckBatchTest, MultiBatchGridStrideAcrossBatches) {
                                      128 * 128, 1, 9605);
 }
 
+// =============================================================================
+// 16B 域 batchStride 正向锚点（batch 对齐域 32B→16B 修复，与 prune V2 一致
+// ——「可剪可查」）：batchStride = span + 16B 量子（FP16 为 +8、INT8 为 +16
+// 元素）——16B 粒度（% (16/elem)==0）非 32B 域（% (32/elem)!=0）。修复前
+// 该域被 #6 32B 口径拒绝（prune 16B 域放行 → 同一矩阵「可剪不可查」），
+// 修复后放行；batch 1 源基址 = d_in + batchStride×elemSize（FP16 +32784B /
+// INT8 +16400B，均 16B 非 32B 基址）——锚定 kernel 逐 batch 源 16B 基址的
+// DataCopyPad 读取（与 D5 轮 P6 逐 batch bias 源 / DinAlign16B 族同类实测
+// 证据，.cannbot/sparseLt-fix/tmp/d5-16b-experiment.md）。
+// =============================================================================
+
+// FP16 两态之合法态：两 batch 全合法 → d_valid=0（batch 1 @ 16B 基址无伪
+// 违规——若 kernel 逐 batch 基址寻址错误读到垃圾，全非零组必致 1）。
+TEST_F(PruneCheckBatchTest, MultiBatchStride16BGranularityValid) {
+    const std::vector<BatchPatternSpec> batches = {{"VALID_SPARSE", ""},
+                                                   {"VALID_SPARSE", ""}};
+    RunBatchFunctionalCase<uint16_t>(stream_, 128, 128, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                     ACL_SPARSE_ORDER_ROW, true, batches,
+                                     128 * 128 + 8, 0, 9630);
+}
+
+// FP16 两态之违规态：违规落 batch 1（源基址 16B 非 32B）→ d_valid=1——
+// 违规检出以 kernel 正确读取 batch 1 的 16B 基址为前提（寻址偏移即漏检，
+// 断言锁定）；batch 0 合法排除基址 0 干扰。
+TEST_F(PruneCheckBatchTest, MultiBatchStride16BGranularityViolating) {
+    const std::vector<BatchPatternSpec> batches = {{"VALID_SPARSE", ""},
+                                                   {"SINGLE_VIOLATION", "MIDDLE"}};
+    RunBatchFunctionalCase<uint16_t>(stream_, 128, 128, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                     ACL_SPARSE_ORDER_ROW, true, batches,
+                                     128 * 128 + 8, 1, 9631);
+}
+
+// INT8 对偶（u8 kernel 路径）：batchStride=16400（=span 16384 + 16，16B/1B=16
+// 元素粒度、%32==16 非 32B 域）× 两态——同 FP16 对偶的判别语义。
+TEST_F(PruneCheckBatchTest, MultiBatchStride16BGranularityInt8Valid) {
+    const std::vector<BatchPatternSpec> batches = {{"VALID_SPARSE", ""},
+                                                   {"VALID_SPARSE", ""}};
+    RunBatchFunctionalCase<int8_t>(stream_, 128, 128, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                   ACL_SPARSE_ORDER_ROW, true, batches,
+                                   128 * 128 + 16, 0, 9632);
+}
+
+TEST_F(PruneCheckBatchTest, MultiBatchStride16BGranularityInt8Violating) {
+    const std::vector<BatchPatternSpec> batches = {{"VALID_SPARSE", ""},
+                                                   {"SINGLE_VIOLATION", "MIDDLE"}};
+    RunBatchFunctionalCase<int8_t>(stream_, 128, 128, ACL_SPARSE_OP_NON_TRANSPOSE,
+                                   ACL_SPARSE_ORDER_ROW, true, batches,
+                                   128 * 128 + 16, 1, 9633);
+}
+
+namespace {
+
+// 「可剪可查」链路四步共用状态（ctx 模式，对齐 PruneCheckTestCtx）：批量物理
+// 输入/哨兵输出/判定缓冲 + 描述符链（prune 与 prune_check 共用同一
+// matmulDescr）。装配字段（spec/hPhys/goldenBefore/totalElems）由装配步骤
+// 填充，hOut 由步骤 3 回读填充，链路步骤只读。
+struct PruneThenCheckChainCtx {
+    sparse_test::SparseLtHandleGuard handle;
+    sparse_test::MatDescrGuard matA;
+    sparse_test::MatDescrGuard matB;
+    sparse_test::MatDescrGuard matC;
+    sparse_test::MatDescrGuard matD;
+    sparse_test::MatmulDescrGuard md;
+    sparse_test::DeviceBuffer dA;
+    sparse_test::DeviceBuffer dOut;
+    sparse_test::DeviceBuffer dValid;
+    sparse_test::SparseSidePhysicalSpec spec;
+    std::vector<uint16_t> hPhys;
+    std::vector<uint16_t> hOut;
+    size_t totalElems = 0;
+    int goldenBefore = -1;
+};
+
+// 装配步骤：批量物理装配 + 剪前 golden 自检（batch OR = 1，违规在 batch 1）→
+// 设备缓冲（prune 输出缓冲预填哨兵：batch 间隙 [span, batchStride) 不被
+// kernel 写，哨兵原样保留即「输出保持布局」的判别面，prune 家族同款手法）→
+// 描述符链（matA structured + dense 占位三件套 + NUM_BATCHES 四侧一致 +
+// BATCH_STRIDE 落稀疏侧 matA，prune 与 prune_check 共用同一 matmulDescr）。
+void AssemblePruneThenCheckChain(PruneThenCheckChainCtx& ctx, int32_t m, int32_t k,
+                                 int64_t batchStride,
+                                 const std::vector<BatchPatternSpec>& batches,
+                                 uint32_t seed)
+{
+    constexpr size_t kElt = sizeof(uint16_t);
+    ctx.spec = sparse_test::SparseSideSpecOf<uint16_t>(m, k, /*trans=*/false,
+                                                       ACL_SPARSE_ORDER_ROW);
+    ctx.hPhys = AssembleBatchPhysical<uint16_t>(batches, ctx.spec, m, k,
+                                                /*alongRow=*/true, batchStride, seed);
+    ctx.goldenBefore = sparse_test::PruneCheckGoldenBatch<uint16_t>(
+        ctx.hPhys, m, k, /*trans=*/false, /*isRowOrder=*/true,
+        static_cast<int32_t>(batches.size()), batchStride, ctx.spec.ld);
+    ASSERT_EQ(ctx.goldenBefore, 1) << "golden self-check: batch-1 violation must OR to 1";
+
+    ctx.totalElems = ctx.hPhys.size();  // (nb-1)*batchStride + span
+    ctx.dA = sparse_test::DeviceBuffer::copyFrom(ctx.hPhys.data(), ctx.totalElems * kElt);
+    const std::vector<uint16_t> sentinel(ctx.totalElems,
+                                         sparse_test::PrunePadSentinel<uint16_t>());
+    ctx.dOut = sparse_test::DeviceBuffer::copyFrom(sentinel.data(), ctx.totalElems * kElt);
+    ctx.dValid = sparse_test::DeviceBuffer::alloc(sizeof(int));
+
+    ASSERT_EQ(sparse_test::InitSparseSideDescriptor<uint16_t>(ctx.handle.ptr(), ctx.spec,
+                  ACL_SPARSE_ORDER_ROW, ctx.matA), ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(sparse_test::InitASideDensePlaceholders<uint16_t>(ctx.handle.ptr(), m, k,
+                  ctx.matB, ctx.matC, ctx.matD), ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(SetBatchAttributes(ctx.handle.ptr(), ctx.matA, ctx.matB, ctx.matC, ctx.matD,
+                                 true, static_cast<int32_t>(batches.size()), batchStride),
+              ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(ctx.md.init(ctx.handle.ptr(), ACL_SPARSE_OP_NON_TRANSPOSE,
+                          ACL_SPARSE_OP_NON_TRANSPOSE, ctx.matA.ptr(), ctx.matB.ptr(),
+                          ctx.matC.ptr(), ctx.matD.ptr(),
+                          sparse_test::PruneCheckComputeType<uint16_t>()),
+              ACL_SPARSE_STATUS_SUCCESS);
+}
+
+// 步骤 1（剪前复检，同描述符同 stride）：16B 域 stride 下违规检出
+//（batch 1 @ 16B 非 32B 基址）。
+void ChainStepPrePruneCheck(PruneThenCheckChainCtx& ctx, aclrtStream stream)
+{
+    auto ret = aclsparseLtSpMMAPruneCheck(ctx.handle.ptr(),
+                                          sparse_test::matmulDescCptr(ctx.md),
+                                          ctx.dA.get(), static_cast<int*>(ctx.dValid.get()),
+                                          stream);
+    ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS)
+        << "pre-prune check must accept 16B-domain batchStride";
+    ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS);
+    int hValid = -1;
+    ctx.dValid.copyToHost(&hValid, sizeof(int));
+    EXPECT_EQ(hValid, ctx.goldenBefore) << "pre-prune check must detect the batch-1 violation";
+}
+
+// 步骤 2（prune 执行，STRIP，out-of-place）：同描述符同 stride，16B 域放行 →
+// SUCCESS（V1/V2 全过——修复前被 #6 32B 域拒绝的正是本步后的复检，
+//「可剪不可查」）。
+void ChainStepPrune(PruneThenCheckChainCtx& ctx, aclrtStream stream)
+{
+    auto ret = aclsparseLtSpMMAPrune(ctx.handle.ptr(), sparse_test::matmulDescCptr(ctx.md),
+                                     ctx.dA.get(), ctx.dOut.get(),
+                                     ACLSPARSELT_PRUNE_SPMMA_STRIP, stream);
+    ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS)
+        << "prune must accept 16B-domain batchStride (V1/V2)";
+    ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS);
+}
+
+// 步骤 3（输出保持布局）：回读 prune 输出，batch 间隙 [span, batchStride) 的
+// 哨兵原样保留（hOut 存入 ctx 供步骤 4 的 golden 交叉验证复用）。
+void ChainStepVerifyGapPreserved(PruneThenCheckChainCtx& ctx, int64_t batchStride)
+{
+    constexpr size_t kElt = sizeof(uint16_t);
+    ctx.hOut.assign(ctx.totalElems, uint16_t{});
+    ctx.dOut.copyToHost(ctx.hOut.data(), ctx.totalElems * kElt);
+    for (int64_t i = 128 * 128; i < batchStride; ++i) {
+        ASSERT_EQ(ctx.hOut[static_cast<size_t>(i)], sparse_test::PrunePadSentinel<uint16_t>())
+            << "prune must not write the inter-batch gap (layout preserved at 16B stride)";
+    }
+}
+
+// 步骤 4（剪后复检 + golden 交叉验证，同描述符同 stride）：prune 产物必过
+// check → d_valid=0（README「经 aclsparseLtSpMMAPrune 剪枝产出的数据保证
+// 通过本检查」）。修复前本步被 #6 32B 域拒绝（INVALID_VALUE）——「可剪不可
+// 查」回归锚点。
+void ChainStepPostPruneCheck(PruneThenCheckChainCtx& ctx, int32_t m, int32_t k,
+                             int64_t batchStride,
+                             const std::vector<BatchPatternSpec>& batches,
+                             aclrtStream stream)
+{
+    auto ret = aclsparseLtSpMMAPruneCheck(ctx.handle.ptr(),
+                                          sparse_test::matmulDescCptr(ctx.md),
+                                          ctx.dOut.get(), static_cast<int*>(ctx.dValid.get()),
+                                          stream);
+    ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS)
+        << "REGRESSION (prunable-but-uncheckable): 16B-domain batchStride must be "
+           "accepted by PruneCheck (alignment domain consistent with prune)";
+    ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS);
+    int hValid = -1;
+    ctx.dValid.copyToHost(&hValid, sizeof(int));
+    const int goldenAfter = sparse_test::PruneCheckGoldenBatch<uint16_t>(
+        ctx.hOut, m, k, /*trans=*/false, /*isRowOrder=*/true,
+        static_cast<int32_t>(batches.size()), batchStride, ctx.spec.ld);
+    EXPECT_EQ(goldenAfter, 0) << "golden self-check: pruned output must be valid";
+    EXPECT_EQ(hValid, goldenAfter)
+        << "pruned output must pass the same-descriptor same-stride recheck";
+}
+
+}  // namespace
+
+// 「可剪可查」链路用例（cuSPARSELt Prune→PruneCheck 契约，本修复的端到端
+// 锚点）：FP16、numBatches=2、batchStride=16392（=span 16384 + 8）——16B
+// 粒度非 32B 域（与检视意见示例 batchStride=8 同粒度类：FP16 的 16B 量子为
+// 8 元素；裸 8 不可达 prune——V1 要求 batchStride ≥ span（结构化 FP16 最小
+// span=256 元素），故取 span+8，16392 恰为原 32B 域负向用例值，修复后转
+// 「可剪可查」正向锚点）。链路四步（步骤语义见上方 ChainStep* helper 注释）：
+//   1. 剪前复检（同描述符同 stride）：违规检出 → 1（batch 1 @ 16B 基址）；
+//   2. prune（STRIP，out-of-place）：V1（16392 ≥ 16384）/V2（%8==0）全过
+//      → SUCCESS（修复前被 #6 32B 域拒绝的正是本步后的复检——「可剪不可查」）；
+//   3. 输出保持布局：batch 间隙 [span, batchStride) 的哨兵原样保留；
+//   4. 剪后复检（同描述符同 stride）：prune 产物必过 check → 0（README
+//      「经 aclsparseLtSpMMAPrune 剪枝产出的数据保证通过本检查」）。
+TEST_F(PruneCheckBatchTest, PruneThenCheckChainStride16BGranularity) {
+    constexpr int32_t m = 128;
+    constexpr int32_t k = 128;
+    const int64_t batchStride = 128 * 128 + 8;  // 16392：16B 粒度非 32B 域
+    const std::vector<BatchPatternSpec> batches = {{"VALID_SPARSE", ""},
+                                                   {"SINGLE_VIOLATION", "MIDDLE"}};
+
+    // 装配 + 剪前 golden 自检 + 描述符链。
+    PruneThenCheckChainCtx ctx;
+    AssemblePruneThenCheckChain(ctx, m, k, batchStride, batches, 9640);
+    // 1. 剪前复检：违规检出 → 1（batch 1 @ 16B 基址）。
+    ChainStepPrePruneCheck(ctx, stream_);
+    // 2. prune（STRIP，out-of-place）：16B 域放行 → SUCCESS。
+    ChainStepPrune(ctx, stream_);
+    // 3. 输出保持布局：batch 间隙哨兵原样保留。
+    ChainStepVerifyGapPreserved(ctx, batchStride);
+    // 4. 剪后复检：prune 产物必过 check → 0。
+    ChainStepPostPruneCheck(ctx, m, k, batchStride, batches, stream_);
+}
+
 // tiling 阶段 totalTiles 溢出（原「数学不可达」防御分支，批量支持后公共 API
-// 可构造）：INT8 极限几何 rows=cols=ld=2^31−32（32B/elem 整除、≤int32Max）+
-// numBatches=INT32_MAX + batchStride=32 → #6/#9-#11 全过（totalElems ≈ 4.61e18
-// < int64max），但 tilesPerMatrix(≈1.88e13) × numBatches(≈2.15e9) ≈ 4.0e22
-// 溢出 int64 → compute_prune_check_tiling 的 CheckedMulAdd 拒绝 →
-// INVALID_VALUE（设备访问前返回，d_in 为 32B 占位缓冲；matB/matC/matD 用小
-// 占位 shape 规避 C/D 维度上限 2097120，INT8 ROW|ROW 布局约束要求 opB=T）。
+// 可构造）：INT8 极限几何 + numBatches=INT32_MAX + batchStride=32 → #6/#9-#11
+// 全过（spanElems ≈ 4.5e15 < int64max），但 tilesPerMatrix(≈1.8e13) ×
+// numBatches(≈2.15e9) ≈ 3.9e22 溢出 int64 → compute_prune_check_tiling 的
+// CheckedMulAdd 拒绝 → INVALID_VALUE（设备访问前返回，d_in 为 32B 占位缓冲）。
+// 形状链自洽构造（A3 形状链校验后占位 shape 不再可传入 DescriptorInit）：
+// A(m=2097120,k=2^31−32) structured ROW ld=k；B(16,k) dense ROW ld=k + opB=T
+//（k 链经 op(B) 列数 = k；INT8 ROW|ROW 布局约束要求 (N,T)）；C/D=(m,16)
+//（rows=2097120 恰在维度上限）。扫描几何 RowScan R=m×C=k：rowBands(131070) ×
+// tilesPerRowBand(≈1.4e5) × numBatches 溢出。
 TEST_F(PruneCheckBatchTest, MultiBatchTotalTilesOverflowRejected) {
     sparse_test::SparseLtHandleGuard handle;
-    sparse_test::MatDescrGuard matA;  // structured INT8 极限几何
-    ASSERT_EQ(matA.initStructured(handle.ptr(), 2147483616, 2147483616, 2147483616, 16,
+    sparse_test::MatDescrGuard matA;  // structured INT8 极限几何（m 达 C/D 上限）
+    ASSERT_EQ(matA.initStructured(handle.ptr(), 2097120, 2147483616, 2147483616, 16,
                                   ACL_INT8, ACL_SPARSE_ORDER_ROW,
                                   ACL_SPARSE_LT_SPARSITY_50_PERCENT),
               ACL_SPARSE_STATUS_SUCCESS);
-    sparse_test::MatDescrGuard matB;  // dense 占位（INT8 ROW|ROW 布局需 opB=T）
-    ASSERT_EQ(matB.initDense(handle.ptr(), 128, 128, 128, 16, ACL_INT8,
+    sparse_test::MatDescrGuard matB;  // dense（opB=T 下 op(B)=(k,n)，k 链自洽）
+    ASSERT_EQ(matB.initDense(handle.ptr(), 16, 2147483616, 2147483616, 16, ACL_INT8,
                              ACL_SPARSE_ORDER_ROW),
               ACL_SPARSE_STATUS_SUCCESS);
     sparse_test::MatDescrGuard matC;
-    ASSERT_EQ(matC.initDense(handle.ptr(), 128, 128, 128, 16, ACL_INT8,
+    ASSERT_EQ(matC.initDense(handle.ptr(), 2097120, 16, 16, 16, ACL_INT8,
                              ACL_SPARSE_ORDER_ROW),
               ACL_SPARSE_STATUS_SUCCESS);
     sparse_test::MatDescrGuard matD;
-    ASSERT_EQ(matD.initDense(handle.ptr(), 128, 128, 128, 16, ACL_INT8,
+    ASSERT_EQ(matD.initDense(handle.ptr(), 2097120, 16, 16, 16, ACL_INT8,
                              ACL_SPARSE_ORDER_ROW),
               ACL_SPARSE_STATUS_SUCCESS);
     const int32_t nb = 2147483647;  // INT32_MAX
@@ -1057,7 +1313,7 @@ TEST_F(PruneCheckBatchTest, MultiBatchTotalTilesOverflowRejected) {
                                                  ACLSPARSELT_MAT_NUM_BATCHES, &nb, sizeof(nb)),
                   ACL_SPARSE_STATUS_SUCCESS);
     }
-    const int64_t bs = 32;  // > 0 且 32B/1B 元素倍数
+    const int64_t bs = 32;  // > 0 且 16B/1B 元素倍数（batch 对齐域 16B）
     ASSERT_EQ(aclsparseLtMatDescSetAttribute(handle.ptr(), matA.ptr(),
                                              ACLSPARSELT_MAT_BATCH_STRIDE, &bs, sizeof(bs)),
               ACL_SPARSE_STATUS_SUCCESS);
@@ -1104,11 +1360,12 @@ TEST_F(PruneCheckBatchTest, MultiBatchBSparseLastBatchViolationTransposed) {
                                      128 * 128, 1, 9607);
 }
 
-// B 侧 numBatches=2 且 batchStride=16392（=16384+8，非 32B/elem=16 元素倍数，
+// B 侧 numBatches=2 且 batchStride=16388（=16384+4，非 16B/elem=8 元素倍数，
 // batchStride 经 B 侧 matB 装配）→ 校验表 #6 对齐子分支 INVALID_VALUE（host
-// 读 md->matB 后在宿主侧即拒，d_in 占位不参与判定）。
+// 读 md->matB 后在宿主侧即拒，d_in 占位不参与判定）。[边界迁移] 32B→16B 同
+// A 侧 MultiBatchStrideUnalignedRejected（原 16384+8 已合法化）。
 TEST_F(PruneCheckBatchTest, MultiBatchBSparseStrideUnalignedRejected) {
-    RunBatchStrideInvalidCase<uint16_t>(stream_, 128, 128, false, 2, 16384 + 8);
+    RunBatchStrideInvalidCase<uint16_t>(stream_, 128, 128, false, 2, 16384 + 4);
 }
 
 // B 侧 FP32（u32 路径）× N+COL（ColScan）× 仅第二 batch 违规 → d_valid=1：
@@ -1153,7 +1410,7 @@ void RunPaddingLdCase(aclrtStream stream, int32_t m, int32_t k,
 {
     const bool trans = (op == ACL_SPARSE_OP_TRANSPOSE);
     const bool isRowOrder = (order == ACL_SPARSE_ORDER_ROW);
-    const bool alongRow = (trans != isRowOrder);
+    const bool alongRow = true;  // (b)：逻辑空间恒沿行
 
     // 布局规格（ldOverride 合法性由 SparseSideSpecOf 内部校验承载，此处
     // 防御性复核 padding 布局前提成立）。
@@ -1522,4 +1779,81 @@ TEST_F(PruneCheckWhiteboxTest, DestroyedStreamMemsetRejected) {
     ASSERT_EQ(aclrtDestroyStream(stale), ACL_SUCCESS);
     EXPECT_EQ(RunCheckOnCtx(ctx, stale), ACL_SPARSE_STATUS_EXECUTION_FAILED);
     (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);  // 清理残余，防污染
+}
+
+// =============================================================================
+// d_in 16B（非 32B）基址回归锚点（D5 轮：d_in 对齐校验 32B -> 16B，对齐
+// cuSPARSELt "All pointers must be aligned to 16 bytes"）。缓冲 32B 对齐
+// 分配后数据写在 +16 字节处（FP16 偏 8 元素、INT8 偏 16）——kernel 的
+// DataCopyPad 以 16B 对齐 GM 源运行。断言：SUCCESS + d_valid 与 pattern
+// 语义一致（valid->0 / violation->1）。实测证据：
+// .cannbot/sparseLt-fix/tmp/d5-16b-experiment.md（FP16/INT8 × 两态全过）。
+// =============================================================================
+
+namespace {
+
+template <typename T>
+void RunDinAlign16Case(aclrtStream stream, const std::string& pattern,
+                    const std::string& violPos, int expectValid, const std::string& caseId)
+{
+    constexpr int32_t m = 128, k = 128;
+    constexpr size_t kElt = sparse_test::NpuDtypeTrait<T>::kEltSize;
+    auto hLogical = sparse_test::GenPruneCheckInput<T>(pattern, m, k,
+                        /*alongRow=*/true, violPos, -1.0f, 1.0f, 7717u);
+    const auto spec = sparse_test::SparseSideSpecOf<T>(m, k, /*trans=*/false,
+                                                       ACL_SPARSE_ORDER_ROW);
+    auto hPhys = sparse_test::PrepareSparseSideData<T>(hLogical, spec, m, k);
+    // Pad the front by exactly 16 bytes so d_in = base + 16 lands on a
+    // 16B-aligned, NOT 32B-aligned address.
+    const size_t padElems = 16 / kElt;
+    std::vector<T> hPadded(padElems, T{});
+    hPadded.insert(hPadded.end(), hPhys.begin(), hPhys.end());
+    auto dInBuf = sparse_test::DeviceBuffer::copyFrom(hPadded.data(), hPadded.size() * kElt);
+    const void* dIn = static_cast<uint8_t*>(dInBuf.get()) + 16;
+    auto dValid = sparse_test::DeviceBuffer::alloc(sizeof(int));
+
+    sparse_test::SparseLtHandleGuard handle;
+    sparse_test::MatDescrGuard matA;
+    ASSERT_EQ(sparse_test::InitSparseSideDescriptor<T>(handle.ptr(), spec,
+                  ACL_SPARSE_ORDER_ROW, matA), ACL_SPARSE_STATUS_SUCCESS);
+    sparse_test::MatDescrGuard matB, matC, matD;
+    ASSERT_EQ(sparse_test::InitASideDensePlaceholders<T>(handle.ptr(), m, k,
+                  matB, matC, matD), ACL_SPARSE_STATUS_SUCCESS);
+    sparse_test::MatmulDescrGuard md;
+    ASSERT_EQ(md.init(handle.ptr(), ACL_SPARSE_OP_NON_TRANSPOSE,
+                ACL_SPARSE_OP_NON_TRANSPOSE, matA.ptr(), matB.ptr(), matC.ptr(),
+                matD.ptr(), sparse_test::PruneCheckComputeType<T>()),
+              ACL_SPARSE_STATUS_SUCCESS);
+
+    auto ret = aclsparseLtSpMMAPruneCheck(handle.ptr(), sparse_test::matmulDescCptr(md),
+                                           dIn, static_cast<int*>(dValid.get()), stream);
+    ASSERT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS) << caseId << ": SpMMAPruneCheck return code";
+    ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS) << caseId << ": sync";
+    int hValid = -1;
+    dValid.copyToHost(&hValid, sizeof(int));
+    EXPECT_EQ(hValid, expectValid) << caseId << ": d_valid mismatch (16B base probe)";
+}
+
+}  // namespace
+
+TEST_F(PruneCheckExceptionTest, DinAlign16BFp16Valid)
+{
+    RunDinAlign16Case<uint16_t>(stream_, "VALID_SPARSE", "", 0, "din16B-fp16-valid");
+}
+
+TEST_F(PruneCheckExceptionTest, DinAlign16BFp16Violating)
+{
+    RunDinAlign16Case<uint16_t>(stream_, "SINGLE_VIOLATION", "MIDDLE", 1,
+                             "din16B-fp16-violating");
+}
+
+TEST_F(PruneCheckExceptionTest, DinAlign16BInt8Valid)
+{
+    RunDinAlign16Case<int8_t>(stream_, "VALID_SPARSE", "", 0, "din16B-int8-valid");
+}
+
+TEST_F(PruneCheckExceptionTest, DinAlign16BInt8Violating)
+{
+    RunDinAlign16Case<int8_t>(stream_, "SINGLE_VIOLATION", "MIDDLE", 1,
+                           "din16B-int8-violating");
 }

@@ -663,7 +663,7 @@ aclsparseStatus_t aclsparseLtMatmul(
     int32_t numStreams);
 ```
 
-**功能**：执行结构化稀疏矩阵乘法并融合 epilogue 后处理，计算 `D = Activation(alpha * op(A) * op(B) + beta * C + bias)`。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加（per-row broadcast，长度 = m 的逐行广播向量，dtype 与 C 相同，INT8 路径为 FP32）→ activation（ReLU/GeLU，可选，二者互斥）→ 类型转换写出。bias 与 activation 通过 `aclsparseLtMatmulDescSetAttribute` 预先配置到 matmul 描述符中，执行接口不额外传参。A 须为已剪枝的矩阵（通过 `aclsparseLtSpMMAPrune` 产出）。当 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充）。alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。算子在指定 stream 上异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
+**功能**：执行结构化稀疏矩阵乘法并融合 epilogue 后处理，计算 `D = Activation(alpha * op(A) * op(B) + beta * C + bias)`。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加（per-row broadcast，长度 = m 的逐行广播向量，dtype 与 C 相同，INT8 路径为 FP32）→ activation（ReLU/GeLU，可选，二者互斥）→ 类型转换写出。bias 与 activation 通过 `aclsparseLtMatmulDescSetAttribute` 预先配置到 matmul 描述符中，执行接口不额外传参。稀疏侧（A-sparse 的 A 或 B-sparse 的 B）须为已剪枝的矩阵（通过 `aclsparseLtSpMMAPrune` 产出；dense×dense 路径除外）。当 A-sparse 且 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充；B-sparse 与 dense×dense 路径须显式传入 matA）。alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。算子在指定 stream 上异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
 
 **参数说明**：
 
@@ -735,7 +735,7 @@ aclsparseStatus_t aclsparseLtMatmulSearch(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：搜索完成，最优配置已写入 plan/algSelection
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：plan/streams 为空、numStreams <= 0、matB/matC/matD 为空、数据指针未 16 字节对齐、matA 为空且不满足 A-sparse 回退条件、searchIterations <= 0、启用向量缩放时 alpha/beta 为 nullptr（以上均为搜索入口一次性校验；缩放向量的 32 字节对齐与 device 内存判定经候选执行链沿用 `aclsparseLtMatmul` 执行期校验）
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：plan/streams 为空、numStreams <= 0、matB/matC/matD 为空、数据指针未 16 字节对齐、matA 为空且不满足 A-sparse 回退条件、searchIterations <= 0、启用向量缩放时 alpha/beta 为 nullptr（以上均为搜索入口一次性校验；缩放向量的 16 字节对齐与 device 内存判定经候选执行链沿用 `aclsparseLtMatmul` 执行期校验）
 - `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：workspace 为空
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：不支持的数据类型（仅支持 FP32/FP16/BF16/INT8）
 - `ACL_SPARSE_STATUS_EXECUTION_FAILED`：全部候选执行失败、选中配置的最终回写执行失败，或 aclrt 计时/同步调用失败（失败时 plan/algSelection 恢复进入搜索前状态）
@@ -756,7 +756,7 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
     aclrtStream stream);
 ```
 
-**功能**：对稠密矩阵 A 执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16/BF16/INT8）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与 A 同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。
+**功能**：对稠密矩阵执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16/BF16/INT8）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与输入同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。直接接收 Matmul 描述符，剪枝对象由 matA/matB 的 sparsity 字段决定：matA 为 `ACL_SPARSE_LT_SPARSITY_50_PERCENT` 时剪枝矩阵 A（A-sparse），matB 为该值时剪枝矩阵 B（B-sparse），从中读取稀疏侧矩阵的维度、数据类型、order 与 op 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。
 
 > 说明：本算子为软件实现的 2:4 结构化稀疏剪枝，不依赖 Ascend 950 硬件的 2:4 稀疏加速单元，仅通过 Vector API 完成剪枝计算。FP32 统一采用 1:2 模式（分组为 2、保留 1，即每 2 个元素中保留绝对值最大的 1 个），并非"4 选 2"；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
 
@@ -793,7 +793,7 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/d_in/d_out 为 nullptr、数据指针未 16 字节对齐
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量、转置路径 in-place（d_in == d_out）
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量
 
 ---
 
@@ -830,7 +830,7 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 | TRANSPOSE | ROW | 沿列 |
 | TRANSPOSE | COL | 沿行 |
 
-`d_in` 一律按行主序物理存储解释，行步长为稀疏侧描述符的 ld（元素数）；order 仅决定校验方向，不改变内存访问模式。ld 大于物理行长时，padding 区数据不参与判定。
+`d_in` 按稀疏侧描述符的 (order, ld) 物理布局解释（order 为物理内存布局，COL 为列主序存储；扫描几何按 (order, ld) 的物理形态推导）；ld 大于物理行长时，padding 区数据不参与判定。
 
 **产品支持情况**：
 
@@ -846,7 +846,7 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄的 const 指针。
 - `matmulDescr`（IN）：HOST，Matmul 操作描述符，校验对象（稀疏侧）、维度、数据类型、order 与 op 从中派生；matA/matB 须恰有一个为结构化稀疏描述符。
-- `d_in`（IN）：DEVICE，待校验矩阵的指针，行主序存储，须 32 字节对齐。
+- `d_in`（IN）：DEVICE，待校验矩阵的指针，按稀疏侧描述符 (order, ld) 物理布局存储，须 16 字节对齐。
 - `d_valid`（OUT）：DEVICE，校验结果 int 标量（`0` 表示满足约束，`1` 表示不满足）。
 - `stream`（IN）：HOST，ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流）。
 
@@ -855,11 +855,11 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 - `handle` 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
 - `matmulDescr` 不可为 nullptr，且其绑定的 matA/matB 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **唯一稀疏侧**：matA 与 matB 须恰有一个为结构化稀疏描述符（经 `aclsparseLtStructuredDescriptorInit` 创建）；两者均非稀疏或均为稀疏时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **批量约束**：稀疏侧 numBatches 须 ≥ 1（默认 1；经 `aclsparseLtMatDescSetAttribute` 的 `ACLSPARSELT_MAT_NUM_BATCHES` 设置，A/B/C/D 四侧须一致，由 Matmul 描述符初始化校验）。numBatches > 1 时为批量校验（`d_valid` = 全部 batch 判定的 OR，batch b 基址 = `d_in + b×batchStride` 元素），batchStride（`ACLSPARSELT_MAT_BATCH_STRIDE`，元素数）须 > 0 且为 32 字节/元素字节数的整数倍（FP32 为 8、FP16/BF16 为 16、INT8 为 32 的倍数，与 ld 同款对齐），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；全量跨度 `(numBatches−1)×batchStride + (rows−1)×ld + cols` 换算字节后溢出时同样返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。numBatches = 1 时 batchStride 不参与判定。
+- **批量约束**：稀疏侧 numBatches 须 ≥ 1（默认 1；经 `aclsparseLtMatDescSetAttribute` 的 `ACLSPARSELT_MAT_NUM_BATCHES` 设置，A/B/C/D 四侧须一致，由 Matmul 描述符初始化校验）。numBatches > 1 时为批量校验（`d_valid` = 全部 batch 判定的 OR，batch b 基址 = `d_in + b×batchStride` 元素），batchStride（`ACLSPARSELT_MAT_BATCH_STRIDE`，元素数）须 ≥ 0：**0 = 跨批广播**（对齐 cuSPARSELt batch_stride=0 语义：全批复检 batch 0，等价单矩阵校验）；正值须为 16 字节/元素字节数的整数倍（batch 对齐域与 `aclsparseLtSpMMAPrune` 一致——可剪可查：prune 输出保持输入布局，经其按 16B 域放行的 batch 布局本算子必须可复检；FP32 为 4、FP16/BF16 为 8、INT8 为 16 的倍数）；负值返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。全量跨度 `(numBatches−1)×batchStride + (rows−1)×ld + cols` 换算字节后溢出时同样返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。numBatches = 1 时 batchStride 不参与判定。
 - **数据类型**：稀疏侧支持 `ACL_FLOAT`（FP32）/ `ACL_FLOAT16`（FP16）/ `ACL_BF16`（BF16）/ `ACL_INT8`（INT8），其他类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- `d_in` 须 32 字节对齐（作为 DataCopy 搬运源地址的硬件对齐要求，严于 cuSPARSELt 的 16 字节惯例）且不可为 nullptr，`d_valid` 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- `d_in` 须 16 字节对齐（对齐 cuSPARSELt "All pointers must be aligned to 16 bytes" 惯例；d_in 为 kernel DataCopyPad 的 GM 源地址，实测 16B 对齐源可用）且不可为 nullptr，`d_valid` 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **维度约束**：扫描维度与 ld 须为 32 字节/元素字节数的整数倍（结构化描述符初始化保证：FP32 为 8、FP16/BF16 为 16、INT8 为 32）；rows/cols/ld 须非 0 且不超过 INT32_MAX（2147483647，超长 ld 属防御性拦截，防止内部行偏移地址运算溢出）；ld 须不小于物理行长（沿行校验时为行长维度、沿列校验时为列数）。违反时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；ld 大于物理行长时 padding 区数据不参与判定。
-- **内存布局**：`d_in` 按行主序物理存储解释（行步长为稀疏侧描述符 ld），order 仅决定校验方向。
+- **内存布局**：`d_in` 按稀疏侧描述符 (order, ld) 物理布局访问（order 为物理内存布局，COL 为列主序存储），校验方向按 (order, ld) 的物理形态推导。
 - **异步执行**：算子内部先在同 stream 上将 `d_valid` 预清零，再启动校验 kernel；内部不执行 `aclrtSynchronizeStream`，调用方读取 `d_valid` 前须自行同步 stream。
 - `stream` 可为 nullptr（表示使用默认流）。
 
@@ -867,7 +867,7 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/matB/d_in/d_valid 为 nullptr、d_in 未 32 字节对齐、维度/ld 非法、批量参数非法（numBatches<1，或 numBatches>1 时 batchStride≤0/非 32B 对齐）、扫描跨度溢出
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/matB/d_in/d_valid 为 nullptr、d_in 未 16 字节对齐、维度/ld 非法、批量参数非法（numBatches<1，或 numBatches>1 时 batchStride<0 / 非 16B 对齐）、扫描跨度溢出
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：matA/matB 无唯一稀疏侧、数据类型非 FP32/FP16/BF16/INT8
 - `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：平台核数/UB 资源不足
 - `ACL_SPARSE_STATUS_EXECUTION_FAILED`：d_valid 预清零或 kernel 启动失败
@@ -895,7 +895,7 @@ int PruneCheckExample()
     aclsparseLtHandle_t handle = nullptr;
     aclsparseLtMatDescriptor_t matA = nullptr, matB = nullptr, matC = nullptr, matD = nullptr;
     aclsparseLtMatmulDescriptor_t matmulDesc = nullptr;
-    void *dA = nullptr;     // Device 侧待校验矩阵（m×k FP32，行主序，32 字节对齐）
+    void *dA = nullptr;     // Device 侧待校验矩阵（m×k FP32，ROW 序行主序物理布局，16 字节对齐）
     int *dValid = nullptr;  // Device 侧校验结果 int 标量
     int hValid = -1;        // Host 侧校验结果
     int ret = 0;

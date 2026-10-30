@@ -48,6 +48,9 @@ struct aclsparseLtMatmulDescriptor {
     float reluThreshold = 0.0f;                 ///< ACTIVATION_RELU_THRESHOLD: 默认 0.0f
     int32_t activationGelu = 0;                ///< ACTIVATION_GELU: 0=禁用, nonzero=启用 GeLU
     float geluScaling = 1.0f;                   ///< ACTIVATION_GELU_SCALING: 默认 1.0f
+    void* sparseMatPointer = nullptr;           ///< SPARSE_MAT_POINTER: 存储不参与执行（Matmul/Search 以
+                                                ///< matA/matB 函数参数为准，参数优先；仅兼容 cuSPARSELt
+                                                ///< 官方样例的调用序列）
 };
 
 /** @brief 对外句柄安全转换为内部结构体指针。 */

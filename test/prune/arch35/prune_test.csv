@@ -1,4 +1,4 @@
-case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,range_high,level,num_batches,batch_stride,ld
+case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,range_high,level,num_batches,batch_stride,ld,in_place
 1,128,128,float32,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L0
 2,256,256,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L0
 3,512,256,float32,1,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1
@@ -70,3 +70,52 @@ case_id,m,k,dtype,alg_config_id,split_k,pruneAlg,op,order,sparse_side,range_low,
 97,128,128,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,1,0,192
 # H2: op×order×side 8 格补满（TRANSPOSE/COL/B 此前零覆盖）
 98,160,96,float16,0,1,STRIP,TRANSPOSE,COL,B,-1,1,L0,1,0,0
+# =============================================================================
+# (b) 布局保持新增用例（A1+A2 验收）：
+#   200-211 in-place 正向矩阵（(b) 全组合支持）：4 组合 × {STRIP,TILE} 紧凑
+#          （200-207）+ 4 组合 × STRIP padded（208-211，ld>物理行长）；
+#   212-217 (N,COL)/(T,ROW) × ld>物理行长 padded 非方阵（m=64,k=96：
+#          padding 哨兵保持断言 + 大 ld 布局保持）× {STRIP,TILE} × dtype 覆盖
+#          （216 INT8 ColView 须 B 侧——INT8 布局组合约束禁止 A 侧 ColView）；
+#   218-221 (N,COL)/(T,ROW) 紧凑非方阵（m≠k 转置正确性）× {STRIP,TILE}；
+#   222-223 B-sparse in-place（侧别覆盖：紧凑 + padded）。
+# 基准形状 m=64,k=96（FP16 ld 对齐 16：112/80；INT8 32：96；FP32 8：72）。
+# =============================================================================
+200,64,96,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+201,64,96,float16,0,1,TILE,NON_TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+202,64,96,float16,0,1,STRIP,TRANSPOSE,COL,A,-1,1,L1,1,0,0,1
+203,64,96,float16,0,1,TILE,TRANSPOSE,COL,A,-1,1,L1,1,0,0,1
+204,64,96,float16,0,1,STRIP,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,0,1
+205,64,96,float16,0,1,TILE,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,0,1
+206,64,96,float16,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+207,64,96,float16,0,1,TILE,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+208,64,96,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,1,0,112,1
+209,64,96,float16,0,1,STRIP,TRANSPOSE,COL,A,-1,1,L1,1,0,112,1
+210,64,96,float16,0,1,STRIP,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,80,1
+211,64,96,float16,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,80,1
+212,64,96,float16,0,1,STRIP,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,80,0
+213,64,96,float16,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,80,0
+214,64,96,float16,0,1,TILE,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,80,0
+215,64,96,float16,0,1,TILE,TRANSPOSE,ROW,A,-1,1,L1,1,0,80,0
+216,64,96,int8,0,1,STRIP,NON_TRANSPOSE,COL,B,-5,5,L1,1,0,96,0
+217,64,96,float32,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,72,0
+218,64,96,float16,0,1,STRIP,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,0,0
+219,64,96,float16,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,0
+220,64,96,float16,0,1,TILE,NON_TRANSPOSE,COL,A,-1,1,L1,1,0,0,0
+221,64,96,float16,0,1,TILE,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,0
+222,64,96,float16,0,1,STRIP,NON_TRANSPOSE,COL,B,-1,1,L1,1,0,0,1
+223,64,96,float16,0,1,STRIP,TRANSPOSE,ROW,B,-1,1,L1,1,0,80,1
+224,128,128,float32,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,0
+225,128,128,float32,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+226,128,128,float16,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+227,64,96,float32,0,1,STRIP,TRANSPOSE,ROW,A,-1,1,L1,1,0,0,1
+# 224-227：FP32/FP16 (T,ROW) 方阵/非方阵 in-place 补充锚点（原 N5-2 定位
+# 过程中发现的覆盖空白：FP32 × (T,ROW) 此前零覆盖）。
+# P-BA-BC（D2 广播语义正向）：numBatches>1 且 batchStride=0——稀疏侧跨批广播
+#（全批 launch 落 batch 0，等价单矩阵剪枝；d_out 重复写同值，prune 幂等）。
+# 框架对 stride=0 的输入铺设与 golden 均按 nbEff=1 单份退化
+#（ScatterLogicalToPhysicalSentinel），与 kernel 广播行为天然对齐；修复前
+# 该域被 validate_prune_batch 的 stride<=0 校验拒绝（INVALID_VALUE）。
+# 229=广播 out-of-place；230=广播 in-place（重复写同值 × 布局保持）。
+229,128,128,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,3,0,0,0
+230,128,128,float16,0,1,STRIP,NON_TRANSPOSE,ROW,A,-1,1,L1,3,0,0,1

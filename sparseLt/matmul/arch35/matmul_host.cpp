@@ -67,32 +67,29 @@ static aclsparseStatus_t validate_pointer_alignment(const void* workspace,
 }
 
 // ============================================================================
-// dense 侧（dense B / dense A）的布局接入：COL 转置视图的 cube 转置
-// 标志翻转。dense 输入的物理行距经 td.ldA/td.ldB（PlanInit 快照，与
-// ldC/ldD 同口径）直通 kernel GM 布局 NDExt/DNExt 的行距参数，MTE2
-// 搬运按行距逐行跳过行尾 padding——带 ld 的非紧凑输入无需任何预处理。
+// GM layout integration ((b), unified for both sides): cube transpose-flag
+// flip for the COL transpose view. The inputs' physical row strides pass
+// td.ldA/td.ldB (PlanInit snapshots, same caliber as ldC/ldD) straight into
+// the row-stride parameters of the kernel GM layouts NDExt/DNExt; MTE2 moves
+// skip row-tail padding row by row via the row stride — non-compact inputs
+// with ld need no preprocessing at all.
 // COL 描述符的物理缓冲 ≡ 其转置的 ROW 形态（元素 (i,j) 位于 i + j*ld，
 // ld 即该转置视图的行步长），转置读由既有 DNExt 转置机制承载：翻转
-// td.transB / td.sparseTrans 即可，零拷贝零 kernel 改动；ld 口径在
+// td.sparseTrans / td.transB 即可，零拷贝零 kernel 改动；ld 口径在
 // ROW/COL 间不变（ldA/ldB 均直读描述符 ld）。
+// (b) 两侧同规则：稀疏侧（A_pruned/B_pruned 为 prune 的描述符布局输出）
+// 与 dense 侧（描述符布局输入）统一按 order==COL 翻转——最终标志 =
+// isColView(该侧) = ((op==T) != (order==COL))，无论物理布局如何，投递到
+// L0 的逻辑矩阵恒为 op(该侧)。
 // ============================================================================
-static aclsparseStatus_t splt_apply_dense_layout(const aclsparseLtMatmulDescriptor* md,
-                                                 AclsparseltTilingData& td)
+static aclsparseStatus_t splt_apply_gm_layout(const aclsparseLtMatmulDescriptor* md,
+                                              AclsparseltTilingData& td)
 {
-    // dense B：仅 A-sparse 场景（B-sparse 的 matB 为 structured，恒为
-    // prune 紧凑输出，不经本路径；dense×dense 被
-    // ValidateSparsePosition 拒绝，不可达）。
-    if (md_isSparseA(md) && md->matB != nullptr
-        && md->matB->order == ACL_SPARSE_ORDER_COL) {
-        td.transB = 1 - td.transB;
-    }
-    // dense A：仅 B-sparse 场景（A-sparse 的 matA 为 structured/已剪枝，
-    // A_pruned 恒紧凑）。dense×dense 场景 A 同为 dense，但
-    // sparseTrans 语义（transA）已由 fill_sparse_tiling_dims 正确填充，
-    // COL 翻转同样适用。
-    if (!md_isSparseA(md) && md_hasStructuredSparsity(md) && md->matA != nullptr
-        && md->matA->order == ACL_SPARSE_ORDER_COL) {
+    if (md->matA != nullptr && md->matA->order == ACL_SPARSE_ORDER_COL) {
         td.sparseTrans = 1 - td.sparseTrans;
+    }
+    if (md->matB != nullptr && md->matB->order == ACL_SPARSE_ORDER_COL) {
+        td.transB = 1 - td.transB;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -127,18 +124,25 @@ static aclsparseStatus_t validate_matmul_params(
         OP_LOGE(kSparseLtLogTag, "Matmul: plan internals null (matmulDescr/tilingData)");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    // Validate streams: the streams pointer must be non-null with numStreams > 0
-    // (multi-stream not yet supported, only streams[0] is used). streams[0]
-    // itself may be nullptr — the ACL runtime treats 0/nullptr as the default
-    // stream, which is valid for all aclrtMemcpy / kernel-launch APIs.
-    // The previous non-null check on streams[0] incorrectly
-    // rejected the default stream, causing every CSV case that passes stream=0
-    // (the test framework's default stream) to fail with INVALID_VALUE.
-    if (streams == nullptr || numStreams <= 0) {
-        OP_LOGE(kSparseLtLogTag, "Matmul: streams is null or numStreams<=0");
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    // Validate streams: streams == nullptr means "default stream only"
+    // (lenient policy, aligned with the cuSPARSELt official samples that
+    // declare `int num_streams = 0; cudaStream_t* streams = nullptr;` and
+    // pass them directly). numStreams is not judged in that case — the
+    // count has no consumer when the array is absent, symmetric with the
+    // existing (non-null, numStreams > 1) tolerance that only uses
+    // streams[0]. When streams != nullptr, numStreams must be > 0.
+    // streams[0] itself may be nullptr — the ACL runtime treats 0/nullptr
+    // as the default stream, which is valid for all aclrtMemcpy /
+    // kernel-launch APIs.
+    if (streams == nullptr) {
+        outStream = nullptr;  // ACL default stream
+    } else {
+        if (numStreams <= 0) {
+            OP_LOGE(kSparseLtLogTag, "Matmul: numStreams<=0 with non-null streams");
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+        }
+        outStream = streams[0];
     }
-    outStream = streams[0];
     if (workspace == nullptr) {
         OP_LOGE(kSparseLtLogTag, "Matmul: workspace is null");
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
@@ -256,9 +260,9 @@ static aclsparseStatus_t resolve_matmul_apruned(
             return ACL_SPARSE_STATUS_INVALID_VALUE;
         }
         // A-sparse 回退 × batch > 1 拒绝：workspace 的 aPruned 区为单 batch
-        // 容量（m×k×elemSize），多 batch 时 kernel 按 batchStrideA 推进读取
-        // 将越界——多 batch 场景须先显式调用 aclsparseLtSpMMAPrune 产出
-        // A_pruned（batch 布局）再经 matA 传入。
+        // 容量（(b) 稀疏侧物理跨度 span×elemSize），多 batch 时 kernel 按
+        // batchStrideA 推进读取将越界——多 batch 场景须先显式调用
+        // aclsparseLtSpMMAPrune 产出 A_pruned（batch 布局）再经 matA 传入。
         if (args.td.numBatches > 1) {
             OP_LOGE(kSparseLtLogTag,
                     "Matmul: matA is null with numBatches=%d (batch > 1 requires explicit A_pruned; "
@@ -322,19 +326,22 @@ static aclsparseStatus_t resolve_matmul_pointers(
 // validate_one_scaling_vector — 单个缩放向量（alpha/beta）的执行期校验
 // （自 validate_vector_scaling_pointers 的 alpha/beta
 // 对称段提取）。检查顺序与日志内容保持不变：
-//   1. 32 字节对齐：缩放向量与 bias 同经 DataCopyPad 以 GM
-//      源地址读取（SpltLoadScalingUB 全量模式 /
-//      SpltFusedEpilogueGeneralPath 的 per-tile 段加载），硬件要求 GM 源
-//      32 字节对齐（Y3 bias 侧同性质先例；per-tile 段加载的源偏移
-//      mPos*4 为 baseM*4 的倍数，恒 32B 对齐，基址对齐即充分）。
+//   1. 16 字节对齐（对齐 cuSPARSELt "All pointers must be aligned to
+//      16 bytes"）：缩放向量与 bias 同经 DataCopyPad 以 GM 源地址读取
+//      （SpltLoadScalingUB 全量模式 / SpltFusedEpilogueGeneralPath 的
+//      per-tile 段加载）——实测 DataCopyPad 容忍 16B 对齐 GM 源（16B
+//      非 32B 基址探针全过，含 fullload 与 chunk 装载路径，回归锚点见
+//      ltmatmul_test_align16.cpp；原 32B 口径为历史收紧，D5 轮实验证伪
+//      后回摆 16B。chunk 段加载的源偏移 mPos*4 为 baseM*4 的倍数，恒
+//      16B 对齐，基址对齐即充分）。
 //   2. device 内存判定：经 aclrtPointerGetAttributes，非 Device 内存
 //      提前拒绝（把不可诊断的设备 AI Core Error 转化为带日志的 host
 //      侧报错）。
 static aclsparseStatus_t validate_one_scaling_vector(const void* p, const char* name)
 {
-    if ((reinterpret_cast<uintptr_t>(p) % 32) != 0) {
+    if ((reinterpret_cast<uintptr_t>(p) % 16) != 0) {
         OP_LOGE(kSparseLtLogTag,
-                "Matmul: %s vector pointer not 32-byte aligned (DataCopyPad GM "
+                "Matmul: %s vector pointer not 16-byte aligned (DataCopyPad GM "
                 "source requirement)",
                 name);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -378,7 +385,7 @@ static aclsparseStatus_t validate_one_scaling_vector(const void* p, const char* 
 // 拦截 null/host 指针（快照路径下该组合静默落入标量分支、host 解引用
 // device 指针崩溃——该崩溃域随活读消除）；后关 vec 时按标量分支放行。
 // host 侧单次查询为 μs 级，相对 kernel 执行可忽略。
-// alpha/beta 的对称校验见 validate_one_scaling_vector（顺序：先 32B
+// alpha/beta 的对称校验见 validate_one_scaling_vector（顺序：先 16B
 // 对齐后 device 判定）。
 static aclsparseStatus_t validate_vector_scaling_pointers(const void* alpha, const void* beta,
                                                            const aclsparseLtMatmulDescriptor* md)
@@ -416,11 +423,32 @@ static aclsparseStatus_t validate_vector_scaling_pointers(const void* alpha, con
 // checked_mul_add — shared/aclsparselt_internal.h 共享 helper（本 TU 经
 // include 引入，原本地重复定义已消除）。
 
+// mat_batch_phys_span —— 单矩阵侧 V1 span 校验（自 validate_matmul_one_batch_side
+// 拆出，codecheck 超大函数项，语句与返回语义逐位等价）：physSpan（元素单位，
+// order 感知）。rows/cols/ld 为 int64 且描述符 setter 无上限校验，
+// (rows/cols-1)*ld 乘加链先做受检查计算，溢出即布局非法（物理 span 超
+// int64 无法被 kernel 寻址）——先于任何后续乘法。溢出时打带参日志并返回
+// false（span 仅在返回 true 时有效）。
+static bool mat_batch_phys_span(const aclsparseLtMatDescriptor* desc, const char* name,
+                                int64_t& span)
+{
+    const bool spanOk = (desc->order == ACL_SPARSE_ORDER_COL)
+        ? checked_mul_add(desc->cols - 1, desc->ld, desc->rows, span)
+        : checked_mul_add(desc->rows - 1, desc->ld, desc->cols, span);
+    if (!spanOk) {
+        OP_LOGE(kSparseLtLogTag,
+                "Matmul: mat%s physical span overflow (rows=%lld, cols=%lld, ld=%lld)",
+                name, static_cast<long long>(desc->rows),
+                static_cast<long long>(desc->cols), static_cast<long long>(desc->ld));
+    }
+    return spanOk;
+}
+
 // validate_matmul_one_batch_side — 单矩阵侧（A/B/C/D 之一）的 batch 布局
-// V1/V2/V3 校验。
+// V1/V2/V3 校验（V1 对 stride==0 的广播侧跳过，见下方判据处注释）。
 static aclsparseStatus_t validate_matmul_one_batch_side(
     const aclsparseLtMatDescriptor* desc, const char* name,
-    int64_t extraSpan, int32_t numBatches)
+    int32_t numBatches)
 {
     const int32_t dt = dtype_from_acl(desc->valueType);
     if (dt == SPLT_DTYPE_INVALID) {
@@ -429,27 +457,31 @@ static aclsparseStatus_t validate_matmul_one_batch_side(
     const int64_t elemSize =
         (dt == SPLT_DTYPE_FP32 || dt == SPLT_DTYPE_INT32) ? SPLT_FP32_BYTES :
         (dt == SPLT_DTYPE_INT8) ? SPLT_INT8_BYTES : SPLT_HALF_BYTES;
-    // V1: physSpan（元素单位，order 感知）。rows/cols/ld 为 int64 且描述符
-    // setter 无上限校验，(rows/cols-1)*ld 乘加链先做受检查计算，溢出即布局
-    // 非法（物理 span 超 int64 无法被 kernel 寻址）——先于任何后续乘法。
-    int64_t physSpan = 0;
-    const bool spanOk = (desc->order == ACL_SPARSE_ORDER_COL)
-        ? checked_mul_add(desc->cols - 1, desc->ld, desc->rows, physSpan)
-        : checked_mul_add(desc->rows - 1, desc->ld, desc->cols, physSpan);
-    if (!spanOk) {
-        OP_LOGE(kSparseLtLogTag,
-                "Matmul: mat%s physical span overflow (rows=%lld, cols=%lld, ld=%lld)",
-                name, static_cast<long long>(desc->rows),
-                static_cast<long long>(desc->cols), static_cast<long long>(desc->ld));
+    // V1: physSpan（元素单位，order 感知），见 mat_batch_phys_span。
+    int64_t span = 0;
+    if (!mat_batch_phys_span(desc, name, span)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    const int64_t span = (physSpan > extraSpan) ? physSpan : extraSpan;
     const int64_t stride = desc->batchStride;
-    if (stride <= 0 || stride < span) {
+    // stride < 0 恒非法（kernel 按 base + b*stride 推进，负值回走越界）；
+    // stride == 0 为跨批广播（对齐 cuSPARSELt batch_stride=0 语义：该侧所有
+    // batch 读写 batch 0，b*0 恒为基址）——缓冲仅需单批容量，V1 span 校验
+    // 跳过该侧；V2 对齐 0%x==0 恒过、V3 (nb-1)*0+span 无溢出面，二者对
+    // 广播侧自然失效。各侧独立设置、独立判定。
+    if (stride < 0) {
+        OP_LOGE(kSparseLtLogTag,
+                "Matmul: mat%s batchStride=%lld < 0 (numBatches=%d)",
+                name, static_cast<long long>(stride), numBatches);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (stride == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;  // 广播：全批读写 batch 0
+    }
+    if (stride < span) {
         OP_LOGE(kSparseLtLogTag,
                 "Matmul: mat%s batchStride=%lld < span=%lld (physSpan=%lld, numBatches=%d)",
                 name, static_cast<long long>(stride), static_cast<long long>(span),
-                static_cast<long long>(physSpan), numBatches);
+                static_cast<long long>(span), numBatches);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     // V2: 逐 batch 基址 16B 对齐。无乘法等价判断：elemSize ∈ {1,2,4} 均为
@@ -481,9 +513,10 @@ static aclsparseStatus_t validate_matmul_one_batch_side(
 // 合法域）：
 //   V1 batchStride > 0 且 ≥ 各自物理 span（order 感知：ROW 序
 //      (rows-1)*ld+cols，COL 序 (cols-1)*ld+rows；span 乘加链经受检查
-//      计算，溢出即布局非法）；稀疏侧（A-sparse 的 A / B-sparse 的 B）
-//      另需 ≥ 紧凑输出 span（A_pruned 为 m*k / B_pruned 为 k*n——prune
-//      输出与输入共用 batchStride 推进）；
+//      计算，溢出即布局非法）——(b) 下稀疏侧 A_pruned/B_pruned 为描述符
+//      (order, ld) 布局输出，其 batch 访问跨度已被上述物理 span 精确覆盖；
+//      batchStride == 0 为跨批广播（cuSPARSELt batch_stride=0 语义：该侧
+//      全批读写 batch 0，缓冲仅需单批 span），该侧 V1 跳过；负值拒绝；
 //   V2 batchStride 为 16/elemSize 的倍数（⟺ batchStride × elemSize 为
 //      16 字节倍数——纯取模等价判断，不计算可溢出的乘积；配合基址 16B
 //      校验，逐 batch 基址恒 16B 对齐）；
@@ -505,25 +538,20 @@ static aclsparseStatus_t validate_matmul_batch_strides(const aclsparseLtMatmulDe
     if (numBatches <= 1) {
         return ACL_SPARSE_STATUS_SUCCESS;  // 单 batch 直通（行为与返回码不变）
     }
-    const int64_t m = md_m(md);
-    const int64_t k = md_k(md);
-    const int64_t n = md_n(md);
     struct BatchSide {
         const aclsparseLtMatDescriptor* desc;
-        int64_t extraSpan;     // 稀疏侧的紧凑输出 span（dense 侧为 0）
         const char* name;
     };
-    const bool isSparseA = md_isSparseA(md);
     const BatchSide sides[4] = {
-        {md->matA, isSparseA ? m * k : 0, "A"},
-        {md->matB, (!isSparseA && md_hasStructuredSparsity(md)) ? k * n : 0, "B"},
-        {md->matC, 0, "C"},
-        {md->matD, 0, "D"},
+        {md->matA, "A"},
+        {md->matB, "B"},
+        {md->matC, "C"},
+        {md->matD, "D"},
     };
     for (const BatchSide& side : sides) {
         if (side.desc == nullptr) { continue; }
         aclsparseStatus_t st = validate_matmul_one_batch_side(side.desc, side.name,
-                                                              side.extraSpan, numBatches);
+                                                              numBatches);
         if (st != ACL_SPARSE_STATUS_SUCCESS) {
             return st;
         }
@@ -533,31 +561,37 @@ static aclsparseStatus_t validate_matmul_batch_strides(const aclsparseLtMatmulDe
 
 // validate_bias_params —— bias 侧防御校验（X5/X6 同族范式的第 5 维
 // 补齐，执行期，Matmul 与 Search 候选执行共用）：
-//   B1 biasPointer 32 字节对齐：bias 经 SpltLoadBiasFullToFp32 的
-//      DataCopyPad 以 GM 源地址读取（硬件要求 32 字节对齐，prune_check
-//      d_in 同性质收紧先例——严于官方 16 字节惯例）。splt_data_ptrs_aligned16
-//      覆盖 workspace/matA/B/C/D 不含 bias；用户偏移后的非对齐 bias 指针
-//      由本校验转化为带日志的 host 侧报错（可诊断化）。
+//   B1 biasPointer 16 字节对齐（对齐 cuSPARSELt "All pointers must be
+//      aligned to 16 bytes"）：bias 经 SpltLoadBiasFullToFp32 的
+//      DataCopyPad 以 GM 源地址读取——实测 DataCopyPad 容忍 16B 对齐
+//      GM 源（16B 非 32B 基址探针全过：bias 四 dtype fullload/chunk
+//      路径，回归锚点见 ltmatmul_test_align16.cpp；原 32B 口径为历史
+//      收紧，D5 轮实验证伪后回摆 16B）。splt_data_ptrs_aligned16
+//      覆盖 workspace/matA/B/C/D 不含 bias；用户偏移后的非 16B 对齐
+//      bias 指针由本校验转化为带日志的 host 侧报错（可诊断化）。
 //   B2 biasStride >= 0：负值在 kernel batch 循环（b × biasStride）回走
 //      越界；0 合法（全部 batch 共用同一 bias 的广播语义，头文件
 //      BIAS_STRIDE 属性声明）。
-//   B3 逐 batch bias 源地址 32 字节对齐：numBatches > 1 且 biasStride > 0
+//   B3 逐 batch bias 源地址 16 字节对齐：numBatches > 1 且 biasStride > 0
 //      时，batch b 的 GM 源为 biasVecGM[b × biasStride]（DataCopyPad 同
-//      B1 的 32B 硬件要求）。无乘法等价判断（与 batch V2 同范式）：
-//      biasElemSize ∈ {2,4} 均为 2 的幂，biasStride × biasElemSize ≡ 0
-//      (mod 32) ⟺ biasStride ≡ 0 (mod 32/biasElemSize)（FP32/INT8 路
-//      径 bias 为 FP32 → %8==0；FP16/BF16 → %16==0）。bias dtype 键于
-//      A/B valueType（SpltBiasDType：INT8 路 bias 恒 FP32，其余与
-//      valueType 同型）。
+//      B1 的 16B 口径，实测逐 batch 16B 源精度通过——biasStride=4 的
+//      FP32 双 batch 探针为回归锚点）。无乘法等价判断（与 batch V2 同
+//      范式）：biasElemSize ∈ {2,4} 均为 2 的幂，biasStride × biasElemSize
+//      ≡ 0 (mod 16) ⟺ biasStride ≡ 0 (mod 16/biasElemSize)（bias 为
+//      FP32 → %4==0；FP16/BF16 → %8==0）。bias dtype 键于 (A/B valueType,
+//      C valueType)（SpltBiasDType<T, CType>：cuSPARSELt 规则 bias = C
+//      dtype，INT8 × C/D ∈ {INT8,INT32}（32I 域）例外为 FP32——INT8 ×
+//      C/D=FP16/BF16 的 bias 为 FP16/BF16，其 biasStride 合法域相应
+//      收紧为 %8==0）。
 // biasPointer == nullptr 时无消费方，直通。
 static aclsparseStatus_t validate_bias_params(const aclsparseLtMatmulDescriptor* md)
 {
     if (md->biasPointer == nullptr) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    if ((reinterpret_cast<uintptr_t>(md->biasPointer) % 32) != 0) {
+    if ((reinterpret_cast<uintptr_t>(md->biasPointer) % 16) != 0) {
         OP_LOGE(kSparseLtLogTag,
-                "Matmul: biasPointer not 32-byte aligned (DataCopyPad GM source requirement)");
+                "Matmul: biasPointer not 16-byte aligned (DataCopyPad GM source requirement)");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (md->biasStride < 0) {
@@ -566,20 +600,25 @@ static aclsparseStatus_t validate_bias_params(const aclsparseLtMatmulDescriptor*
                 static_cast<long long>(md->biasStride));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    // B3：逐 batch 源地址 32B 对齐（见函数头注释）。
+    // B3：逐 batch 源地址 16B 对齐（见函数头注释）。
     const int32_t numBatches = (md->matA != nullptr && md->matA->numBatches > 0)
         ? md->matA->numBatches : 1;
     if (numBatches > 1 && md->biasStride > 0) {
         const int32_t dt = dtype_from_acl(md->matA->valueType);
-        const int64_t biasElemSize = (dt == SPLT_DTYPE_FP32 || dt == SPLT_DTYPE_INT8)
-            ? SPLT_FP32_BYTES : SPLT_HALF_BYTES;  // SpltBiasDType：INT8 路恒 FP32
-        if (md->biasStride % (32 / biasElemSize) != 0) {
+        const int32_t cDt = dtype_from_acl(md->matC->valueType);
+        // bias dtype 键于 (dt, cDt)（SpltBiasDType<T, CType> 口径）：
+        // FP32 或 INT8 × 32I 域（C ∈ {INT8,INT32}）→ FP32；否则 = C dtype
+        //（FP16/BF16，含 INT8 × C/D=FP16/BF16）。
+        const bool biasIsFp32 = (dt == SPLT_DTYPE_FP32) ||
+            (dt == SPLT_DTYPE_INT8 && (cDt == SPLT_DTYPE_INT8 || cDt == SPLT_DTYPE_INT32));
+        const int64_t biasElemSize = biasIsFp32 ? SPLT_FP32_BYTES : SPLT_HALF_BYTES;
+        if (md->biasStride % (16 / biasElemSize) != 0) {
             OP_LOGE(kSparseLtLogTag,
-                    "Matmul: biasStride=%lld not 32-byte aligned per batch (biasElemSize=%lld, "
+                    "Matmul: biasStride=%lld not 16-byte aligned per batch (biasElemSize=%lld, "
                     "requires multiple of %lld)",
                     static_cast<long long>(md->biasStride),
                     static_cast<long long>(biasElemSize),
-                    static_cast<long long>(32 / biasElemSize));
+                    static_cast<long long>(16 / biasElemSize));
             return ACL_SPARSE_STATUS_INVALID_VALUE;
         }
     }
@@ -614,7 +653,8 @@ static aclsparseStatus_t validate_workspace_sufficiency(
     const int32_t liveBatches = (md->matA != nullptr && md->matA->numBatches > 0)
         ? md->matA->numBatches : 1;
     const WsLayout wsl = compute_ws_layout(md_m(md), md_n(md), md_k(md),
-                                           baseTd->splitK, baseTd->dataType, liveBatches);
+                                           baseTd->splitK, baseTd->dataType, liveBatches,
+                                           splt_apruned_span_elems(md, md_m(md), md_k(md)));
     if (static_cast<int64_t>(wsl.totalBytes) > static_cast<int64_t>(planWorkspaceSize)) {
         OP_LOGE(kSparseLtLogTag,
                 "Matmul: workspace insufficient under live state: need=%lld bytes "
@@ -656,9 +696,13 @@ static aclsparseStatus_t validate_scaling_ub_budget(
     }
     const int32_t m = md_m(md);
     const int32_t dt = baseTd->dataType;
-    // biasLoadBuf：FP16/BF16 bias 的原始加载缓冲（FP32/INT8 的 bias 为
-    // FP32 直载，无中间缓冲）——与 compute_bias_chunk_mode 的口径一致。
-    const bool needBiasLoadBuf = biasEnabled && (dt != SPLT_DTYPE_FP32 && dt != SPLT_DTYPE_INT8);
+    const int32_t cDt = baseTd->cDataType;
+    // biasLoadBuf：FP16/BF16 bias 的原始加载缓冲（bias 为 FP32 直载时无
+    // 中间缓冲）——与 compute_bias_chunk_mode 的口径一致（键于 (dt, cDt)：
+    // INT8 × C/D=FP16/BF16 的 bias 为 FP16/BF16，需计 m*2）。
+    const bool biasIsFp32 = (dt == SPLT_DTYPE_FP32) ||
+        (dt == SPLT_DTYPE_INT8 && (cDt == SPLT_DTYPE_INT8 || cDt == SPLT_DTYPE_INT32));
+    const bool needBiasLoadBuf = biasEnabled && !biasIsFp32;
     const uint64_t vecBytes =
         (alphaVec ? static_cast<uint64_t>(m) * 4 : 0) +
         (betaVec ? static_cast<uint64_t>(m) * 4 : 0) +
@@ -714,9 +758,10 @@ static aclsparseStatus_t prepare_matmul_pointers(
     }
     fill_matmul_tiling_fields(md, baseTd, alpha, beta, args);
 
-    // dense 侧布局接入：COL 转置视图的 cube 转置标志翻转（ld 直通
-    // td.ldA/td.ldB，无需预处理）须先于 H2D push（下方 push_tiling_to_device）。
-    aclsparseStatus_t st = splt_apply_dense_layout(md, args.td);
+    // GM 布局接入（(b) 两侧统一）：COL 转置视图的 cube 转置标志翻转
+    //（ld 直通 td.ldA/td.ldB，无需预处理）须先于 H2D push
+    //（下方 push_tiling_to_device）。
+    aclsparseStatus_t st = splt_apply_gm_layout(md, args.td);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -784,9 +829,9 @@ static aclsparseStatus_t validate_launch_dtypes(const MatmulLaunchArgs& args)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-// launch_matmul_kernels — fused (splitK==1) vs splitK>1 (aclrtMemsetAsync ->
-// matmul -> epilogue) kernel launch. Launch order is preserved exactly
-// (constraint: splitK>1 path memset -> matmul -> epilogue order is critical).
+// launch_matmul_kernels — fused (splitK==1) vs splitK>1 (matmul ->
+// epilogue) kernel launch.（B4：temp 的全量 aclrtMemsetAsync 已完全去除——
+// 正确性不再依赖 memset，见下方不变量注释；launch 序列仅 cube → epilogue。）
 // epilogue/fused launchers take outDataType (drives INT8 INT8-vs-INT32 dispatch).
 // dtype 域守卫见 validate_launch_dtypes（拆出自本函数，阈值/条件逐位不变）。
 static aclsparseStatus_t launch_matmul_kernels(const MatmulLaunchArgs& args, aclrtStream stream)
@@ -810,12 +855,45 @@ static aclsparseStatus_t launch_matmul_kernels(const MatmulLaunchArgs& args, acl
     }
     // Slow path: two-segment (cube->temp->epilogue reduce) for splitK>1.
     {
-        // Use size_t for the temp buffer byte count to avoid
-        // int32/int64 overflow on large matrices (m*n*splitK*sizeof(float)).
-        // tempBytes 乘以 numBatches：compute_ws_layout 分配 temp 区域
-        // 时已含 batches（w.tempOff + batches*splitK*m*n*SPLT_FP32_BYTES），
-        // 此前 memset 仅清零第一个 batch 的 temp 区域，batch 1+ 保持未初始化，
-        // 未写入的 temp 区域被 epilogue reduce 累加垃圾值，导致精度错误。
+        // [B4] temp memset fully removed (previously: a full
+        // aclrtMemsetAsync of splitK*m*n*batches*4 bytes on every execution,
+        // with correctness strongly coupled to the memset — historically
+        // caused a precision bug from "clearing batch 0 only"). Correctness
+        // invariant (five-point proof, plan section 2.3):
+        //   1. The epilogue reads only segments [0, validSplitK)
+        //      (SpltEpilogueBatchLoop's reduction upper bound now sources
+        //      td.validSplitK, and the empty segments in [validSplitK, splitK)
+        //      are never read because each such segment start, the product
+        //      s×kSegLen, has already reached k).
+        //   2. For every valid segment s (its start index kSegStart lies
+        //      below k): the cube side executes every tile of that segment
+        //      in the mTile and nTile dimensions (the continue meant for
+        //      segments whose kSegStart has reached k never fires), and the
+        //      tile grid mTiles×nTiles (mTiles being the ceiling of m over
+        //      baseM, nTiles the ceiling of n over baseN) covers all of (m,n).
+        //   3. Every tile performs at least one Mmad: SpltKL1Loop's first
+        //      iteration has kPosL1 at kSegStart, still below k, hence
+        //      curKL1 is at least one and L0C is initialized with the
+        //      cmatrixInitVal flag set to true (no stale values remain).
+        //   4. Fixpipe writes curM*curN fully to GM temp (including the m/n
+        //      tail-tile shrinkage), so the written region covers all m*n
+        //      elements of that segment.
+        //   5. Symmetry across the batch dim: the cube writes all valid
+        //      segments to every per-b offset tempBatchGm, and the epilogue
+        //      reads every b — the coverage is symmetric.
+        // Counterexample domain (if ever introduced, memset or an equivalent
+        // must be restored): the cube skipping the write of any (m,n) tile
+        // (degenerate shapes with a zero m or n dimension are already
+        // excluded by the totalTiles non-positive early return and by
+        // positive descriptor rows/cols), or the epilogue's read domain
+        // extending beyond validSplitK.
+        // This invariant is anchored alongside at the epilogue reduction
+        // re-source site (SpltEpilogueBatchLoop).
+        //
+        // Keep the 8GiB sanity check on tempBytes (an independent validation
+        // block anchoring the workspace temp-region usage — same caliber as
+        // the allocation side compute_ws_layout, whose tempBytes is the
+        // splitK*m*n*batches footprint measured in SPLT_FP32_BYTES units).
         const size_t numBatches = static_cast<size_t>(args.td.numBatches > 0 ? args.td.numBatches : 1);
         const size_t tempBytes = static_cast<size_t>(args.td.splitK) *
                                  static_cast<size_t>(args.td.m) *
@@ -827,12 +905,6 @@ static aclsparseStatus_t launch_matmul_kernels(const MatmulLaunchArgs& args, acl
             OP_LOGE(kSparseLtLogTag, "Matmul: temp buffer overflow, tempBytes=%zu > cap=%zu",
                     tempBytes, SPLT_TEMP_BYTES_CAP);
             return ACL_SPARSE_STATUS_INVALID_VALUE;
-        }
-        aclError memsetRet = aclrtMemsetAsync(args.temp, tempBytes, 0,
-                                               tempBytes, stream);
-        if (memsetRet != ACL_SUCCESS) {
-            OP_LOGE(kSparseLtLogTag, "Matmul: aclrtMemsetAsync temp failed, aclErr=%d", (int)memsetRet);
-            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
         }
     }
     splt_matmul_kernel_launch(reinterpret_cast<GM_ADDR>(args.aPruned),

@@ -263,6 +263,25 @@ inline void PruneTileColFp32(const std::vector<float>& Af, std::vector<float>& A
 }
 
 // -----------------------------------------------------------------------------
+// GoldenTranspose: (m,k) row-major -> (k,m) row-major transpose (pure CPU
+// function). Used for the golden same-view treatment of ColView combinations
+// (plan section 2.1.3: TILE tie-breaking must enumerate configs on the same
+// physical view as the kernel).
+// -----------------------------------------------------------------------------
+inline std::vector<float> GoldenTranspose(const std::vector<float>& a,
+                                          int32_t rows, int32_t cols)
+{
+    std::vector<float> t(static_cast<size_t>(cols) * static_cast<size_t>(rows));
+    for (int32_t i = 0; i < rows; ++i) {
+        for (int32_t j = 0; j < cols; ++j) {
+            t[static_cast<size_t>(j) * static_cast<size_t>(rows) + static_cast<size_t>(i)] =
+                a[static_cast<size_t>(i) * static_cast<size_t>(cols) + static_cast<size_t>(j)];
+        }
+    }
+    return t;
+}
+
+// -----------------------------------------------------------------------------
 // Golden entry: A_pruned = StructuredPrune(A)
 //
 // Template parameter T:
@@ -278,14 +297,19 @@ inline void PruneTileColFp32(const std::vector<float>& Af, std::vector<float>& A
 // split_k (those only influence NPU matmul algorithm selection); they are
 // accepted to align with the operator API signature but unused here.
 //
-// Direction logic (shared by STRIP and TILE):
-//   pruneAlongRow = (transA != isRowOrder)
-//   transA=false, ROW -> alongRow=true  -> Row variant
-//   transA=false, COL -> alongRow=false -> Col variant
-//   transA=true,  COL -> alongRow=true  -> Row variant (logical equivalence)
-//   transA=true,  ROW -> alongRow=false -> Col variant (transA path: golden
-//                                           works in logical (m,k) space,
-//                                           kernel handles physical transpose)
+// Direction logic ((b) cuSPARSELt semantics: grouping always runs along
+// op-view rows, i.e. the rows of logical (m,k)):
+//   RowView (alongRow holds when transA and isRowOrder differ, N+ROW /
+//     T+COL): the kernel processes on the (m,k) physical view -> golden
+//     uses the Row variant directly (behavior unchanged).
+//   ColView (alongRow does not hold, N+COL / T+ROW): the kernel processes
+//     on the (k,m) physical view -> golden transposes to (k,m) then uses
+//     the Col variant (same-view enumeration guarantees TILE tie-breaking
+//     is bit-identical to the kernel), and the result is transposed back
+//     to (m,k). Under STRIP this is mathematically equivalent to grouping
+//     along logical rows (identical group sets).
+// Input/output are both logical (m,k) row-major compact (physical layout
+// scattering is carried by the comparison side).
 // -----------------------------------------------------------------------------
 template <typename T>
 void SpMMAPruneGolden(
@@ -314,27 +338,34 @@ void SpMMAPruneGolden(
 
     std::vector<float> Af_pruned;
     const bool isTile = (pruneAlg == "TILE");
-    if (isTile) {
-        if constexpr (!std::is_same_v<T, float>) {
-            if (alongRow) {
+    if (alongRow) {
+        // RowView: the kernel processes on the (m,k) view (existing
+        // behavior unchanged).
+        if (isTile) {
+            if constexpr (!std::is_same_v<T, float>) {
                 PruneTileRowFp32<4, 2>(Af, Af_pruned, m, k);
             } else {
-                PruneTileColFp32<4, 2>(Af, Af_pruned, m, k);
+                PruneTileRowFp32<2, 1>(Af, Af_pruned, m, k);
             }
         } else {
-            if (alongRow) {
-                PruneTileRowFp32<2, 1>(Af, Af_pruned, m, k);
-            } else {
-                PruneTileColFp32<2, 1>(Af, Af_pruned, m, k);
-            }
+            PruneRowFp32(Af, Af_pruned, m, k, ts, keep);
         }
     } else {
-        // STRIP: reuse existing 1D top-N pruning (groupSize=ts, keepCount=keep).
-        if (alongRow) {
-            PruneRowFp32(Af, Af_pruned, m, k, ts, keep);
+        // ColView: the kernel processes on the (k,m) physical view ->
+        // golden same-view treatment (transpose + Col variant + transpose
+        // back).
+        std::vector<float> At = GoldenTranspose(Af, m, k);          // (k,m)
+        std::vector<float> At_pruned;
+        if (isTile) {
+            if constexpr (!std::is_same_v<T, float>) {
+                PruneTileColFp32<4, 2>(At, At_pruned, k, m);
+            } else {
+                PruneTileColFp32<2, 1>(At, At_pruned, k, m);
+            }
         } else {
-            PruneColFp32(Af, Af_pruned, m, k, ts, keep);
+            PruneColFp32(At, At_pruned, k, m, ts, keep);
         }
+        Af_pruned = GoldenTranspose(At_pruned, k, m);               // back to (m,k)
     }
 
     // Step 3: truncate back to T.

@@ -152,6 +152,7 @@ inline sparse_test::MatmulLayoutOpts ToNpuLayoutOpts(const MatmulSearchParam& p)
     o.denseOrder = p.isDenseColOrder() ? ACL_SPARSE_ORDER_COL : ACL_SPARSE_ORDER_ROW;
     o.cdOrder = p.isCdColOrder() ? ACL_SPARSE_ORDER_COL : ACL_SPARSE_ORDER_ROW;
     o.ldCd = p.ldCd;
+    o.directFeed = (p.directFeed != 0);
     return o;
 }
 

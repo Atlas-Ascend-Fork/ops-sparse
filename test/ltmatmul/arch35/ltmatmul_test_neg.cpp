@@ -138,24 +138,27 @@ TEST_F(MatmulExceptionTest, WB_L2_46_BatchLdSpanOverflow) {
         ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// WB-L2-47（负向补例）：numBatches>1 且 biasStride 非 32B 逐批
-// 对齐 → INVALID_VALUE。batch≥1 的 bias GM 源（biasVecGM[b*biasStride]，
-// DataCopyPad 硬件要求 32B 对齐）非 32B 时为设备侧错误——本校验把其转化
-// 为干净拒绝。构造：四 mat 合法 batch 布局（numBatches=2、batchStride=16384
-// 穿过 V1/V2/V3）+ 32B 对齐的 biasPointer（穿过 B1）+ biasStride=20
-//（FP32 bias elemSize=4，要求 %8==0；20*4=80B 非 32B 倍数）→ B3 拦截。
-// bias 属性在 PlanInit 前设置（正规时序）。四描述符构造经
+// WB-L2-47（负向补例，D5 轮 16B 口径改参）：numBatches>1 且 biasStride
+// 非 16B 逐批对齐 → INVALID_VALUE。batch≥1 的 bias GM 源
+//（biasVecGM[b*biasStride]，DataCopyPad 实测容忍 16B 对齐 GM 源——16B
+// 基址探针见 ltmatmul_test_align16.cpp；对齐校验对齐 cuSPARSELt 16B
+// 惯例）非 16B 时仍为设备侧错误——本校验把其转化为干净拒绝。构造：四
+// mat 合法 batch 布局（numBatches=2、batchStride=16384 穿过 V1/V2/V3）+
+// 16B 对齐的 biasPointer（穿过 B1）+ biasStride=21（FP32 bias
+// elemSize=4，要求 %4==0；21*4=84B 非 16B 倍数——原 32B 口径的 20
+//（80B）在 16B 口径下合法，正向锚点由 align16 的 stride=4 探针承载）
+// → B3 拦截。bias 属性在 PlanInit 前设置（正规时序）。四描述符构造经
 // LtBatchMatDescKit（batch 属性一致性语义同源）。
-TEST_F(MatmulExceptionTest, WB_L2_47_BiasStrideNot32BAlignedPerBatch) {
+TEST_F(MatmulExceptionTest, WB_L2_47_BiasStrideNot16BAlignedPerBatch) {
     SparseLtHandleGuard handle;
     LtBatchMatDescKit kit(handle.get(), 2, 16384, 0, "WB_L2_47_BiasStride");
-    // bias：32B 对齐 device 指针（穿过 B1）+ 非对齐 stride（触发 B3）。
+    // bias：16B 对齐 device 指针（穿过 B1）+ 非对齐 stride（触发 B3）。
     auto dBias = sparse_test::DeviceBuffer::alloc(128 * sizeof(float) * 2);
     void* biasPtr = dBias.get();
     ASSERT_EQ(aclsparseLtMatmulDescSetAttribute(handle.get(), &kit.matmulDesc->get(),
             ACLSPARSELT_MATMUL_BIAS_POINTER, &biasPtr, sizeof(void*)),
         ACL_SPARSE_STATUS_SUCCESS);
-    const int64_t biasStride = 20;  // 20 % 8 != 0 → 80B 非 32B 倍数
+    const int64_t biasStride = 21;  // 21 % 4 != 0 → 84B 非 16B 倍数
     ASSERT_EQ(aclsparseLtMatmulDescSetAttribute(handle.get(), &kit.matmulDesc->get(),
             ACLSPARSELT_MATMUL_BIAS_STRIDE, &biasStride, sizeof(int64_t)),
         ACL_SPARSE_STATUS_SUCCESS);
@@ -253,4 +256,17 @@ TEST_F(MatmulExceptionTest, WB_L2_51_Fp16ABWithInt32CDRejected) {
     MatmulDtypePairCtx ctx(ACL_FLOAT16, ACL_INT32, ACL_INT32, ACL_SPARSE_COMPUTE_32F,
                            sizeof(uint16_t), sizeof(int32_t), sizeof(int32_t));
     EXPECT_EQ(RunDtypePairNegMatmulRaw(ctx), ACL_SPARSE_STATUS_NOT_SUPPORTED);
+}
+
+// WB-L2-52（D2 负向锁定）：numBatches>1 且 batchStride<0 → INVALID_VALUE。
+// D2 广播放行（stride==0 = 跨批广播）不得误伤负值拒绝边界——负 stride 下
+// kernel 按 base + b*stride 推进必然回走越界，恒非法。构造经
+// MatmulBatchOverflowCtx（四 mat 同设 nb=2 / stride=-8，穿过 desc init 层
+// ——SetAttribute 与 MatmulDescriptorInit 均不校验 stride 值），违规由
+// validate_matmul_one_batch_side 的 stride<0 分支拦截（A 侧首先被校验）。
+TEST_F(MatmulExceptionTest, WB_L2_52_BatchStrideNegative) {
+    MatmulBatchOverflowCtx ctx(-8, 0);
+    EXPECT_EQ(RunBatchNegMatmulRaw(ctx.handle.get(), ctx.plan->get(),
+                                   ctx.dWorkspace.get()),
+        ACL_SPARSE_STATUS_INVALID_VALUE);
 }

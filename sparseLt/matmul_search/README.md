@@ -92,8 +92,8 @@ aclsparseStatus_t aclsparseLtMatmulSearch(
 | matC | 输入 | const void* | 矩阵 C 数据指针（累加项），须 16 字节对齐，不可为 nullptr。按 matC 描述符 (order, ld) 布局访问（ROW=行主序 / COL=列主序，ld 支持 padding，pad 区域不读；语义同 aclsparseLtMatmul）。支持 in-place（matC == matD，此时 matD 值在搜索中累积，见"行为声明"），Device 内存 |
 | matD | 输出 | void* | 矩阵 D 数据指针（输出），须 16 字节对齐，不可为 nullptr。按 matD 描述符 (order, ld) 布局写出（ld 支持 padding，pad 区域不写）。搜索过程被反复写入；搜索结束后以选中配置无条件再执行一次，返回时内容为选中配置的完整输出，Device 内存 |
 | workspace | 输入 | void* | workspace 指针（进入搜索前按当前配置 `aclsparseLtMatmulGetWorkspace` 查询并分配），须 16 字节对齐，不可为 nullptr。计时执行复用该 workspace；纳入评估的候选 workspace 需求均不超过进入搜索时的 workspaceSize，无越界风险，Device 内存 |
-| streams | 输入 | aclrtStream* | ACL 流指针数组，不可为 nullptr；streams[0] 可为 nullptr（表示默认流）。当前仅使用 streams[0]（多流不支持，沿用 aclsparseLtMatmul 既有差异），Host 内存 |
-| numStreams | 输入 | int32_t | 流数量，须 > 0；当前仅支持 1（> 1 时不报错，仅使用 streams[0]），Host 内存 |
+| streams | 输入 | aclrtStream* | ACL 流指针数组。可为 nullptr（表示使用默认流，对齐 cuSPARSELt 官方样例 `streams=nullptr, numStreams=0` 的直传用法；此时 numStreams 不参与判定）；streams[0] 可为 nullptr（表示使用默认流）。当前仅使用 streams[0]（多流不支持，沿用 aclsparseLtMatmul 既有差异），Host 内存 |
+| numStreams | 输入 | int32_t | 流数量。streams 为 nullptr 时不参与判定；streams 非 nullptr 时须 > 0（当前仅支持 1，> 1 时不报错，仅使用 streams[0]），Host 内存 |
 
 #### 行为声明
 
@@ -111,7 +111,7 @@ aclsparseStatus_t aclsparseLtMatmulSearch(
 |--------|------|
 | `ACL_SPARSE_STATUS_SUCCESS` | 搜索完成，最优配置已写入 plan/algSelection |
 | `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为 nullptr 或 *handle 为 nullptr |
-| `ACL_SPARSE_STATUS_INVALID_VALUE` | plan/streams 为 nullptr、numStreams <= 0、matB/matC/matD 为 nullptr、数据指针未 16 字节对齐、matA 为 nullptr 且不满足 A-sparse 回退条件、searchIterations <= 0、启用向量缩放时 alpha/beta 为 nullptr（以上均为搜索入口一次性校验；缩放向量的 32 字节对齐与 device 内存判定经候选执行链沿用 aclsparseLtMatmul 执行期校验） |
+| `ACL_SPARSE_STATUS_INVALID_VALUE` | plan 为 nullptr、*plan 为 nullptr 或 plan 内部为空、streams 非 nullptr 时 numStreams <= 0、matB/matC/matD 为 nullptr、数据指针未 16 字节对齐、matA 为 nullptr 且不满足 A-sparse 回退条件、searchIterations <= 0、启用向量缩放时 alpha/beta 为 nullptr（以上均为搜索入口一次性校验；缩放向量的 16 字节对齐与 device 内存判定经候选执行链沿用 aclsparseLtMatmul 执行期校验） |
 | `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | workspace 为 nullptr |
 | `ACL_SPARSE_STATUS_NOT_SUPPORTED` | dtype 不支持（仅支持 FP32/FP16/BF16/INT8） |
 | `ACL_SPARSE_STATUS_EXECUTION_FAILED` | 全部候选执行失败、选中配置的最终回写执行失败，或 aclrt 计时/同步调用失败（失败时 plan/algSelection 恢复进入搜索前状态） |
@@ -351,8 +351,8 @@ int main()
 - **searchIterations 建议**：默认 5，须 > 0，无上限。搜索为阻塞调用，总时延 ≈ 候选数 × searchIterations × 单次 matmul 耗时 + 计时同步开销，建议保持默认值；设置极大值会显著拉长阻塞时间，仅建议在计时噪声异常大的环境下适度增大。
 - **近并列候选选优抖动**：当多个候选的耗时差在计时噪声范围内（近并列）时，不同次搜索可能选中不同配置，属设计预期内（min 统计量 + 不劣化保证的设计覆盖）。实测（5 轮独立进程）轮间选中配置存在抖动，全部轮次选中配置耗时均满足 ≤ 1.10 × 默认配置耗时的不劣化判据。
 - **数据精度**：搜索不改变数值计算路径（候选仅改变 tiling 切分字段，数学语义不变），matD 数值精度与 aclsparseLtMatmul 完全一致。INT8 路径精度口径与 aclsparseLtMatmul 相同，两级分派：α==1 且 β==0 且无 bias/activation 时 EXACT（二进制一致），其余走混合容差 atol=1 / rtol=0 / max_abs_error_limit=65。
-- **指针约束**：workspace / matA（非空时）/ matB / matC / matD 须 16 字节对齐；matB / matC / matD / workspace / streams 不可为 nullptr；matA 为 nullptr 仅在 A-sparse 路径合法（回退 workspace aPruned 区，须已由 aclsparseLtSpMMAPrune 填充），B-sparse 路径须显式传入。
-- **流约束**：仅使用 streams[0]；numStreams > 1 时不报错，仅使用 streams[0]（多流不支持，沿用 aclsparseLtMatmul 既有差异）；streams[0] 可为 nullptr（ACL runtime 默认流）。
+- **指针约束**：workspace / matA（非空时）/ matB / matC / matD 须 16 字节对齐；matB / matC / matD / workspace 不可为 nullptr；streams 可为 nullptr（默认流，numStreams 不参与判定），streams 非 nullptr 时 numStreams 须 > 0；matA 为 nullptr 仅在 A-sparse 路径合法（回退 workspace aPruned 区，须已由 aclsparseLtSpMMAPrune 填充），B-sparse 路径须显式传入。batch 广播语义（batchStride=0 = 该侧跨批广播）与 Matmul 一致——候选执行复用同一执行期校验，见 [matmul/README.md](../matmul/README.md) batch 约束。
+- **流约束**：仅使用 streams[0]；numStreams > 1 时不报错，仅使用 streams[0]（多流不支持，沿用 aclsparseLtMatmul 既有差异）；streams 数组指针可为 nullptr（表示仅默认流，对齐 cuSPARSELt 官方样例用法，此时 numStreams 不参与判定）；streams[0] 可为 nullptr（ACL runtime 默认流）。
 - **阻塞性质与线程模型**：相对 streams[0] 为阻塞调用，搜索期间独占该流与调用线程；单线程 C API 库，本接口不引入线程安全保证。
 - **失败语义**：分层处理——个别候选执行失败跳过并日志留痕（在可用候选中选优）；全部候选失败或终态检查失败时返回 `ACL_SPARSE_STATUS_EXECUTION_FAILED`，plan 与 algSelection 恢复进入搜索前状态，可继续用原配置执行 Matmul；matD 已写入内容不回滚。
 

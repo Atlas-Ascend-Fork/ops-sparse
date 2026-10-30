@@ -323,41 +323,48 @@ inline bool SetAlgAttributes(aclsparseLtConstHandle_t handle,
     return true;
 }
 
+// (b) sparse/pre-side physical assembly: logical (m,k) op view ->
+// descriptor (rows, cols, order, ld) physical layout. Descriptor natural
+// dims: rows/cols take (k,m) when transA is set, otherwise (m,k). The
+// natural ld is rows under COL order and cols under ROW order. A positive
+// ldOverride, when present, is adopted instead (padded, padding zeroed).
+// Compact cases are bit-identical to the old artifacts (zero-regression
+// anchor: (N,ROW)/(T,ROW) ROW fast path returned as-is, and compact (T,COL)
+// COL assembly ≡ the old hA bytes as-is).
+// batch: the input is batch-strided logical (the first m*k elements of each
+// batch are valid). The output advances per batch by batchStride under the
+// (order, ld) physical layout.
 template <typename T>
 inline std::vector<T> PreparePhysicalA(const std::vector<T>& hA,
     int32_t m, int32_t k, bool transA, aclsparseOrder_t order, int64_t& aLd,
-    int32_t num_batches = 1, int64_t batch_stride = 0)
+    int32_t num_batches = 1, int64_t batch_stride = 0, int64_t ldOverride = 0)
 {
+    const int64_t rows = transA ? k : m;
+    const int64_t cols = transA ? m : k;
+    const int64_t naturalLd = (order == ACL_SPARSE_ORDER_COL) ? rows : cols;
+    const int64_t effLd = (ldOverride > 0) ? ldOverride : naturalLd;
+    aLd = effLd;
     if (!transA) {
-        // For NON_TRANSPOSE, the prune kernel always reads the
-        // matrix as row-major (m, k) with stride ld, regardless of order.
-        // The order field only selects the pruning direction (alongRow vs
-        // alongCol), not the data layout. Setting aLd=k (the actual row-major
-        // stride) ensures correct data access when m != k. Previously aLd=m
-        // was used for COL order, which only works for square matrices (m==k).
-        aLd = static_cast<int64_t>(k);
-        return hA;
+        return PackBatchStridedPhysical<T>(hA, rows, cols, order, effLd,
+                                           num_batches, batch_stride);
     }
-    aLd = (order == ACL_SPARSE_ORDER_COL)
-        ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
-    if (order == ACL_SPARSE_ORDER_ROW) {
-        if (num_batches <= 1) {
-            return TransposeToRowMajor<T>(hA, m, k, aLd);
-        }
-        // Batch: transpose each batch's (m,k) block separately, preserving
-        // the batch-stride layout (padding between batches stays as zeros).
-        const size_t matSize = static_cast<size_t>(m) * k;
-        const size_t totalElems = static_cast<size_t>(num_batches) * static_cast<size_t>(batch_stride);
-        std::vector<T> result(totalElems, T{0});
-        for (int32_t b = 0; b < num_batches; ++b) {
-            size_t off = static_cast<size_t>(b) * static_cast<size_t>(batch_stride);
-            std::vector<T> batchData(hA.begin() + off, hA.begin() + off + matSize);
-            auto transposed = TransposeToRowMajor<T>(batchData, m, k, aLd);
-            std::copy(transposed.begin(), transposed.end(), result.begin() + off);
-        }
-        return result;
+    // transA: transpose to the descriptor natural compact first (batch by
+    // batch), then assemble per (order, ld).
+    if (num_batches <= 1) {
+        return PackBatchStridedPhysical<T>(TransposeToRowMajor<T>(hA, m, k, cols),
+                                           rows, cols, order, effLd, 1, 0);
     }
-    return hA;
+    const size_t matSize = static_cast<size_t>(m) * k;
+    const size_t totalElems = static_cast<size_t>(num_batches) * static_cast<size_t>(batch_stride);
+    std::vector<T> trans(totalElems, T{0});
+    for (int32_t b = 0; b < num_batches; ++b) {
+        size_t off = static_cast<size_t>(b) * static_cast<size_t>(batch_stride);
+        std::vector<T> batchData(hA.begin() + off, hA.begin() + off + matSize);
+        auto transposed = TransposeToRowMajor<T>(batchData, m, k, cols);
+        std::copy(transposed.begin(), transposed.end(), trans.begin() + off);
+    }
+    return PackBatchStridedPhysical<T>(trans, rows, cols, order, effLd,
+                                       num_batches, batch_stride);
 }
 
 template <typename T>
@@ -459,6 +466,29 @@ inline void GenInt8CDInputCBatch(int32_t m, int32_t n, int32_t numBatches,
     }
 }
 
+// [Int8CD 共享段] B2/A4（golden 数值路径同步）：INT8 × C/D=FP16/BF16 的
+// bias 为 C dtype——kernel 侧「C dtype 加载 + Cast 到 FP32 累加」等效于对
+// bias 值做 FP32→C dtype→FP32 roundtrip。对 host 侧 bias 源做同一
+// roundtrip，使 wrapper 量化上传（值已可精确表示）与 golden 计算消费同一
+// 数值（逐位一致）。I32CD（C=INT32）路 bias 恒 FP32，无需 roundtrip
+//（守卫条件对 CDT=int32_t 自然短路）。ltmatmul PrepareInt8CDCaseInputs 与
+// matmulSearch PrepareInt8CDSearchInputs 共用（codecheck 重复代码项消重，
+// 原两处 13 行重复块上移共享头，语句与求值顺序逐位等价）。
+template <typename CDT, typename VecsT, typename ParamT>
+inline void RoundtripBiasVecToCDtype(const ParamT& p, VecsT& vecs)
+{
+    if (p.biasEnabled && !vecs.biasVec.empty() &&
+        (std::is_same_v<CDT, uint16_t> || std::is_same_v<CDT, bf16_bits_t>)) {
+        for (float& v : vecs.biasVec) {
+            if constexpr (std::is_same_v<CDT, uint16_t>) {
+                v = Fp16BitsToFp32(Fp32ToFp16Bits(v));
+            } else {
+                v = Bf16BitsToFp32(Fp32ToBf16Bits(v));
+            }
+        }
+    }
+}
+
 // [Int8CD 共享段] golden 三重循环核心：acc = Σ A_pruned·B（A-sparse）/
 // Σ A·B_pruned（B-sparse；int32 精确累加）→ D[i,j] = α[i]·acc + β[i]·C[i,j]
 // （C 经 CDT 提升；α/β 向量或标量由 useVec 分派）——ltmatmul
@@ -466,14 +496,24 @@ inline void GenInt8CDInputCBatch(int32_t m, int32_t n, int32_t numBatches,
 // pruned 传参：A-sparse 传 A_pruned
 // 前 m*k 元素；B-sparse 传 B_pruned 全量（(k,n) 行主序，剪枝已转置完成）。
 // epilogue（bias/act）与输出量化（cast<CDT>）由调用方按各自参数编排。
+// B5（golden 数值路径镜像 kernel）：INT8×INT32 输出 × 标量 alpha ×
+// beta==0 且 alpha 为 int32 域整值时，kernel 走 int32 域缩放（Muls<int32_t>，
+// |sum| > 2^24 亦精确）——golden 以 int64 精确乘法镜像；其余域（非整值
+// alpha / beta!=0 / vec 缩放）保持 float 域（镜像 kernel Cast→Muls 舍入
+// 路径，|sum| <= 2^24 时两域逐位一致——零回归）。
+// 返回类型：CDT==int32_t 时 double（承载 >2^24 的精确中间量供调用方
+// TruncateToOutputInt32FromDouble 直转，不经 float 舍入）；其余 float。
 template <typename CDT>
-inline std::vector<float> ComputeInt8CDGoldenCore(int32_t m, int32_t k, int32_t n,
-    bool isSparseA, bool useVec, float alphaScal, float betaScal,
+using Int8CDGoldenAccT = std::conditional_t<std::is_same_v<CDT, int32_t>, double, float>;
+
+template <typename CDT>
+inline std::vector<Int8CDGoldenAccT<CDT>> ComputeInt8CDGoldenCore(int32_t m, int32_t k,
+    int32_t n, bool isSparseA, bool useVec, float alphaScal, float betaScal,
     const std::vector<float>& alphaVec, const std::vector<float>& betaVec,
     const std::vector<int8_t>& hA, const std::vector<int8_t>& hB,
     const std::vector<int8_t>& pruned, const std::vector<CDT>& hC)
 {
-    std::vector<float> Df(static_cast<size_t>(m) * n);
+    std::vector<Int8CDGoldenAccT<CDT>> Df(static_cast<size_t>(m) * n);
     for (int32_t i = 0; i < m; ++i) {
         const float aV = useVec ? alphaVec[static_cast<size_t>(i)] : alphaScal;
         const float bV = useVec ? betaVec[static_cast<size_t>(i)] : betaScal;
@@ -492,7 +532,20 @@ inline std::vector<float> ComputeInt8CDGoldenCore(int32_t m, int32_t k, int32_t 
             }
             const std::vector<CDT> cOne{hC[static_cast<size_t>(i) * n + j]};
             const float cVal = MatmulToFloat(cOne)[0];
-            Df[static_cast<size_t>(i) * n + j] = aV * static_cast<float>(acc) + bV * cVal;
+            if constexpr (std::is_same_v<Int8CDGoldenAccT<CDT>, double>) {
+                // B5 域内：int64 精确乘法（镜像 kernel Muls<int32_t>）；
+                // 域外：float 域（镜像 kernel Cast→Muls，double 承载不损失）。
+                if (bV == 0.0f && !useVec && SpltAlphaIsIntegralInt32Host(aV)) {
+                    Df[static_cast<size_t>(i) * n + j] =
+                        static_cast<double>(static_cast<int64_t>(aV) * acc);
+                } else {
+                    Df[static_cast<size_t>(i) * n + j] =
+                        aV * static_cast<float>(acc) + bV * cVal;
+                }
+            } else {
+                Df[static_cast<size_t>(i) * n + j] =
+                    aV * static_cast<float>(acc) + bV * cVal;
+            }
         }
     }
     return Df;

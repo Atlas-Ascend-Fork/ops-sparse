@@ -57,7 +57,6 @@ struct MatmulBSparseCtx {
     // C/D 布局（回读尺寸与解包由 runner / test.cpp 消费）
     sparse_test::MatmulLayoutOpts layout;
     size_t cdSpan = 0;
-    size_t bPhysSpan = 0;  // B structured 物理 span（prune 输出 buffer 尺寸上界）
 };
 
 // -----------------------------------------------------------------------------
@@ -88,6 +87,8 @@ inline BSparsePhysicalLayout<InT> ComputeBSparsePhysicalLayout(
 {
     using namespace sparse_test;
     BSparsePhysicalLayout<InT> lay;
+    // dense-A 自然 compact（ROW 快路径）：transA 转置到 (k,m)/(m,k)，
+    // 随后按 (denseOrder, ldDense) 装配。
     lay.hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, ACL_SPARSE_ORDER_ROW, lay.aLd,
         num_batches, batch_stride);
     lay.physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
@@ -99,17 +100,12 @@ inline BSparsePhysicalLayout<InT> ComputeBSparsePhysicalLayout(
             static_cast<int32_t>(lay.physRowsA), static_cast<int32_t>(lay.physColsA),
             opts.denseOrder, lay.aLd, num_batches, batch_stride);
     }
+    // (b) B structured：逻辑 (k,n) → 描述符 (order, ldSparse) 布局
+    //（PreparePhysicalA 内部完成自然 compact + (order, ld) 装配）。
     lay.hB_phys = PreparePhysicalA<InT>(hB, k, n, transB, order, lay.bLdOut,
-        num_batches, batch_stride);
+        num_batches, batch_stride, opts.ldSparse);
     lay.bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
     lay.bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
-    if (opts.ldSparse > 0) {
-        // B structured ld 覆盖（L4：COL + ld>n 的 B 侧真布局）
-        lay.bLdOut = opts.ldSparse;
-        lay.hB_phys = PackBatchStridedPhysical<InT>(lay.hB_phys,
-            static_cast<int32_t>(lay.bPhysRows), static_cast<int32_t>(lay.bPhysCols),
-            order, lay.bLdOut, num_batches, batch_stride);
-    }
     // A dense 物理 span（order 感知：COL 布局下 span = physCols*ld
     // ——元素 (i,j) 位于 i + j*ld，最大偏移 (physCols-1)*ld + physRows-1；恒 ROW
     // 语义会在 COL 时截断 dA（case224 根因：96*112=10752 < 实需 160*112=17920，
@@ -118,7 +114,8 @@ inline BSparsePhysicalLayout<InT> ComputeBSparsePhysicalLayout(
     lay.aPhysSize = (opts.denseOrder == ACL_SPARSE_ORDER_COL)
         ? static_cast<size_t>(lay.physColsA) * static_cast<size_t>(lay.aLd)
         : static_cast<size_t>(lay.physRowsA) * static_cast<size_t>(lay.aLd);
-    // B 物理 span（prune 输入缓冲上界；prune 输出恒紧凑 (k,n) 行主序）
+    // B 物理 span（prune 输入缓冲上界；(b) prune 输出保持 B 描述符
+    // (order, ld) 布局——该 span 亦为输出缓冲上界）
     lay.bPhysSize = (order == ACL_SPARSE_ORDER_COL)
         ? static_cast<size_t>(lay.bPhysCols) * static_cast<size_t>(lay.bLdOut)
         : static_cast<size_t>(lay.bPhysRows) * static_cast<size_t>(lay.bLdOut);
@@ -141,17 +138,13 @@ inline BSparsePhysicalLayout<InT> ComputeASparsePhysicalLayout(
 {
     using namespace sparse_test;
     BSparsePhysicalLayout<InT> lay;
-    // A structured：物理 (m,k)/(k,m)（transA），(order, ldSparse) 布局
+    // (b) A structured: logical (m,k) -> descriptor (order, ldSparse) layout
+    // (PreparePhysicalA internally does the natural compact + (order, ld)
+    // assembly).
     lay.hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, order, lay.aLd,
-        num_batches, batch_stride);
+        num_batches, batch_stride, opts.ldSparse);
     lay.physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
     lay.physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
-    if (opts.ldSparse > 0) {
-        lay.aLd = opts.ldSparse;
-        lay.hA_phys = PackBatchStridedPhysical<InT>(lay.hA_phys,
-            static_cast<int32_t>(lay.physRowsA), static_cast<int32_t>(lay.physColsA),
-            order, lay.aLd, num_batches, batch_stride);
-    }
     // B dense：物理 (k,n)/(n,k)（transB），(denseOrder, ldDense) 布局
     lay.hB_phys = PreparePhysicalB<InT>(hB, k, n, transB,
         num_batches, batch_stride);
@@ -227,7 +220,6 @@ inline void PrepareBSparseChainContext(
     ctx.kn = static_cast<size_t>(k) * n;
     BSparsePhysicalLayout<InT> lay = ComputeBSparsePhysicalLayout<InT>(
         hA, hB, m, k, n, order, transA, transB, num_batches, batch_stride, opts);
-    ctx.bPhysSpan = lay.bPhysSize;
     AllocBSparseChainBuffers<InT, OutT>(ctx, hC, lay, m, n, num_batches, batch_stride,
                                         opts, hCPhysOut);
     ctx.matA = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), lay.physRowsA,
@@ -251,26 +243,25 @@ inline void PrepareBSparseChainContext(
 
 // -----------------------------------------------------------------------------
 // RunBSparsePruneAndTranspose: prune B for B-sparse path.
-//
-// Key insight (verified via prune_kernel.cpp SpltPruneTransRowOrder path):
-// The pruned B from aclsparseLtSpMMAPrune is ALWAYS in (k,n) row layout,
-// regardless of transB. For transB=T, the prune kernel reads the physical
-// (n,k) layout and transposes internally, outputting (k,n). For transB=F,
-// the physical B is already (k,n) and prune keeps it. The matmul internally
-// forces td.transB=0 for B-sparse and reads B as NDExt(k,n), so no host-side
-// transpose is needed — the pruned B is used directly by both matmul and golden.
+// (b) the prune output keeps the B descriptor (order, ld) layout: matmul
+// consumes that layout directly (cube ldB + isColView(transB) transpose
+// flag), while golden consumption goes through the readback unpack into
+// logical (k,n) row-major (CopyPrunedToHost). With transB=T the prune
+// kernel reads physical (n,k) and writes back layout-preserving; with
+// transB=F the physical layout is already (k,n) as-is — neither side needs
+// a host transpose.
 // -----------------------------------------------------------------------------
 template <typename InT>
 inline void RunBSparsePruneAndTranspose(MatmulNpuResult& result,
     aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
     sparse_test::DeviceBuffer& dB, sparse_test::DeviceBuffer& dBPruned,
-    size_t kn, size_t kInElt,
+    size_t kInElt,
     aclsparseLtPruneAlg_t pruneAlg, void*& matBPtr,
     int32_t numBatches = 1, int64_t batchStride = 0)
 {
     using namespace sparse_test;
     aclrtStream stream = 0;
-    const size_t totalElems = BatchTotalElems(kn, numBatches, batchStride);
+    const size_t totalElems = PruneOutCapacityElems(matmulDesc, numBatches, batchStride);
     dBPruned = DeviceBuffer::alloc(totalElems * kInElt);
     // prune 单调用化：描述符携带 numBatches/batchStride，一次调用处理
     // 全 batch（传 batch0 基址；切片循环会使末切片基址越界，禁止切片）。
@@ -282,17 +273,11 @@ inline void RunBSparsePruneAndTranspose(MatmulNpuResult& result,
         result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
         return;
     }
-    // Pruned B is already in (k,n) row layout — used directly by matmul (which
-    // forces td.transB=0 for B-sparse) and by golden (which expects B[k][n]).
     matBPtr = dBPruned.get();
-    // Copy pruned B back to host for golden use (already in k×n layout).
-    result.npuPrunedA.resize(totalElems * kInElt);
-    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), totalElems * kInElt,
-        dBPruned.get(), totalElems * kInElt, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (result.memcpyRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return;
-    }
+    // 回读 + 解包：物理 (order,ld) batch-strided → 逻辑 (k,n) batch-strided
+    //（golden 消费契约不变）。
+    if (!CopyPrunedToHost(result, matmulDesc, dBPruned.get(), totalElems, kInElt,
+                          numBatches, batchStride)) { return; }
 }
 
 // -----------------------------------------------------------------------------
@@ -317,12 +302,38 @@ inline MatmulNpuResult RunMatmulBSparseChainWithTrans(
                                                 result, setup)) { return result; }
     void* matBPtr = nullptr;
     DeviceBuffer dBPruned;
-    // prune 输入/输出缓冲上界 = B 物理 span（≥ kn 恒成立；prune 输出恒
-    // 紧凑 (k,n)，golden 消费前 kn 个元素）
-    RunBSparsePruneAndTranspose<InT>(result, ctx.handle.get(), ctx.matmulDesc->get(),
-        ctx.dB, dBPruned, ctx.bPhysSpan, kInElt, args.pruneAlg, matBPtr,
-        args.numBatches, args.batchStride);
-    if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
+    if (args.layout.directFeed) {
+        // (b) pre-pruned direct feed (B-sparse): CPU golden logical prune of
+        // B (k,n) -> (order, ldSparse) physical scatter fed to matmul
+        // directly (npuPrunedA is left empty so golden takes the CPU prune
+        // path, consuming the same data as the NPU).
+        std::vector<InT> hPrunedLogical;
+        SpMMAPruneGolden<InT>(args.hB, hPrunedLogical, args.k, args.n, 0, 1,
+                              args.opB == ACL_SPARSE_OP_TRANSPOSE,
+                              args.order == ACL_SPARSE_ORDER_ROW,
+                              args.pruneAlg == ACLSPARSELT_PRUNE_SPMMA_TILE
+                                  ? "TILE" : "STRIP");
+        int64_t feedLd = 0;
+        const std::vector<InT> hPrunedPhys = PreparePhysicalA<InT>(
+            hPrunedLogical, args.k, args.n,
+            args.opB == ACL_SPARSE_OP_TRANSPOSE, args.order, feedLd,
+            args.numBatches, args.batchStride, args.layout.ldSparse);
+        dBPruned = DeviceBuffer::copyFrom(hPrunedPhys.data(),
+                                          hPrunedPhys.size() * kInElt);
+        matBPtr = dBPruned.get();
+        // npuPrunedA = CPU logical prune result (batch-strided) — the golden
+        // WithNpuPrune path consumes the same data (the NPU side is fed via
+        // the physical scatter).
+        FeedDirectPrunedToResult(result, hPrunedLogical, args.numBatches,
+                                 args.batchStride);
+    } else {
+        // The prune output keeps the B descriptor (order, ld) layout
+        // (readback unpacks into logical for golden)
+        RunBSparsePruneAndTranspose<InT>(result, ctx.handle.get(), ctx.matmulDesc->get(),
+            ctx.dB, dBPruned, kInElt, args.pruneAlg, matBPtr,
+            args.numBatches, args.batchStride);
+        if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
+    }
     // 回读尺寸 = C/D 物理 span（batch 布局含 stride padding）
     const size_t totalOutElems = BatchTotalElems(ctx.cdSpan, ctx.numBatches, ctx.batchStride);
     ExecMatmulAndCopyResult<OutT>(result, ctx.handle.get(), setup.plan->cptr(),

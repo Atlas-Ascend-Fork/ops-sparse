@@ -498,6 +498,67 @@ TEST_F(MatmulDescriptorInitFixture, MatmulMatDStructured)
 }
 
 // ============================================================================
+// SPARSE_MAT_POINTER 属性（D4）：存储不参与执行（matA/matB 参数优先）。
+// 对齐 cuSPARSELt CUSPARSELT_MATMUL_SPARSE_MAT_POINTER——官方两份样例均在
+// DescriptorInit 后 Set 该属性，本仓补齐枚举与 Set/Get 分支使移植调用序列
+// 不再返回 NOT_SUPPORTED；执行语义不变（不接 matA=null 回退链）。
+// ============================================================================
+
+// ---- SPARSE_MAT_POINTER：默认 nullptr / Set-Get 往返 / 描述符间默认值隔离 ----
+TEST_F(MatmulDescriptorInitFixture, SparseMatPointerRoundTrip)
+{
+    StdMatmulInput in;
+    ASSERT_TRUE(InitStdMatmulInput(in, true));
+
+    // 未 Set 时 Get 得默认值 nullptr。
+    void* gotBefore = reinterpret_cast<void*>(0xdeadbeef);
+    aclsparseLtConstMatmulDescriptor_t mmConst = in.mm.get();
+    EXPECT_EQ(aclsparseLtMatmulDescGetAttribute(in.handle.ptr(), &mmConst,
+                ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER, &gotBefore, sizeof(void*)),
+              ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(gotBefore, nullptr);
+
+    // Set(dA) 成功后 Get 得同一指针（往返一致）。
+    int dummySparseMat = 0;
+    void* sparsePtr = &dummySparseMat;  // 存储语义测试，任意非空指针即可
+    EXPECT_EQ(aclsparseLtMatmulDescSetAttribute(in.handle.ptr(), in.mm.ptr(),
+                ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER, &sparsePtr, sizeof(void*)),
+              ACL_SPARSE_STATUS_SUCCESS);
+    void* gotAfter = nullptr;
+    EXPECT_EQ(aclsparseLtMatmulDescGetAttribute(in.handle.ptr(), &mmConst,
+                ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER, &gotAfter, sizeof(void*)),
+              ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(gotAfter, sparsePtr);
+
+    // 新描述符不受已 Set 描述符影响（默认值隔离）。
+    StdMatmulInput other;
+    ASSERT_TRUE(InitStdMatmulInput(other, true));
+    void* gotOther = reinterpret_cast<void*>(0xdeadbeef);
+    aclsparseLtConstMatmulDescriptor_t mmOtherConst = other.mm.get();
+    EXPECT_EQ(aclsparseLtMatmulDescGetAttribute(other.handle.ptr(), &mmOtherConst,
+                ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER, &gotOther, sizeof(void*)),
+              ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(gotOther, nullptr);
+}
+
+// ---- SPARSE_MAT_POINTER：dataSize 错配 → INVALID_VALUE（仿 BIAS_POINTER 模式）----
+TEST_F(MatmulDescriptorInitFixture, SparseMatPointerSizeMismatch)
+{
+    StdMatmulInput in;
+    ASSERT_TRUE(InitStdMatmulInput(in, true));
+    void* sparsePtr = nullptr;
+    EXPECT_EQ(aclsparseLtMatmulDescSetAttribute(in.handle.ptr(), in.mm.ptr(),
+                ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER, &sparsePtr, sizeof(int)),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    // Get 侧同款 dataSize 校验。
+    aclsparseLtConstMatmulDescriptor_t mmConst = in.mm.get();
+    void* got = nullptr;
+    EXPECT_EQ(aclsparseLtMatmulDescGetAttribute(in.handle.ptr(), &mmConst,
+                ACLSPARSELT_MATMUL_SPARSE_MAT_POINTER, &got, sizeof(int)),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// ============================================================================
 // ALLOC_FAILED 注入（可选）
 // 通过 -DSPARSELT_TEST_INJECT_ALLOC_FAIL 启用；默认不编译以避免全局 operator
 // new 重载副作用。

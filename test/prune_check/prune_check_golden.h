@@ -22,8 +22,9 @@
 //   批量扩展：d_valid = OR(全部 batch 的判定)（PruneCheckGoldenBatch，单 batch
 //   判定逻辑不变）
 //   分组规则：FP32 → group=2, keep=1（1:2）；FP16/BF16/INT8 → group=4, keep=2（2:4）
-//   剪枝方向：alongRow = (trans != isRowOrder)（与 prune golden SpMMAPruneGolden
-//             完全同源）：沿行 = N+ROW / T+COL；沿列 = N+COL / T+ROW
+//   剪枝方向（(b) cuSPARSELt 语义）：分组恒沿 op 视图行（K 维）= 逻辑
+//             (m,k) 的行方向；RowView/ColView 的物理几何差异由 wrapper
+//             装配与 host 扫描几何承载，golden 在逻辑空间恒 alongRow=true
 //
 // 判零语义（位级实现）：
 //   (bits & magMask) != 0，magMask = FP32:0x7fffffff / FP16,BF16:0x7fff / INT8:0xff。
@@ -208,18 +209,20 @@ inline void ForEachPruneGroup(int32_t m, int32_t k, bool alongRow, int32_t group
 // Golden 入口：校验逻辑 (m, k) 行主序矩阵 A 是否满足 2:4（FP32 1:2）剪枝条件。
 //
 // 模板参数 T ∈ {float, uint16_t(FP16 bits), bf16_bits_t, int8_t}。
-// trans / isRowOrder 为稀疏侧 op / order；alongRow = (trans != isRowOrder)。
+// trans / isRowOrder 为稀疏侧 op / order（(b) 语义下仅影响 wrapper 的物理
+// 装配与 host 扫描几何，golden 分组在逻辑空间恒沿行 = op 视图 K 维——
+// RowView/ColView 两几何的分组集合在逻辑空间逐组等价，计数无平局问题）。
 // 返回 0（全部组 nnz ≤ keep）/ 1（存在组 nnz > keep）。
-// 与 kernel 的对应：kernel 在物理行主序 (ld 步长) 上扫描（T+ROW 时物理为转置
-// (k,m)），两种几何在本逻辑空间定义下逐组等价（方向推导同源保证）。
 // -----------------------------------------------------------------------------
 template <typename T>
 int PruneCheckGolden(const std::vector<T>& A, int32_t m, int32_t k,
                      bool trans, bool isRowOrder)
 {
+    (void)trans;
+    (void)isRowOrder;
     const int group = std::is_same_v<T, float> ? 2 : 4;
     const int keep = group / 2;
-    const bool alongRow = (trans != isRowOrder);
+    const bool alongRow = true;  // (b): always along rows in logical space (op-view K dim)
 
     int valid = 0;
     ForEachPruneGroup(m, k, alongRow, group, [&](int32_t r0, int32_t c0,
@@ -240,22 +243,24 @@ int PruneCheckGolden(const std::vector<T>& A, int32_t m, int32_t k,
 // 批量 Golden：d_valid = OR(全部 batch 的判定)。物理批量缓冲按 batchStride
 // 切分（batch b 基址 = b×batchStride 元素），逐 batch 提取逻辑 (m, k) 行主序
 // 矩阵后复用单 batch 判定（位级判零语义不变）。物理布局与 SparseSideSpecOf
-// 一致：仅 T+ROW 为转置 (k, m) 行主序（ld 步长），其余组合物理即逻辑 (m, k)
-// 行主序；ld 为物理行步长。
+// 一致：(b) ColView（!trans+COL / trans+ROW）物理为转置 (k,m) 行主序
+//（ld 步长），RowView 物理即逻辑 (m,k) 行主序。
 // ld padding 语义（与 kernel srcStride 消费点对齐）：
-// 提取仅取数据区 [0, 物理行长)（非转置 j∈[0,k)、转置 i∈[0,m)），padding 区
-// [物理行长, ld) 不进入分组判定 —— padding ld 用例（PruneCheckPaddingLdTest）
-// 以「逻辑 golden == 物理 ld golden」双口径交叉断言固化该语义；垃圾填充由
-// wrapper 的 PrepareSparseSideData 承载（PruneCheckPaddingGarbage），golden
-// 侧无需扩展。
+// 提取仅取数据区 [0, 物理行长)（RowView j∈[0,k)、ColView i∈[0,m)），
+// padding 区 [物理行长, ld) 不进入分组判定 —— padding ld 用例
+//（PruneCheckPaddingLdTest）以「逻辑 golden == 物理 ld golden」双口径交叉
+// 断言固化该语义；垃圾填充由 wrapper 的 PrepareSparseSideData 承载
+//（PruneCheckPaddingGarbage），golden 侧无需扩展。
 // -----------------------------------------------------------------------------
 template <typename T>
 int PruneCheckGoldenBatch(const std::vector<T>& hPhys, int32_t m, int32_t k,
                           bool trans, bool isRowOrder, int32_t numBatches,
                           int64_t batchStride, int64_t ld)
 {
-    // 仅 T+ROW 的物理存储为转置（logical[i][j] = phys[j*ld + i]）。
-    const bool transposeLayout = trans && isRowOrder;
+    // (b) ColView's (trans == isRowOrder) physical is the transposed (k,m)
+    // row-major (logical[i][j] = phys[j*ld + i]); RowView physical is just
+    // logical (m,k) row-major.
+    const bool transposeLayout = (trans == isRowOrder);
     int valid = 0;
     std::vector<T> batch(static_cast<size_t>(m) * static_cast<size_t>(k));
     for (int32_t b = 0; b < numBatches; ++b) {
@@ -413,6 +418,7 @@ std::vector<T> GenWholeMatrixInput(const std::string& pattern, int32_t m, int32_
                                    bool alongRow, float lo, float hi, uint32_t seed,
                                    bool& handled)
 {
+    (void)alongRow;  // (b)：逻辑空间恒沿行，PRUNED_SIM 生成不再依赖该参数
     handled = true;
     if (pattern == "ALL_ZERO") {
         return std::vector<T>(static_cast<size_t>(m) * static_cast<size_t>(k),
@@ -431,10 +437,10 @@ std::vector<T> GenWholeMatrixInput(const std::string& pattern, int32_t m, int32_
     std::vector<T> dense = MatmulGenTestMatrix<T>(m, k, lo, hi, seed);
     std::vector<T> pruned;
     const std::string pruneAlg = (pattern == "PRUNED_SIM_TILE") ? "TILE" : "STRIP";
-    // SpMMAPruneGolden 方向推导与本 golden 同源：alongRow = (trans != isRowOrder)。
-    // 此处以 (trans, isRowOrder) = (alongRow, false) 等价传入（false != alongRow
-    // == alongRow），保证 prune 剪枝方向与 check 校验方向一致。
-    SpMMAPruneGolden<T>(dense, pruned, m, k, 0, 1, alongRow, false, pruneAlg);
+    // (b) prune 方向与 check 同口径：逻辑空间恒沿行——以 (transA, isRowOrder)
+    // = (true, false) 传入使 golden 走 RowView 分支（沿逻辑行剪枝），保证
+    // PRUNED_SIM 产物必过新方向 check（官方 "guaranteed" 性质）。
+    SpMMAPruneGolden<T>(dense, pruned, m, k, 0, 1, true, false, pruneAlg);
     return pruned;
 }
 

@@ -154,6 +154,21 @@ inline void TruncateToOutput(const std::vector<float>& Df, std::vector<T>& D, si
     }
 }
 
+// B5: direct int32 conversion of double intermediates (mirrors the exact
+// output of the kernel's int32-domain scaling — for |value| <= 2^53 double
+// represents integers exactly, so rounding then narrowing loses nothing;
+// the TruncateToOutput<float> template's fromFp32 path for int32 goes
+// through float rounding and is not suitable for exact intermediates
+// > 2^24).
+inline void TruncateToOutputInt32FromDouble(const std::vector<double>& Df,
+                                            std::vector<int32_t>& D, size_t mn)
+{
+    D.resize(mn);
+    for (size_t i = 0; i < mn; ++i) {
+        D[i] = static_cast<int32_t>(std::llround(Df[i]));
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Golden entry: D = alpha * StructuredPrune(A) * B + beta * C
 //
@@ -261,21 +276,31 @@ struct MatmulDtypeTrait<int8_t> {
     static constexpr int32_t kKeepCount = 2;
 };
 
+// B5: integral-value test for alpha in the int32 domain (host side, same
+// formula as the kernel-side SpltAlphaIsIntegralInt32 — range check before
+// the conversion to avoid UB, then exact round-trip comparison).
+inline bool SpltAlphaIsIntegralInt32Host(float alpha)
+{
+    return alpha >= -2147483648.0f && alpha < 2147483648.0f
+        && alpha == static_cast<float>(static_cast<int32_t>(alpha));
+}
+
 // -----------------------------------------------------------------------------
-// MatmulPruneInputA: dtype-aware + direction-aware prune for all matmul dtypes.
-// Extends PruneInputA<T> to support BF16 (group=4) and INT8 (group=4).
+// MatmulPruneInputA: dtype-aware prune for all matmul dtypes (STRIP).
+// Extends PruneInputA<T> to support BF16 (group=4) and INT8 (group=4)。
+// (b) grouping always runs along op-view rows = the logical (m,k) row
+// direction (the ColView STRIP and Row variants are mathematically
+// equivalent — identical group sets), so it goes straight to PruneRowFp32;
+// the TILE path is carried by MatmulPruneInputAWithAlg ->
+// SpMMAPruneGolden's ColView same-view branch for tie-break consistency.
 // -----------------------------------------------------------------------------
 template <typename T>
 inline void MatmulPruneInputA(const std::vector<float>& Af, std::vector<float>& A_pruned,
-                               int32_t m, int32_t k, bool isColOrder)
+                               int32_t m, int32_t k)
 {
     const int32_t groupSize = MatmulDtypeTrait<T>::kGroupSize;
     const int32_t keepCount = MatmulDtypeTrait<T>::kKeepCount;
-    if (isColOrder) {
-        PruneColFp32(Af, A_pruned, m, k, groupSize, keepCount);
-    } else {
-        PruneRowFp32(Af, A_pruned, m, k, groupSize, keepCount);
-    }
+    PruneRowFp32(Af, A_pruned, m, k, groupSize, keepCount);
 }
 
 // -----------------------------------------------------------------------------
@@ -291,19 +316,27 @@ inline void MatmulPruneInputAWithAlg(const std::vector<float>& Af, std::vector<f
     if (pruneAlg == "TILE") {
         // TILE prune: delegate to SpMMAPruneGolden's TILE path.
         // SpMMAPruneGolden works on the storage type T; we convert Af->T, prune, convert back.
+        // Direction semantics: SpMMAPruneGolden's 8th param is isRowOrder
+        // (view derived, NOT alongRow) — alongRow = (transA != isRowOrder)
+        // is derived inside. Passing (transA=false, isRowOrder=!isColOrder)
+        // selects the ColView same-view branch (transpose + Col variant +
+        // transpose back) exactly when isColOrder is true. isColOrder here
+        // carries the caller-derived sparse-side VIEW ((trans == !order),
+        // i.e. ColView=true — see GoldenIsColOrder in ltmatmul_test.cpp), so
+        // N+COL / T+ROW take the same-view TILE branch, matching the kernel's
+        // view dispatch. Same convention as PruneInt8Matrix (INT8 golden).
         std::vector<T> A_storage(Af.size());
         for (size_t i = 0; i < Af.size(); ++i) {
             A_storage[i] = AlgSetAttrDtypeTrait<T>::fromFp32(Af[i]);
         }
         std::vector<T> A_pruned_storage;
-        const bool alongRow = !isColOrder;  // alongRow = !isColOrder for NON_TRANSPOSE
         SpMMAPruneGolden<T>(A_storage, A_pruned_storage, m, k, 0, 1, false, !isColOrder, "TILE");
         A_pruned.resize(A_pruned_storage.size());
         for (size_t i = 0; i < A_pruned_storage.size(); ++i) {
             A_pruned[i] = AlgSetAttrDtypeTrait<T>::toFp32(A_pruned_storage[i]);
         }
     } else {
-        MatmulPruneInputA<T>(Af, A_pruned, m, k, isColOrder);
+        MatmulPruneInputA<T>(Af, A_pruned, m, k);
     }
 }
 

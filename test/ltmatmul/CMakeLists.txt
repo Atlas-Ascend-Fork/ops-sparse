@@ -80,6 +80,31 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_neg.cpp")
         ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_neg.cpp)
 endif()
 
+# D2 BATCH_STRIDE=0 跨批广播手写用例族（BC1-BC8 + INT8 代表组）——同 target 多源。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_broadcast.cpp")
+    target_sources(${_target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_broadcast.cpp)
+endif()
+
+# D5 16B 对齐回归锚点族（三处 DataCopyPad 源 32B->16B 放宽的回归锚点）。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_align16.cpp")
+    target_sources(${_target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test_align16.cpp)
+endif()
+
+# B1 白盒 forged 系（FastPath 混合态回归——D5 决策）——同 target 多源。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_whitebox_b1.cpp")
+    target_sources(${_target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_whitebox_b1.cpp)
+endif()
+
+# PR 检视意见① 白盒回归（fill_splitk_tiling_dims int64 域化——host 纯函数
+# 锻造大 k，断言 kSegLen/validSplitK 不回绕 + k==0 除零防御）——同 target 多源。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_whitebox_splitk.cpp")
+    target_sources(${_target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_whitebox_splitk.cpp)
+endif()
+
 set_target_properties(${_target} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/test/ltmatmul)
 

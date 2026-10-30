@@ -78,7 +78,7 @@ struct VecSearchExceptionCtx : SearchChainCtxBase {
 // INVALID_VALUE）。expectedSearchRet 区分两类拦截位置（Search 入口
 // 对 vec×nullptr 已作前置校验）：
 //   nullptr（X31/X32）→ 入口校验 INVALID_VALUE（与文档返回码声明一致）；
-//   host 指针（X33/X34）→ 入口仅拦 nullptr，32B 对齐/device 判定仍由
+//   host 指针（X33/X34）→ 入口仅拦 nullptr，16B 对齐/device 判定仍由
 //   候选执行链内的 Matmul 执行期校验承载 → 全候选失败聚合
 //   EXECUTION_FAILED。
 inline void ExpectVecPointerRejected(VecSearchExceptionCtx& ctx,
@@ -239,7 +239,7 @@ TEST_F(MatmulSearchExceptionTest, X37SearchIterationsDefaultRoundtrip)
 //      MTE2 按行距跳过行尾 pad；matmul_host / matmul_search_host 两条
 //      执行链）+ 紧凑零 padding 锚点（ldB == n 时布局参数与紧凑形态
 //      逐位相同）；
-//   X42/X43 → validate_bias_params 的 B1（32B 对齐）/ B2（stride >= 0）分支
+//   X42/X43 → validate_bias_params 的 B1（16B 对齐）/ B2（stride >= 0）分支
 //      + 合法域直通（广播 stride=0）。
 // ============================================================================
 
@@ -707,38 +707,40 @@ TEST_F(MatmulSearchExceptionTest, X41DensePackCompactAnchorBigShape)
                                         20260411u, /*withSearch=*/false);
 }
 
-// ---- X42 (Y3/N1+P1+P2)：biasPointer 16B 对齐非 32B（malloc 基址+16）→
-//      INVALID_VALUE（DataCopyPad GM 源硬件要求）；Search 入口候选执行链
-//      拦截 → 全候选失败聚合 EXECUTION_FAILED。恢复合法（32B 对齐 +
-//      stride=0 广播）→ SUCCESS + 数值正确（合法域不误拒 + host 侧拒绝无
-//      设备级联）----
+// ---- X42 (Y3/N1+P1+P2，D5 轮 16B 口径改参)：biasPointer 非 16B 对齐
+//      （malloc 基址 + 4B）→ INVALID_VALUE（对齐校验 16B 口径，对齐
+//      cuSPARSELt 16B 惯例——16B 非 32B 基址实测合法，正向锚点见
+//      ltmatmul_test_align16.cpp；本用例锁定的负向边界为非 16B 域）；
+//      Search 入口候选执行链拦截 → 全候选失败聚合 EXECUTION_FAILED。
+//      恢复合法（16B 对齐 + stride=0 广播）→ SUCCESS + 数值正确
+//      （合法域不误拒 + host 侧拒绝无设备级联）----
 TEST_F(MatmulSearchExceptionTest, X42BiasPointerMisalignRejected)
 {
     LiveReadChainCtx<float> ctx(20260421u);
     sparse_test::DeviceBuffer dBias = sparse_test::DeviceBuffer::alloc(
         static_cast<size_t>(ctx.m) * sizeof(float) + 32);
-    void* misaligned = static_cast<uint8_t*>(dBias.get()) + 16;
+    void* misaligned = static_cast<uint8_t*>(dBias.get()) + 4;
     const uintptr_t baseAddr = reinterpret_cast<uintptr_t>(dBias.get());
     const uintptr_t probeAddr = reinterpret_cast<uintptr_t>(misaligned);
-    ASSERT_TRUE((baseAddr % 32) == 0 && (probeAddr % 16) == 0 && (probeAddr % 32) != 0)
-        << "precondition: bias base 32B-aligned, probe ptr 16B-aligned-not-32B";
+    ASSERT_TRUE((baseAddr % 16) == 0 && (probeAddr % 16) != 0)
+        << "precondition: bias base 16B-aligned, probe ptr NOT 16B-aligned";
     ASSERT_EQ(aclsparseLtMatmulDescSetAttribute(ctx.handle.get(), &ctx.matmulDesc->get(),
         ACLSPARSELT_MATMUL_BIAS_POINTER, &misaligned, sizeof(void*)),
         ACL_SPARSE_STATUS_SUCCESS);
     const float alpha = 2.0f;
     aclsparseStatus_t st = ctx.RunMatmul(&alpha, nullptr);
     const bool n1Ok = (st == ACL_SPARSE_STATUS_INVALID_VALUE);
-    EXPECT_TRUE(n1Ok) << "misaligned biasPointer, ret=" << static_cast<int32_t>(st);
-    Record22DStatusCheck("X42", "biasPointer(16B-not-32B)",
+    EXPECT_TRUE(n1Ok) << "misaligned (not-16B) biasPointer, ret=" << static_cast<int32_t>(st);
+    Record22DStatusCheck("X42", "biasPointer(not-16B)",
         "ret=" + std::to_string(static_cast<int32_t>(st)), "INVALID_VALUE", n1Ok);
     st = ctx.RunSearch(&alpha, nullptr);
     const bool n1SearchOk = (st == ACL_SPARSE_STATUS_EXECUTION_FAILED);
-    EXPECT_TRUE(n1SearchOk) << "misaligned biasPointer Search, ret="
+    EXPECT_TRUE(n1SearchOk) << "misaligned (not-16B) biasPointer Search, ret="
                             << static_cast<int32_t>(st);
-    Record22DStatusCheck("X42", "biasPointer(16B-not-32B)/Search",
+    Record22DStatusCheck("X42", "biasPointer(not-16B)/Search",
         "ret=" + std::to_string(static_cast<int32_t>(st)),
         "EXECUTION_FAILED(all-candidates-rejected)", n1SearchOk);
-    // 恢复 + 正向对照：32B 对齐 + stride=0 广播 → SUCCESS + 数值正确
+    // 恢复 + 正向对照：16B 对齐 + stride=0 广播 → SUCCESS + 数值正确
     const auto biasVec = GenBiasVector(ctx.m, 20260422u);
     ASSERT_EQ(aclrtMemcpy(dBias.get(), static_cast<size_t>(ctx.m) * sizeof(float),
         biasVec.data(), static_cast<size_t>(ctx.m) * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE),
@@ -769,8 +771,8 @@ TEST_F(MatmulSearchExceptionTest, X43BiasStrideNegativeRejected)
     sparse_test::DeviceBuffer dBias = sparse_test::DeviceBuffer::alloc(
         static_cast<size_t>(ctx.m) * sizeof(float));
     void* biasPtr = dBias.get();
-    ASSERT_TRUE((reinterpret_cast<uintptr_t>(biasPtr) % 32) == 0)
-        << "precondition: bias ptr 32B-aligned";
+    ASSERT_TRUE((reinterpret_cast<uintptr_t>(biasPtr) % 16) == 0)
+        << "precondition: bias ptr 16B-aligned";
     ASSERT_EQ(aclsparseLtMatmulDescSetAttribute(ctx.handle.get(), &ctx.matmulDesc->get(),
         ACLSPARSELT_MATMUL_BIAS_POINTER, &biasPtr, sizeof(void*)),
         ACL_SPARSE_STATUS_SUCCESS);
@@ -856,7 +858,7 @@ TEST_F(MatmulSearchExceptionTest, X44LiveReadBiasChunkModeRecomputed)
 
 // ============================================================================
 // 探针收编组（X45~X50）：Z1 workspace 活读复检 / Z2 vec UB 预算 / vec
-// 指针 32B 对齐——临时探针 probe_z1z2（Z1/Z2/vec32B 三组 44 断言
+// 指针对齐——临时探针 probe_z1z2（Z1/Z2/vec 三组 44 断言
 // 全绿）的正式用例化（修复：matmul_host
 // validate_workspace_sufficiency / validate_scaling_ub_budget /
 // validate_vector_scaling_pointers + kernel SpltLoadScalingUB chunk 模式与
@@ -864,7 +866,7 @@ TEST_F(MatmulSearchExceptionTest, X44LiveReadBiasChunkModeRecomputed)
 //   X45/X46 → matmul_host validate_workspace_sufficiency 活读重算分支；
 //   X47 → kernel SpltLoadScalingUB scalingChunkMode tile 级槽位；
 //   X48 → matmul_host validate_scaling_ub_budget two-stage 拒绝分支；
-//   X49/X50 → validate_vector_scaling_pointers 的 alpha/beta 32B 对齐分支。
+//   X49/X50 → validate_vector_scaling_pointers 的 alpha/beta 16B 对齐分支。
 // ============================================================================
 
 // X45 golden：batch 段提取（紧凑 batch 排布第 batchIdx 段）+ 标量 α（β 恒
@@ -1017,11 +1019,13 @@ TEST_F(MatmulSearchExceptionTest, X48TwoStageVecOverBudgetRejected)
         "NOT_SUPPORTED(diagnosable-reject)", rejectOk);
 }
 
-// ---- X49 (vec32B/C1+C2)：alpha / beta 向量指针 16B 对齐非 32B（32B 对齐
-//      基址 + 16B 偏移）→ INVALID_VALUE（DataCopyPad GM 源硬件要求，
-//      validate_vector_scaling_pointers 活读生效；beta 负向时 alpha 用合法
-//      32B 指针隔离单变量）----
-TEST_F(MatmulSearchExceptionTest, X49VecPointerMisalign32BRejected)
+// ---- X49 (vec/C1+C2，D5 轮 16B 口径改参)：alpha / beta 向量指针非 16B
+//      对齐（16B 对齐基址 + 4B 偏移）→ INVALID_VALUE（对齐校验 16B 口径，
+//      对齐 cuSPARSELt 16B 惯例——16B 非 32B 基址实测合法，正向锚点见
+//      ltmatmul_test_align16.cpp；本用例锁定非 16B 域负向边界，
+//      validate_vector_scaling_pointers 活读生效；beta 负向时 alpha 用
+//      合法 16B 指针隔离单变量）----
+TEST_F(MatmulSearchExceptionTest, X49VecPointerMisalignRejected)
 {
     LiveReadChainCtx<float> ctx(20260491u);
     const auto alphaVec = GenScalingVector(ctx.m, 20260492u);
@@ -1036,37 +1040,37 @@ TEST_F(MatmulSearchExceptionTest, X49VecPointerMisalign32BRejected)
     ASSERT_EQ(aclrtMemcpy(dBetaVec.get(), static_cast<size_t>(ctx.m) * sizeof(float),
         betaVec.data(), static_cast<size_t>(ctx.m) * sizeof(float),
         ACL_MEMCPY_HOST_TO_DEVICE), ACL_SUCCESS);
-    // 构造 16B 对齐但非 32B 对齐的指针（32B 对齐基址 + 16B 偏移）
-    const uintptr_t alphaBase = (reinterpret_cast<uintptr_t>(dAlphaVec.get()) + 31u)
-                                & ~static_cast<uintptr_t>(31u);
-    const uintptr_t betaBase = (reinterpret_cast<uintptr_t>(dBetaVec.get()) + 31u)
-                               & ~static_cast<uintptr_t>(31u);
-    const uintptr_t alphaProbe = alphaBase + 16u;
-    const uintptr_t betaProbe = betaBase + 16u;
-    ASSERT_TRUE((alphaProbe % 16) == 0 && (alphaProbe % 32) != 0
-                && (betaProbe % 16) == 0 && (betaProbe % 32) != 0)
-        << "precondition: probe ptrs 16B-aligned-not-32B";
-    // C1：alpha 向量非 32B → INVALID_VALUE
+    // 构造非 16B 对齐的指针（16B 对齐基址 + 4B 偏移）
+    const uintptr_t alphaBase = (reinterpret_cast<uintptr_t>(dAlphaVec.get()) + 15u)
+                                & ~static_cast<uintptr_t>(15u);
+    const uintptr_t betaBase = (reinterpret_cast<uintptr_t>(dBetaVec.get()) + 15u)
+                               & ~static_cast<uintptr_t>(15u);
+    const uintptr_t alphaProbe = alphaBase + 4u;
+    const uintptr_t betaProbe = betaBase + 4u;
+    ASSERT_TRUE((alphaBase % 16) == 0 && (alphaProbe % 16) != 0
+                && (betaBase % 16) == 0 && (betaProbe % 16) != 0)
+        << "precondition: probe ptrs NOT 16B-aligned";
+    // C1：alpha 向量非 16B → INVALID_VALUE
     int enable = 1;
     ASSERT_EQ(aclsparseLtMatmulDescSetAttribute(ctx.handle.get(), &ctx.matmulDesc->get(),
         ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING, &enable, sizeof(int)),
         ACL_SPARSE_STATUS_SUCCESS) << "SetAttribute(ALPHA_VEC=1)";
     aclsparseStatus_t st = ctx.RunMatmul(reinterpret_cast<void*>(alphaProbe), nullptr);
     const bool c1Ok = (st == ACL_SPARSE_STATUS_INVALID_VALUE);
-    EXPECT_TRUE(c1Ok) << "alpha vec 16B-aligned-not-32B, ret="
+    EXPECT_TRUE(c1Ok) << "alpha vec not-16B-aligned, ret="
                       << static_cast<int32_t>(st);
-    Record22DStatusCheck("X49", "alphaVec(16B-not-32B)",
+    Record22DStatusCheck("X49", "alphaVec(not-16B)",
         "ret=" + std::to_string(static_cast<int32_t>(st)), "INVALID_VALUE", c1Ok);
-    // C2：beta 向量非 32B（alpha 用合法 32B 指针）→ INVALID_VALUE
+    // C2：beta 向量非 16B（alpha 用合法 16B 指针）→ INVALID_VALUE
     ASSERT_EQ(aclsparseLtMatmulDescSetAttribute(ctx.handle.get(), &ctx.matmulDesc->get(),
         ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING, &enable, sizeof(int)),
         ACL_SPARSE_STATUS_SUCCESS) << "SetAttribute(BETA_VEC=1)";
     st = ctx.RunMatmul(reinterpret_cast<void*>(alphaBase),
                        reinterpret_cast<void*>(betaProbe));
     const bool c2Ok = (st == ACL_SPARSE_STATUS_INVALID_VALUE);
-    EXPECT_TRUE(c2Ok) << "beta vec 16B-aligned-not-32B, ret="
+    EXPECT_TRUE(c2Ok) << "beta vec not-16B-aligned, ret="
                       << static_cast<int32_t>(st);
-    Record22DStatusCheck("X49", "betaVec(16B-not-32B)",
+    Record22DStatusCheck("X49", "betaVec(not-16B)",
         "ret=" + std::to_string(static_cast<int32_t>(st)), "INVALID_VALUE", c2Ok);
 }
 

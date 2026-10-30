@@ -137,9 +137,11 @@ __aicore__ inline void SpltFusedMatmulCubeTileLoop(
 // SpltFusedMatmulCubeImpl 的 transB 分发：构造 gmB（依据 transB 选择
 // DNExt 或 NDExt）并调用 SpltFusedMatmulCubeTileLoop。
 // 消除重复的 transB 分支代码（4 个分支 -> 2 个 + 辅助函数）。
-// B 的物理行距经 td.ldB 直通布局参数（dense B 描述符 ld 直读；B_pruned
-// 恒紧凑 ldB==n；紧凑场景与旧逻辑维度参数逐位一致——零回归锚点），
-// MTE2 搬运按行距跳过行尾 padding，非紧凑 dense B 无需预处理。
+// B 的物理行距经 td.ldB 直通布局参数（(b) 两侧恒描述符 ld 快照——dense B
+// 描述符 ld 直读；B_pruned 为 prune 的描述符布局输出；紧凑场景与旧逻辑
+// 维度参数逐位一致——零回归锚点），COL 的转置视图翻转由执行期
+// splt_apply_gm_layout 翻转 td.transB 承载；MTE2 搬运按行距跳过行尾
+// padding，非紧凑输入无需预处理。
 template <typename T, typename GmTensorA>
 __aicore__ inline void SpltFusedMatmulCubeDispatchB(
     const AclsparseltTilingData& td, GmTensorA& gmA, GM_ADDR bGm,
@@ -186,8 +188,10 @@ __aicore__ inline void SpltFusedMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     if (totalTiles <= 0) { return; }
 
     // sparseTrans 处理：理由见 SpltMatmulCubeImpl。
-    // A 的物理行距经 td.ldA 直通（A_pruned 恒紧凑 ldA==k 零回归锚点；
-    // dense A 描述符 ld 直读，与 two-stage 路径一致）。
+    // A 的物理行距经 td.ldA 直通（(b) 两侧恒描述符 ld 快照——A_pruned 为
+    // prune 的描述符布局输出；dense A 描述符 ld 直读，与 two-stage 路径
+    // 一致；紧凑场景零回归锚点）。COL 的转置视图翻转由执行期
+    // splt_apply_gm_layout 翻转 td.sparseTrans 承载。
     // DNExt/NDExt 产生不同类型，因此 A 与 B 均需在调用点分支。
     const L1BufferConfig l1cfg = InitL1DoubleBuffer<T>(baseM, baseN, td.kL1Size);
     SetMMLayoutTransform(true);
@@ -869,14 +873,42 @@ __aicore__ inline void SpltFusedEpilogueRunTile(
 {
     constexpr bool fastPathEligible = std::is_same_v<AccType, float>
         || std::is_same_v<OutType, int8_t> || std::is_same_v<OutType, int32_t>;
-    const bool fastPathCond = (cfg.alphaVectorScaling == 0 && cfg.alpha == 1.0f
-                               && cfg.beta == 0.0f
-                               && cfg.biasDevPtr == 0 && cfg.activationType == 0);
+    // B1：共享谓词（与 InitBuffers 的 isFastPath 单一来源同步）。
+    const bool fastPathCond = SpltFastPathCond(cfg.alpha, cfg.beta,
+                                               cfg.alphaVectorScaling,
+                                               cfg.betaVectorScaling,
+                                               cfg.biasDevPtr, cfg.activationType);
+    // B5：int32 域缩放档（仅 INT8 累加 + INT32 输出 + 标量整值 alpha +
+    // 无 beta/bias/act/vec 缩放）——FastPath 与 GeneralPath 之间的独立分支，
+    // 走 FastPath 的缓冲布局（accBuf + OutputInt32Direct，免 dFp32Buf，
+    // 见 InitBuffers 注释）。if constexpr 守卫防止 float/int8-out 实例化。
+    constexpr bool int32ScaledEligible = std::is_same_v<AccType, int32_t>
+        && std::is_same_v<OutType, int32_t>;
     bool ranFastPath = false;
     if constexpr (fastPathEligible) {
         if (fastPathCond) {
             // 快速路径：alpha=1、beta=0、无 bias、无 activation -> Cast acc -> OutType 并写 GM。
             SpltFusedEpilogueFastPath(ctx);
+            ranFastPath = true;
+        }
+    }
+    if constexpr (int32ScaledEligible) {
+        const bool int32ScaledCond =
+            cfg.alphaVectorScaling == 0 && cfg.betaVectorScaling == 0
+            && cfg.beta == 0.0f && cfg.biasDevPtr == 0 && cfg.activationType == 0
+            && SpltAlphaIsIntegralInt32(cfg.alpha);
+        if (!ranFastPath && int32ScaledCond) {
+            // B5：int32 域缩放——acc 保持 int32，Muls<int32_t> 域内乘整值 alpha
+            // 后经 OutputInt32Direct 直写（|sum| > 2^24 时精确，不经 FP32 舍入）。
+            LocalTensor<int32_t> wideCdUB = (ctx.cd.wideBuf != nullptr)
+                ? ctx.cd.wideBuf->template Get<int32_t>() : LocalTensor<int32_t>{};
+            const int32_t alphaInt = static_cast<int32_t>(cfg.alpha);
+            const int32_t total = static_cast<int32_t>(ctx.curMAlign * ctx.curNAlign);
+            Muls<int32_t>(ctx.accUB, ctx.accUB, alphaInt, total);
+            PipeBarrier<PIPE_V>();
+            SpltFusedEpilogueOutputInt32Direct(ctx.accUB, ctx.dGM, wideCdUB, ctx.cd,
+                                               ctx.mPos, ctx.nPos, ctx.curM, ctx.curN,
+                                               ctx.curNAlign);
             ranFastPath = true;
         }
     }
@@ -891,8 +923,8 @@ __aicore__ inline void SpltFusedEpilogueRunTile(
 // flag 操作完全保持不变。TBufs/TPipe 归调用方（Impl）所有并按引用传入；
 // 其生命周期覆盖整个循环。
 // OutType 为输出 dtype（非 INT8 时等于 T；INT8 时为 int8_t/int32_t）。
-// BiasType：bias dtype（恒 = SpltBiasDType<T>，由顶层 Impl 推导传入——
-// bias 与 C 的 dtype 解耦：C 键于 CType、bias 键于 T）。
+// BiasType：bias dtype（= SpltBiasDType<T, CType>，由顶层 Impl 推导传入——
+// cuSPARSELt 规则：bias = C dtype，INT8 × 32I 域例外为 FP32）。
 // 配置经 SpltFusedEpilogueCfg 打包；
 // FastPath/GeneralPath 分派段见 SpltFusedEpilogueRunTile。
 template <typename AccType, typename OutType, typename CType = OutType, typename BiasType = float>
@@ -982,9 +1014,11 @@ __aicore__ inline void SpltFusedEpilogueInitBuffers(
     uint64_t biasDevPtr, int32_t biasChunkMode, int32_t activationType)
 {
     using AccType = typename SpltL0CTypeTrait<T>::type;
-    // FastPath 条件——有 bias 或 activation 时走 GeneralPath
-    const bool isFastPath = (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f
-                             && biasDevPtr == 0 && activationType == 0);
+    // FastPath 条件——B1：共享谓词 SpltFastPathCond（与 RunTile 的
+    // fastPathCond 单一来源强制同步，根除"改判后 Get 未分配 TBuf"漂移）。
+    const bool isFastPath = SpltFastPathCond(alpha, beta, alphaVectorScaling,
+                                             betaVectorScaling, biasDevPtr,
+                                             activationType);
     pipe.InitBuffer(accBuf, static_cast<uint32_t>(maxMAlign * maxNAlign * sizeof(AccType)));
     if (!isFastPath) {
         pipe.InitBuffer(dFp32Buf, static_cast<uint32_t>(maxMAlign * maxNAlign * sizeof(float)));
@@ -992,6 +1026,13 @@ __aicore__ inline void SpltFusedEpilogueInitBuffers(
     if (isFastPath && !std::is_same_v<AccType, float>) {
         pipe.InitBuffer(dFp32Buf, static_cast<uint32_t>(maxMAlign * maxNAlign * sizeof(float)));
     }
+    // B5 注：RunTile 的 int32 域缩放分支（INT8 累加 × INT32 输出 × 标量整值
+    // alpha × 无 beta/bias/act/vec 缩放，条件式见 SpltFusedEpilogueRunTile
+    // 的 int32ScaledCond——与 isFastPath 仅 alpha 维度放宽）同样免分配
+    // dFp32Buf：该分支走 FastPath 的缓冲布局（accBuf 上的 Muls<int32_t> +
+    // OutputInt32Direct 直写，无 FP32 中间量），不 Get dFp32Buf——isFastPath
+    // 本身不因该分支改变（alpha≠1 时 isFastPath=false 但 dFp32Buf 分配仅
+    // 为 GeneralPath 兜底，多分配不影响正确性）。
     // 移除 BF16 快速路径的 dFp32Buf 分配：SpltCastFp32ToBf16Vec
     // （BF16 时在 SpltFusedEpilogueOutputCast 中调用）不使用 dFp32Buf。
     if constexpr (!std::is_same_v<OutType, float>) {
@@ -1036,19 +1077,20 @@ __aicore__ inline void SpltFusedEpilogueInitBuffers(
 // 为 SpltFusedEpilogueBatchLoop 设置逐 batch 的 GM 指针。
 // 将 c/d/bias GM 按 batch stride 偏移；biasChunkMode==0 时重载完整 bias。
 // CType：C 矩阵实际 dtype（batchStrideC 以 CType 元素为单位推进——
-// kernel 既有类型化指针偏移语义自动正确）。bias 恒键于 T（INT8 A/B 恒
-// FP32 bias，NVIDIA 规则）。
+// kernel 既有类型化指针偏移语义自动正确）。bias 键于 (T, CType)
+//（cuSPARSELt：bias = C dtype，INT8 × 32I 域例外为 FP32——INT8 ×
+// C/D=FP16/BF16 的 bias 为 FP16/BF16）。
 // C/D/bias 的 batch 基址段经 SpltOffsetBatchCdBiasGM
 // 共享（非融合侧 SpltEpilogueOffsetBatchGM 同款）。
 template <typename T, typename CType, typename OutType>
 __aicore__ inline void SpltFusedEpilogueOffsetBatchGM(
     const AclsparseltTilingData& td,
     GlobalTensor<CType>& cGM, GlobalTensor<OutType>& dGM,
-    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    GlobalTensor<SpltBiasDType<T, CType>>& biasVecGM,
     LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
     GM_ADDR cGm, GM_ADDR dGm, int32_t b, int32_t m)
 {
-    using BiasType = SpltBiasDType<T>;
+    using BiasType = SpltBiasDType<T, CType>;
     // [附注1] C/D 长度按物理 span（SpltCdSpanElems）——ld>min / COL 时逻辑
     // m*n 小于实际物理跨度；C/D 同 order（描述符层一致性）。
     SpltOffsetBatchCdBiasGM<CType, OutType, BiasType>(td, cGM, dGM, biasVecGM,
@@ -1069,7 +1111,7 @@ __aicore__ inline void SpltFusedEpilogueBatchLoop(
     const AclsparseltTilingData& td,
     const SpltCdCtx& cd,
     GlobalTensor<CType>& cGM, GlobalTensor<OutType>& dGM,
-    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    GlobalTensor<SpltBiasDType<T, CType>>& biasVecGM,
     LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
     TBuf<TPosition::VECCALC>& accBuf, TBuf<TPosition::VECCALC>& dFp32Buf,
     TBuf<TPosition::VECCALC>& dTBuf, TBuf<TPosition::VECCALC>& cTBuf,
@@ -1097,8 +1139,8 @@ __aicore__ inline void SpltFusedEpilogueBatchLoop(
     const int64_t totalTiles = static_cast<int64_t>(mTiles) * static_cast<int64_t>(nTiles);
     // cfg 按 Modifiable 引用传递：下游 ApplyAlpha/BetaC/ApplyBias/
     // ApplyActivation 以非 const LocalTensor/GlobalTensor 引用接收句柄。
-    SpltFusedEpilogueCfg<SpltBiasDType<T>> cfg =
-        splt_make_fused_epilogue_cfg<SpltBiasDType<T>>(
+    SpltFusedEpilogueCfg<SpltBiasDType<T, CType>> cfg =
+        splt_make_fused_epilogue_cfg<SpltBiasDType<T, CType>>(
             td, alphaVecUB, betaVecUB, alphaVecGM, betaVecGM, biasVecUB, maskUB, biasVecGM);
 
     for (int32_t b = 0; b < numBatches; ++b) {
@@ -1109,7 +1151,7 @@ __aicore__ inline void SpltFusedEpilogueBatchLoop(
         // 预释放 SetFlag 由 SpltFusedEpilogueTileLoop 在首个 myTile 前按需
         // 预发，见该函数内注释。
         if (static_cast<int64_t>(rawBlockId) >= totalTiles) { continue; }
-        SpltFusedEpilogueTileLoop<AccType, OutType, CType, SpltBiasDType<T>>(td, cd,
+        SpltFusedEpilogueTileLoop<AccType, OutType, CType, SpltBiasDType<T, CType>>(td, cd,
                                      rawBlockId, blockNum, subBlockIdx,
                                      aivWaitFlag, aivNotifyFlag,
                                      nTiles, totalTiles, cGM, dGM,
@@ -1174,7 +1216,7 @@ template <typename T, typename CType = T, typename OutType = T>
 __aicore__ inline void SpltFusedEpilogueImpl(GM_ADDR cGm, GM_ADDR dGm, GM_ADDR tilingGm)
 {
     using AccType = typename SpltL0CTypeTrait<T>::type;
-    using BiasType = SpltBiasDType<T>;
+    using BiasType = SpltBiasDType<T, CType>;  // bias dtype = C dtype（INT8 × 32I 域例外 FP32）
     const AclsparseltTilingData td = splt_load_tiling(tilingGm);
     const int32_t m = td.m;
     const int32_t baseM = td.baseM;

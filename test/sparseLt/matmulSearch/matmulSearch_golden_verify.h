@@ -228,62 +228,6 @@ inline void ComputeSearchGoldenInt8Int8(const MatmulSearchParam& p,
     }
 }
 
-// ----------------------------------------------------------------------------
-// H 组超集组合（INT8 A/B × C=D=CDT ∈ {INT32, FP16, BF16}）：独立链 + 专用 golden。
-// golden：acc = Σ A_pruned[i,k]*B[k,j]（int32 精确，共享层 ComputeInt8CDGoldenCore）；
-// ref = α*acc + β*Cf（FP 域，Cf 由 CDT 提升）；D = cast<CDT>(ref)。C 数据为
-// 离散小整数域（[-5,5]）经 CDT 存储（FP16/BF16 精确可表）。
-// batch 分支：per-batch 切片（hA/hB/hC/npuPrunedA 按 batchStride 切段，
-// bias 按 biasStride>0 逐 batch 独立偏移切片），输出 packed 拼接
-// （numBatches * m*n）——与 ComputeSearchGoldenFloat 的 batch 分支同范式。
-// 验证口径：C=D=INT32 → MERE atol=1/rtol=0/lim=65（β*C 半整数经 kernel
-// round-half-away-from-zero 舍入，±0.5 差由 atol 吸收——C4 先例口径）；
-// C=D=FP16/BF16 → 按 D dtype 混合容差（FP 域无舍入问题）。
-// ----------------------------------------------------------------------------
-template <typename CDT>
-inline void ComputeSearchGoldenInt8CD(const MatmulSearchParam& p,
-    const MatmulNpuResult& npu, const std::vector<int8_t>& hA,
-    const std::vector<int8_t>& hB, const std::vector<CDT>& hC,
-    const SearchVecs& vecs, std::vector<CDT>& hGoldenD)
-{
-    const size_t mk = static_cast<size_t>(p.m) * p.k;
-    const size_t kn = static_cast<size_t>(p.k) * p.n;
-    const size_t mn = static_cast<size_t>(p.m) * p.n;
-    const bool useVec = p.alpha_vector_scaling || p.beta_vector_scaling;
-    const int32_t actType = GoldenActType(p.activationType);
-    if (!p.hasBatch()) {
-        const std::vector<int8_t> pruned = ExtractInt8CDPruned(npu, p.isSparseA(), mk);
-        std::vector<float> Df = ComputeInt8CDGoldenCore<CDT>(p.m, p.k, p.n, p.isSparseA(),
-            useVec, GoldenAlphaOf(p), GoldenBetaOf(p), vecs.alphaVec, vecs.betaVec,
-            hA, hB, pruned, hC);
-        ApplyEpilogueFp32(Df, vecs.biasVec, actType,
-                          p.reluUpperBound, p.reluThreshold, p.geluScaling, p.m, p.n);
-        TruncateToOutput<CDT>(Df, hGoldenD, mn);
-        return;
-    }
-    // batch：per-batch 切片（stride padding 丢弃），输出 packed 拼接
-    const int64_t bs = p.batchStride;
-    const size_t prunedSize = p.isSparseA() ? mk : kn;
-    hGoldenD.resize(static_cast<size_t>(p.numBatches) * mn);
-    for (int32_t b = 0; b < p.numBatches; ++b) {
-        const size_t off = static_cast<size_t>(b) * static_cast<size_t>(bs);
-        const std::vector<int8_t> Ab(hA.begin() + off, hA.begin() + off + mk);
-        const std::vector<int8_t> Bb(hB.begin() + off, hB.begin() + off + kn);
-        const std::vector<CDT> Cb(hC.begin() + off, hC.begin() + off + mn);
-        const std::vector<int8_t> pruned = ExtractPrunedBatch<int8_t>(
-            npu, prunedSize, static_cast<size_t>(b), bs);
-        const std::vector<float> biasB = BiasSliceOfBatch(p, vecs, b);
-        std::vector<float> Df = ComputeInt8CDGoldenCore<CDT>(p.m, p.k, p.n, p.isSparseA(),
-            useVec, GoldenAlphaOf(p), GoldenBetaOf(p), vecs.alphaVec, vecs.betaVec,
-            Ab, Bb, pruned, Cb);
-        ApplyEpilogueFp32(Df, biasB, actType,
-                          p.reluUpperBound, p.reluThreshold, p.geluScaling, p.m, p.n);
-        std::vector<CDT> Db;
-        TruncateToOutput<CDT>(Df, Db, mn);
-        std::copy(Db.begin(), Db.end(), hGoldenD.begin() + static_cast<size_t>(b) * mn);
-    }
-}
-
 // ============================================================================
 // 数值验证（口径表硬断言 + 记录落盘；交叉核对统计仅记录）
 // ============================================================================
@@ -548,6 +492,20 @@ inline void ObserveTimingRatio(const MatmulSearchParam& p,
     AppendSearchRecord(rec);
 }
 
+
+// (b) A_pruned 回退区容量（元素）——与库内 splt_apruned_span_elems 同口径：
+// A-sparse 取稀疏侧描述符物理跨度（rows/cols 为 transA ? (k,m) : (m,k)，
+// ld 取 ld_sparse 覆盖或自然紧凑值），非 A-sparse 维持 m*k。
+inline int64_t SearchAprunedSpanElems(const MatmulSearchParam& p)
+{
+    if (!p.isSparseA()) { return static_cast<int64_t>(p.m) * p.k; }
+    const int64_t rows = p.isTransA() ? p.k : p.m;
+    const int64_t cols = p.isTransA() ? p.m : p.k;
+    const int64_t ld = (p.ldSparse > 0) ? p.ldSparse
+        : ((p.isColOrder()) ? rows : cols);
+    return p.isColOrder() ? cols * ld : rows * ld;
+}
+
 template <typename OutT>
 inline void AssertSearchPostconditions(const MatmulSearchParam& p,
     const MatmulSearchNpuResult<OutT>& result, int32_t inDtypeCode,
@@ -567,14 +525,15 @@ inline void AssertSearchPostconditions(const MatmulSearchParam& p,
     const CandidateVerdict cand = AssertCandidateLegal(
         result.selCfg, result.selSplitK, result.selSplitKMode,
         p.k, result.maxCfgId, result.wsPre,
-        p.m, p.n, p.k, inDtypeCode, p.numBatches, p.isDefaultPreset());
+        p.m, p.n, p.k, inDtypeCode, p.numBatches, p.isDefaultPreset(),
+        SearchAprunedSpanElems(p));
     EXPECT_TRUE(cand.AllOk()) << caseId << ": candidate illegal: " << cand.Brief();
     RecordCandidateVerdict(cand, result.maxCfgId, caseId);
     // 5. plan 一致性：wsPost == 白盒重算 且 <= wsPre（方案 A 单调性）
     ASSERT_EQ(result.wsPostRet, ACL_SPARSE_STATUS_SUCCESS);
     const PlanConsistencyVerdict pc = AssertPlanConsistency(
         result.wsPre, result.wsPost, p.m, p.n, p.k, cand.effSplitK,
-        inDtypeCode, p.numBatches);
+        inDtypeCode, p.numBatches, SearchAprunedSpanElems(p));
     EXPECT_TRUE(pc.AllOk()) << caseId << ": plan ws mismatch: " << pc.Brief();
     RecordPlanConsistency(pc, caseId);
     // 6. 搜索后再执行（plan 生效性；计时类末次测量输出兼作）
@@ -618,5 +577,11 @@ inline std::vector<T> ExtractSearchOutputPacked(const std::vector<T>& npuOut,
 }
 
 }  // namespace matmulsearch_test
+
+// Int8CD 专项 golden 函数族（H 组超集组合链专用）拆出为独立头
+//（codecheck 超大头文件项：本文件 NBNC 501 > 500）——函数体语句逐位不变，
+// 依赖本文件前置定义（ExtractPrunedBatch / BiasSliceOfBatch），故在文件
+// 末尾 include（同 matmulSearch_npu_wrapper_int8cd.h 惯例，不单独 include）。
+#include "matmulSearch_golden_verify_int8cd.h"
 
 #endif  // TEST_SPARSELT_MATMULSEARCH_GOLDEN_VERIFY_H_

@@ -76,6 +76,8 @@ struct MatmulParam : public SparseTestParamBase {
 
     // ----- ld/order 布局列（默认 0/row = 既有紧凑行为）-----
     int64_t ldSparse = 0;                  // structured 侧 ld（A-sparse 的 A / B-sparse 的 B）
+    int32_t directFeed = 0;                // 1=预剪直喂（稀疏侧不经 prune，CPU 剪枝结果按
+                                           // (order, ldSparse) 散布直接喂 matmul）
     int64_t ldDense = 0;                   // dense 侧 ld（A-sparse 的 B / B-sparse 的 A）
     std::string denseOrder;                // dense 侧 order: row/col（空 = row）
     std::string cdOrder;                   // C/D order: row/col（空 = row）
@@ -177,6 +179,7 @@ struct MatmulParam : public SparseTestParamBase {
         fillEpilogueFields(row);
         // 布局列（缺列/0/空 = 既有紧凑默认，向后兼容）
         ldSparse        = static_cast<int64_t>(parseInt(row, "ld_sparse"));
+        directFeed      = parseInt(row, "direct_feed");
         ldDense         = static_cast<int64_t>(parseInt(row, "ld_dense"));
         denseOrder      = parseString(row, "dense_order");
         cdOrder         = parseString(row, "cd_order");

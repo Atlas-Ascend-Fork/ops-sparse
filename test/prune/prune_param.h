@@ -57,7 +57,9 @@ struct PruneParam : public SparseTestParamBase {
     std::string level;          // L0 | L1 | L2
     int32_t num_batches = 1;    // batch 用例（CSV 扩列；缺省 0 → 1 向后兼容）
     int64_t batch_stride = 0;   // 元素单位；缺省 0（nb=1 时无效）
-    int64_t ld = 0;             // structured 侧 ld（0 = 紧凑；>min = padded 输入）
+    int64_t ld = 0;             // structured 侧 ld（0 = 紧凑；>物理行长 = padded，
+                                 // (b) 下输入输出同布局保持）
+    int32_t in_place = 0;       // 1 = d_in == d_out（(b) 全组合支持的正向矩阵）
 
     bool isFp16() const { return dtype == "float16"; }
     bool isBf16() const { return dtype == "bfloat16"; }
@@ -87,6 +89,7 @@ struct PruneParam : public SparseTestParamBase {
         if (num_batches <= 0) { num_batches = 1; }       // 缺列/0 → 1（向后兼容）
         batch_stride    = static_cast<int64_t>(parseInt(row, "batch_stride"));
         ld              = static_cast<int64_t>(parseInt(row, "ld"));
+        in_place        = parseInt(row, "in_place");
     }
 
     bool hasBatch() const { return num_batches > 1; }

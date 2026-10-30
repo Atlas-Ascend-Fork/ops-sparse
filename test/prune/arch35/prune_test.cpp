@@ -118,29 +118,13 @@ inline void ReportPrunePerf(const PruneParam& p,
 // B-sparse: B is (m,k) = (logical k, logical n)). p.op is opA (A-sparse) or
 // opB (B-sparse). The prune golden formula is symmetric in (m, k, trans, order),
 // so the same SpMMAPruneGolden call covers both sides.
-// batch 用例输出验证（自 RunOneCase 步骤 6 的 batch 分支拆出，控制函数
-// NBNC——codecheck 超大函数整改）：NPU 单次全量输出（nb×stride 布局）逐
-// batch 切片与单 batch golden 参考逐位一致（batch 正向基线——验证输出
-// batch 布局推进；相同输入铺设下，写漏/写错 batch 位置即与参考不一致）。
-template <typename T>
-void VerifyPruneBatchSlices(const PruneParam& p, const std::vector<T>& hNpuPruned,
-                            const std::vector<T>& hGoldenPruned)
-{
-    const int32_t nb = p.num_batches;
-    const int64_t bs = p.batch_stride;
-    for (int32_t b = 0; b < nb; ++b) {
-        const size_t off = static_cast<size_t>(b) * static_cast<size_t>(bs);
-        const size_t span = hGoldenPruned.size();
-        ASSERT_GE(hNpuPruned.size(), off + span)
-            << p.caseId() << " batch " << b << " output region out of range";
-        std::vector<T> npuB(hNpuPruned.begin() + off,
-                            hNpuPruned.begin() + off + span);
-        std::vector<float> npuF = PruneToFloat(npuB);
-        std::vector<float> goldenF = PruneToFloat(hGoldenPruned);
-        VerifyPruneMixedTolerance(npuF, goldenF, NpuDtypeTrait<T>::kAclDtype,
-                                  p.caseId() + "/b" + std::to_string(b));
-    }
-}
+// (b) Comparison (uniform across all batches): the expected physical buffer
+// = the golden logical result scattered back to physical per (order, effLd)
+// (padding/batch gaps == sentinel), compared bit-by-bit with the NPU's
+// fully-read-back physical buffer — data region == golden, padding ==
+// sentinel (the behavioral anchor for "kernel does not write padding", and
+// under in-place the input padding is preserved as-is), and all batch
+// regions consistent batch by batch.
 
 template <typename T>
 void RunOneCase(const PruneParam& p, aclrtStream stream) {
@@ -167,9 +151,11 @@ void RunOneCase(const PruneParam& p, aclrtStream stream) {
         : ACLSPARSELT_PRUNE_SPMMA_STRIP;
     auto npu = p.isSparseA()
         ? PruneNpu<T>(stream, hInput, hNpuPruned, p.m, p.k, p.alg_config_id, p.split_k,
-                       op, order, pruneAlg, p.num_batches, p.batch_stride, p.ld)
+                       op, order, pruneAlg, p.num_batches, p.batch_stride, p.ld,
+                       p.in_place != 0)
         : PruneNpuBSparse<T>(stream, hInput, hNpuPruned, p.m, p.k, p.alg_config_id, p.split_k,
-                             op, order, pruneAlg, p.num_batches, p.batch_stride);
+                             op, order, pruneAlg, p.num_batches, p.batch_stride, p.ld,
+                             p.in_place != 0);
     const auto t3 = std::chrono::steady_clock::now();
 
     // 4. Assert the prune API returned SUCCESS.
@@ -184,23 +170,22 @@ void RunOneCase(const PruneParam& p, aclrtStream stream) {
     double msNpuWall = std::chrono::duration<double, std::milli>(t3 - t2).count();
     ReportPrunePerf(p, msGen, msGolden, msNpuWall, npu);
 
-    // 6. Verification in FP32 domain (last — shared helper).
-    // Prune is deterministic: the NPU pruned matrix should match the CPU
-    // golden pruned matrix exactly (same elements zeroed, same values kept).
-    // padded 输入（ld>min）时 wrapper 回读 padded span 全量；prune 输出恒
-    // 紧凑 (m,k) 行主序——比对取前 mk 个有效元素。
-    if (p.ld > 0 && !p.hasBatch()) {
-        const size_t mk = static_cast<size_t>(p.m) * p.k;
-        ASSERT_GE(hNpuPruned.size(), mk)
-            << p.caseId() << " padded output shorter than compact span";
-        hNpuPruned.resize(mk);
-    }
-    if (p.hasBatch()) {
-        VerifyPruneBatchSlices(p, hNpuPruned, hGoldenPruned);
-        return;
-    }
+    // 6. (b) Verification: the expected physical buffer = the golden logical
+    //    result scattered back to physical per (order, effLd) + sentinel
+    //    padding, compared bit-by-bit with the NPU's full readback (data-region
+    //    correctness + padding preservation + per-segment consistency across
+    //    all batches; under in-place the input padding is preserved).
+    //    Prune is deterministic: the NPU pruned matrix should match the CPU
+    //    golden pruned matrix exactly (same elements zeroed, same values kept).
+    const int64_t effLd = PruneEffLdOf(p.m, p.k, p.isTranspose(), order, p.ld);
+    const std::vector<T> expectedPhys = ScatterLogicalToPhysicalSentinel<T>(
+        hGoldenPruned, p.m, p.k, p.isTranspose(), order, effLd,
+        p.num_batches, p.batch_stride);
+    ASSERT_EQ(hNpuPruned.size(), expectedPhys.size())
+        << p.caseId() << " output buffer size mismatch (npu=" << hNpuPruned.size()
+        << ", expected=" << expectedPhys.size() << ")";
     std::vector<float> npuF = PruneToFloat(hNpuPruned);
-    std::vector<float> goldenF = PruneToFloat(hGoldenPruned);
+    std::vector<float> goldenF = PruneToFloat(expectedPhys);
     VerifyPruneMixedTolerance(npuF, goldenF, NpuDtypeTrait<T>::kAclDtype, p.caseId());
 }
 
@@ -421,12 +406,14 @@ TEST_F(PruneExceptionTest, BatchStrideByteMulOverflowInt64) {
 // 行距 ld 寻址（SpltPruneLoadRowBlock），单 batch 实际跨度 (m-1)*ld+k =
 // 255*256+64 = 65344；修复前 V1 按列主序跨度 (k-1)*ld+m = 63*256+256 =
 // 16384 低估——batchStride=20000（≥16384、%8==0 对齐通过）曾放行，
-// kernel 按 batch 推进时读入下一 batch 区域 + 末批越界。修复后 V1 按
-// kernel 路径推导 span=65344 > 20000 → INVALID_VALUE（校验层修复，
-// kernel 行为不变；不触达 kernel，占位缓冲安全）。
+// V1 batch 跨度低估拒绝（(b) 口径）：(N,COL) 为 ColView（trans 路径），
+// 物理按 (k,m) 行主序 ld 寻址，单 batch 访问跨度 = (k-1)*ld+m =
+// 63*256+256 = 16384；stride=16128 < 16384 → V1 拒绝 INVALID_VALUE
+//（batch 区重叠，kernel 按 batch 推进时读入下一 batch 区域 + 末批越界；
+// 不触达 kernel，占位缓冲安全）。
 // 构造：matA structured (256,64) COL ld=256 FP16（COL 序 ld ≥ rows=256、
 // 16 倍数对齐全过）；四 mat 同设 numBatches=2 穿过一致性校验，仅 matA
-// 注入 batchStride=20000（B/C/D 保持 stride=0 放行）。
+// 注入 batchStride=16128（B/C/D 保持 stride=0 放行）。
 TEST_F(PruneExceptionTest, ColNTBatchSpanUnderestimateRejected) {
     SparseLtHandleGuard handle;
     MatDescrGuard matA;
@@ -446,7 +433,7 @@ TEST_F(PruneExceptionTest, ColNTBatchSpanUnderestimateRejected) {
             ACLSPARSELT_MAT_NUM_BATCHES, &nb, sizeof(int32_t)),
             ACL_SPARSE_STATUS_SUCCESS);
     }
-    const int64_t stride = 20000;  // ≥ 旧 V1 span(16384)、%8==0、< 新 span(65344)
+    const int64_t stride = 16128;  // %8==0、< (b) ColView span(16384)
     ASSERT_EQ(aclsparseLtMatDescSetAttribute(handle.ptr(), matA.ptr(),
         ACLSPARSELT_MAT_BATCH_STRIDE, &stride, sizeof(int64_t)),
         ACL_SPARSE_STATUS_SUCCESS);
@@ -456,13 +443,23 @@ TEST_F(PruneExceptionTest, ColNTBatchSpanUnderestimateRejected) {
     ASSERT_NE(md.get(), nullptr);
     // 占位缓冲（V1 在 resolve_prune_buffers 之前拦截，不触达 kernel）。
     sparse_test::DeviceBuffer dA =
-        sparse_test::DeviceBuffer::alloc(2 * 20000 * sizeof(uint16_t));
+        sparse_test::DeviceBuffer::alloc(2 * 16128 * sizeof(uint16_t));
     sparse_test::DeviceBuffer dOut =
-        sparse_test::DeviceBuffer::alloc(2 * 20000 * sizeof(uint16_t));
+        sparse_test::DeviceBuffer::alloc(2 * 16128 * sizeof(uint16_t));
     auto ret = aclsparseLtSpMMAPrune(
         handle.ptr(), matmulDescCptr(md), dA.get(), dOut.get(),
         ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// PE15（D2 负向锁定）：numBatches>1 且 batchStride<0 → INVALID_VALUE。
+// D2 广播放行（stride==0 = 跨批广播，正向锚点见 CSV 229/230）不得误伤
+// 负值拒绝边界——负 stride 下 prune 逐批 launch 的 batchOff = b*stride*elemSize
+// 为负偏移，必然回走越界，恒非法。构造经 RunBatchLayoutViolationCase（四 mat
+// 同设 nb、仅稀疏 A 注入 stride=-1，穿过 desc init 层），违规由
+// validate_prune_batch 的 stride<0 分支拦截。
+TEST_F(PruneExceptionTest, BatchStrideNegativeRejected) {
+    RunBatchLayoutViolationCase(stream_, 3, -1, 64);
 }
 
 // PE3: null d_in -> expected non-SUCCESS (descriptors no longer bind values,
@@ -672,11 +669,18 @@ TEST_F(PrunePropertyTest, TileStructuralSparsity) {
 }
 
 // =============================================================================
-// prune in-place（d_in == d_out）正/负两向（此前全仓零覆盖）：
-//   N5-1 STRIP ROW 非转置 in-place → SUCCESS 且数值 == out-of-place golden
-//        （README L105/L119 声明的 in-place 支持路径）
-//   N5-2 TRANSPOSE ROW in-place → NOT_SUPPORTED（prune_host.cpp L346-347 显式
-//        拒绝分支——转置路径输出布局与输入重叠不可安全 in-place）
+// prune in-place (d_in == d_out) cases ((b) caliber: supported for all
+// combinations — the output keeps the input layout, each block does
+// read-then-write with overlapping read/write regions, and the host sets no
+// in-place rejection anymore):
+//   N5-1 STRIP x N x ROW in-place -> SUCCESS with values == the
+//        out-of-place golden (the README-declared in-place support path,
+//        RowView anchor)
+//   N5-2 STRIP x T x ROW in-place -> SUCCESS with correct values ((b)
+//        ColView in-place anchor; the former NOT_SUPPORTED rejection branch
+//        was removed together with the transpose write-back mechanism)
+// (For matrix-style coverage of all combinations x compact/padded x
+// STRIP/TILE, see the in_place column cases in the CSV.)
 // =============================================================================
 
 // 共用：STRIP/N-T/ROW 描述符链（128³ FP32）+ dA 数据
@@ -721,13 +725,34 @@ TEST_F(PruneExceptionTest, InPlaceStripRowNumerical) {
     VerifyPruneMixedTolerance(hOut, golden, ACL_FLOAT, "N5-1-inplace-strip-row");
 }
 
-// N5-2：TRANSPOSE × ROW in-place → NOT_SUPPORTED（显式拒绝分支）
-TEST_F(PruneExceptionTest, InPlaceTransposeRowRejected) {
+// N5-2: STRIP x TRANSPOSE x ROW in-place -> SUCCESS + correct values ((b)
+// ColView in-place: the physical (k,m) row-major is read-then-written block
+// by block in place. The input must be the physical layout of the stored
+// matrix M = Lᵀ (transposed upload); after readback it is transposed back
+// to logical (m,k) for comparison with golden — the physical and logical
+// zeroed-position sets align through the transpose mapping.
+TEST_F(PruneExceptionTest, InPlaceTransposeRowNumerical) {
     PruneInPlaceCtx ctx(ACL_SPARSE_OP_TRANSPOSE);
-    const size_t mk = 128 * 128;
-    sparse_test::DeviceBuffer dShared = sparse_test::DeviceBuffer::alloc(mk * sizeof(float));
+    const int32_t m = 128;
+    const int32_t k = 128;
+    const size_t mk = static_cast<size_t>(m) * k;
+    std::vector<float> hLogical(mk, 1.0f);
+    // Physical input: M = Lᵀ in (k,m) row-major (compact ld=m).
+    std::vector<float> hPhys = TransposeToRowMajor<float>(hLogical, m, k, m);
+    sparse_test::DeviceBuffer dShared = sparse_test::DeviceBuffer::copyFrom(
+        hPhys.data(), mk * sizeof(float));
     auto ret = aclsparseLtSpMMAPrune(
         ctx.handle.ptr(), matmulDescCptr(ctx.md), dShared.get(), dShared.get(),
         ACLSPARSELT_PRUNE_SPMMA_STRIP, stream_);
-    EXPECT_EQ(ret, ACL_SPARSE_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
+    ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_SUCCESS);
+    std::vector<float> hOutPhys(mk);
+    ASSERT_EQ(aclrtMemcpy(hOutPhys.data(), mk * sizeof(float), dShared.get(), mk * sizeof(float),
+                          ACL_MEMCPY_DEVICE_TO_HOST), ACL_SUCCESS);
+    // Read back physical M_pruned -> transpose back to logical L_pruned.
+    std::vector<float> hOut = TransposeToRowMajor<float>(hOutPhys, k, m, k);
+    std::vector<float> golden;
+    SpMMAPruneGolden<float>(hLogical, golden, m, k, 0, 1,
+                            /*transA=*/true, /*isRowOrder=*/true, "STRIP");
+    VerifyPruneMixedTolerance(hOut, golden, ACL_FLOAT, "N5-2-inplace-trans-row");
 }

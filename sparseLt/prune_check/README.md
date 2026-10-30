@@ -28,10 +28,10 @@ d_valid = OR_b( PruneCheck_2:4(d_in + b×batchStride) )   # 多 batch（numBatch
 
 | 符号 | 含义 | 维度/类型 |
 |------|------|-----------|
-| d_in | 待校验矩阵（稠密存储，行主序） | m×k（A 稀疏）或 k×n（B 稀疏），FP32/FP16/BF16/INT8 |
+| d_in | 待校验矩阵（稠密存储，按描述符 (order, ld) 物理布局） | m×k（A 稀疏）或 k×n（B 稀疏），FP32/FP16/BF16/INT8 |
 | d_valid | 校验结果（Device 侧 int 标量） | 0 = 满足条件（correct），1 = 不满足（wrong） |
 | numBatches | batch 数量（稀疏侧描述符，默认 1） | ≥ 1 |
-| batchStride | batch 间步长（稀疏侧描述符，元素数） | numBatches>1 时须 > 0 且为 32B/元素字节数的整数倍 |
+| batchStride | batch 间步长（稀疏侧描述符，元素数） | numBatches>1 时须 ≥ 0（0=跨批广播，全批复检 batch 0）；正值须为 16B/元素字节数的整数倍（与 aclsparseLtSpMMAPrune 同口径：FP32 为 4、FP16/BF16 为 8、INT8 为 16 的倍数） |
 
 #### 校验规则
 
@@ -56,18 +56,23 @@ d_valid  = 1，若 ∃ i: nnz(g_i) > keep
 
 **判零语义**：±0（如 `+0.0`/`-0.0`）均按零处理；NaN 与非规格数（subnormal）按非零处理。浮点数据按位视图（幅值掩码屏蔽符号位后判零）实现，与 `x != 0` 的 IEEE 语义逐位等价。
 
-#### 校验方向
+#### 校验方向与物理布局（对齐 cuSPARSELt）
 
-校验方向（分组方向）由稀疏侧矩阵描述符的 order 与 Matmul 描述符的 op 联合决定，与 `aclsparseLtSpMMAPrune` 的剪枝方向推导完全一致：
+2:4 分组校验**恒沿 op(稀疏侧) 的 K（收缩）维度** = op 视图的行方向，与
+`aclsparseLtSpMMAPrune` 的剪枝方向完全一致。order 为**物理内存布局**，
+扫描几何按 (order, ld) 的物理形态推导：
 
-| op（稀疏侧） | order | 校验方向 | 含义 |
-|-----|-------|---------|------|
-| NON_TRANSPOSE | ROW | 沿行方向 | 每组在行内 K 维度上取 g 个连续元素 |
-| NON_TRANSPOSE | COL | 沿列方向 | 每组在同列 M 维度上取 g 个相邻元素 |
-| TRANSPOSE | ROW | 沿列方向 | 同上（op 与 order 共同决定） |
-| TRANSPOSE | COL | 沿行方向 | 同上 |
+| op（稀疏侧） | order | 视图 | 扫描几何（行×列，行距 ld） | 分组方向 |
+|-----|-------|------|--------------------------|---------|
+| NON_TRANSPOSE | ROW | RowView | (m, k)，行内连续分组 | 行内 g 个连续元素 |
+| TRANSPOSE | COL | RowView | (m, k)（≡ (k,m) COL），行内连续分组 | 行内 g 个连续元素 |
+| NON_TRANSPOSE | COL | ColView | (k, m)（≡ (m,k) COL），同列跨行分组 | 同列 g 个相邻元素 |
+| TRANSPOSE | ROW | ColView | (k, m)，同列跨行分组 | 同列 g 个相邻元素 |
 
-> **order 语义说明**：与 prune 一致，order 仅影响校验方向（沿行或沿列），不改变内存访问模式。d_in 一律以行主序物理存储解释，行步长为描述符 ld（元素数）。
+> **order 语义说明**（(b) 口径）：与 prune 一致，order 是物理内存布局——
+> d_in 按稀疏侧描述符 (order, ld) 物理布局解释（COL 为列主序存储）；kernel
+> 扫描视图 = 描述符物理 buffer 的 (rows, cols, ld) 行主序解释，四组合与
+> 物理形态逐位吻合。
 
 ## 接口原型
 
@@ -88,7 +93,7 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseLtConstHandle_t | aclsparseLt 库句柄的 const 指针，Host 内存 |
 | matmulDescr | 输入 | aclsparseLtConstMatmulDescriptor_t* | Matmul 操作描述符，算子从中读取稀疏侧的维度、数据类型、order 与 op，Host 内存 |
-| d_in | 输入 | const void* | 待校验矩阵的 Device 内存指针，行主序存储，须 32 字节对齐，不可为 nullptr，Device 内存 |
+| d_in | 输入 | const void* | 待校验矩阵的 Device 内存指针，按稀疏侧描述符 (order, ld) 物理布局存储，须 16 字节对齐（对齐 cuSPARSELt；d_in 为 DataCopyPad 的 GM 源地址，实测 16B 对齐源可用），不可为 nullptr，Device 内存 |
 | d_valid | 输出 | int* | 校验结果的 Device 内存 int 标量指针（0 满足，1 不满足），不可为 nullptr，Device 内存 |
 | stream | 输入 | aclrtStream | ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流），Host 内存 |
 
@@ -110,13 +115,14 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 - handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
 - matmulDescr 不可为 nullptr，且其绑定的 matA/matB 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **唯一稀疏侧约束**：matA 与 matB 须恰有一个为结构化稀疏描述符（经 `aclsparseLtStructuredDescriptorInit` 创建）；两者均非稀疏或均为稀疏时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **批量约束**：稀疏侧 numBatches 须 ≥ 1（默认 1；经 `aclsparseLtMatDescSetAttribute` 的 `ACLSPARSELT_MAT_NUM_BATCHES` 设置，A/B/C/D 四侧须一致，由 Matmul 描述符初始化校验）。numBatches > 1 时为批量校验（`d_valid` = 全部 batch 判定的 OR），batchStride（`ACLSPARSELT_MAT_BATCH_STRIDE`，元素数）须 > 0 且为 32 字节/元素字节数的整数倍（与 ld 同款对齐：FP32 为 8、FP16/BF16 为 16、INT8 为 32 的倍数），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；全量跨度 `(numBatches−1)×batchStride + (rows−1)×ld + cols` 换算字节后溢出 int64/uintptr 时同样返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。numBatches = 1 时 batchStride 不参与判定。
+- **批量约束**：稀疏侧 numBatches 须 ≥ 1（默认 1；经 `aclsparseLtMatDescSetAttribute` 的 `ACLSPARSELT_MAT_NUM_BATCHES` 设置，A/B/C/D 四侧须一致，由 Matmul 描述符初始化校验）。numBatches > 1 时为批量校验（`d_valid` = 全部 batch 判定的 OR），batchStride（`ACLSPARSELT_MAT_BATCH_STRIDE`，元素数）须 ≥ 0：**0 = 跨批广播（对齐 cuSPARSELt batch_stride=0 语义：全批复检 batch 0，等价单矩阵校验）**；正值须为 16 字节/元素字节数的整数倍（batch 对齐域与 `aclsparseLtSpMMAPrune` 一致——可剪可查：prune 输出保持输入布局，经其按 16B 域放行的 batch 布局本算子必须可复检；FP32 为 4、FP16/BF16 为 8、INT8 为 16 的倍数；逐 batch 源 16B 基址的 DataCopyPad 读取已经实测验证）；负值返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。全量跨度 `(numBatches−1)×batchStride + (rows−1)×ld + cols` 换算字节后溢出 int64/uintptr 时同样返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。numBatches = 1 时 batchStride 不参与判定。
 - 稀疏侧数据类型支持 `ACL_FLOAT`（FP32）/ `ACL_FLOAT16`（FP16）/ `ACL_BF16`（BF16）/ `ACL_INT8`（INT8），其他类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- d_in 须 32 字节对齐（作为 DataCopy 搬运源地址的硬件对齐要求，严于 cuSPARSELt 的 16 字节惯例）且不可为 nullptr，d_valid 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- d_in 须 16 字节对齐（对齐 cuSPARSELt "All pointers must be aligned to 16 bytes"；d_in 为 kernel DataCopyPad 的 GM 源地址，实测 16B 对齐源可用——16B 非 32B 基址的 FP16/INT8 × valid/violating 两态探针全过）且不可为 nullptr，d_valid 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - 扫描维度与 ld 须为 32 字节/元素字节数的整数倍（结构化描述符初始化保证：FP32 为 8、FP16/BF16 为 16、INT8 为 32）；**ld 须不小于物理行长**（沿行校验时为行长维度、沿列校验时为列数）且**须不超过 INT32_MAX（2147483647）**（防止超长 ld 下内部行偏移地址运算溢出，属防御性拦截），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。ld 大于物理行长时 padding 区数据不参与判定。
 - stream 可为 nullptr（表示使用默认流）。
 - **异步执行**：算子内部先在同 stream 上将 d_valid 预清零，再启动校验 kernel；内部不执行 `aclrtSynchronizeStream`，调用方如需读取 d_valid 须自行同步 stream。
-- **内存布局**：d_in 以行主序物理存储解释（详见"校验方向"中的 order 语义说明）。
+- **内存布局**：d_in 按稀疏侧描述符 (order, ld) 物理布局访问（详见"校验
+  方向与物理布局"；COL 为列主序存储，非恒行主序）。
 
 ## 返回值 / 错误码
 
@@ -124,7 +130,7 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 |--------|------|
 | `ACL_SPARSE_STATUS_SUCCESS` | 操作成功 |
 | `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为 nullptr |
-| `ACL_SPARSE_STATUS_INVALID_VALUE` | matmulDescr/matA/matB/d_in/d_valid 为 nullptr、d_in 未 32 字节对齐、维度/ld 非法、批量参数非法（numBatches<1，或 numBatches>1 时 batchStride≤0/非 32B 对齐）、扫描跨度溢出 |
+| `ACL_SPARSE_STATUS_INVALID_VALUE` | matmulDescr/matA/matB/d_in/d_valid 为 nullptr、d_in 未 16 字节对齐、维度/ld 非法、批量参数非法（numBatches<1，或 numBatches>1 时 batchStride<0 / 非 16B 对齐）、扫描跨度溢出 |
 | `ACL_SPARSE_STATUS_NOT_SUPPORTED` | matA/matB 无唯一稀疏侧、数据类型非 FP32/FP16/BF16/INT8 |
 | `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 平台核数/UB 资源不足 |
 | `ACL_SPARSE_STATUS_EXECUTION_FAILED` | d_valid 预清零或 kernel 启动失败 |
