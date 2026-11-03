@@ -291,8 +291,8 @@ struct aclsparseSpMatDescr {
     int64_t valuesBatchStride = 0;
     // COO strided batch 步长（对标 cuSPARSE cusparseCooSetStridedBatch）。
     // batchCount 为全格式共享字段（紧邻上方，由 aclsparseBsrSetStridedBatch /
-    // aclsparseCooSetStridedBatch 共同写入，由 aclsparseSpMatGetStridedBatch
-    // 统一读回）。batchStride 为 COO 单 stride 语义：0 表示广播（batchCount>1
+    // aclsparseCooSetStridedBatch / aclsparseCsrSetStridedBatch 共同写入，由
+    // aclsparseSpMatGetStridedBatch 统一读回）。batchStride 为 COO 单 stride 语义：0 表示广播（batchCount>1
     // 时所有 batch 共享同一组 row/col/values 数组，长度 nnz）；正值 >= nnz 且
     // (batchCount-1)*batchStride+nnz 不溢出 int64；负值非法，由
     // aclsparseCooSetStridedBatch 校验拒绝。默认 0 配合默认 batchCount=1

@@ -6,7 +6,7 @@ spmat_get_strided_batch 算子用于读回稀疏矩阵描述符的 batch 数，�
 
 本算子为**纯 host 访问器**：从**任意格式**（COO / CSR / CSC / SELL / BLOCKED_ELL）稀疏矩阵描述符读回 batchCount，全程**不启动 NPU kernel、不涉及 stream 同步、无 NPU 计算**。接受 const 描述符，非 const 描述符同样支持（隐式转换）。语义与 cuSPARSE 完全对齐，便于 cuSPARSE 用户无缝迁移。
 
-仅返回 batchCount 而不返回 batchStride，与 cuSPARSE 设计一致：stride 签名是格式相关的（COO 为 1 个 `batchStride`，CSR 为 `offsetsBatchStride` + `columnsValuesBatchStride` 2 个，BSR 为 3 个），通用 getter 唯一能跨格式统一暴露的公共量是 batchCount。batch 元数据的写入由各格式的 SetStridedBatch 接口完成：配套算子 [aclsparseCooSetStridedBatch](../coo_set_strided_batch/README.md)（COO）与 `aclsparseBsrSetStridedBatch`（BSR）共用同一 batchCount 字段，本接口统一读回两路写入值。
+仅返回 batchCount 而不返回 batchStride，与 cuSPARSE 设计一致：stride 签名是格式相关的（COO 为 1 个 `batchStride`，CSR 为 `offsetsBatchStride` + `columnsValuesBatchStride` 2 个，BSR 为 3 个），通用 getter 唯一能跨格式统一暴露的公共量是 batchCount。batch 元数据的写入由各格式的 SetStridedBatch 接口完成：配套算子 [aclsparseCooSetStridedBatch](../coo_set_strided_batch/README.md)（COO）、[aclsparseCsrSetStridedBatch](../csr_set_strided_batch/README.md)（CSR）与 `aclsparseBsrSetStridedBatch`（BSR）共用同一 batchCount 字段，本接口统一读回三路写入值。
 
 包含以下接口：
 

@@ -31,6 +31,7 @@
 | [aclsparseSpVecSetValues](#aclsparsespvecsetvalues) | 设置稀疏向量描述符的 values 指针 |
 | [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
+| [aclsparseCsrSetStridedBatch](#aclsparsecsrsetstridedbatch) | 设置CSR描述符的batch数与batch步长 |
 | [aclsparseCreateBsr](#aclsparsecreatebsr) | 创建BSR格式稀疏矩阵 |
 | [aclsparseCreateConstBsr](#aclsparsecreateconstbsr) | 创建只读(const) BSR格式稀疏矩阵 |
 | [aclsparseBsrSetStridedBatch](#aclsparsebsrsetstridedbatch) | 设置BSR描述符的strided-batch属性 |
@@ -567,6 +568,41 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 ---
 
+### aclsparseCsrSetStridedBatch
+
+```c
+aclsparseStatus_t aclsparseCsrSetStridedBatch(
+    aclsparseSpMatDescr_t spMatDescr,
+    int batchCount,
+    int64_t offsetsBatchStride,
+    int64_t columnsValuesBatchStride
+);
+```
+
+**功能**：设置 CSR 稀疏矩阵描述符的批量（strided batch）属性，对标 cuSPARSE `cusparseCsrSetStridedBatch`。将批量矩阵个数与相邻 batch 间 CSR 数组的地址间隔写入描述符，使其可表达 batch 化稀疏矩阵。步长按元素个数计：`offsetsBatchStride` 作用于行偏移数组（长度 `rows + 1`），`columnsValuesBatchStride` 同时作用于列索引数组与值数组（长度均为 `nnz`，写入描述符的 `columnsBatchStride` 与 `valuesBatchStride` 两个字段）。两个步长取 0 均表示广播——所有 batch 共享对应数组（对齐 cuSPARSE 官方样例与本仓 `aclsparseBsrSetStridedBatch` / `aclsparseCooSetStridedBatch` 的 0=广播约定）。纯 host 操作，不启动 NPU kernel。
+
+**参数说明**：
+
+- `spMatDescr`（IN/OUT）：HOST，CSR 稀疏矩阵描述符（须由 `aclsparseCreateCsr` 创建，其 `batchCount` / `offsetsBatchStride` / `columnsBatchStride` / `valuesBatchStride` 字段被写入）。
+- `batchCount`（IN）：HOST，batch 数，范围为 1..65535。
+- `offsetsBatchStride`（IN）：HOST，相邻 batch 行偏移数组的元素偏移；合法取值为 0（广播）或 >= rows + 1，负值非法。
+- `columnsValuesBatchStride`（IN）：HOST，相邻 batch 列索引/值数组的元素偏移；合法取值为 0（广播）或 >= nnz，负值非法。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法（错误类型句柄）、`batchCount` 超出 [1, 65535]、任一步长非法（负值或 0 < 步长 < 对应数组长度）、地址范围 (batchCount-1)*步长+数组长度 溢出 int64，或 rows + 1 溢出 int64（rows = INT64_MAX，延迟绑定下可创建）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符不是 CSR 格式
+
+**约束说明**：
+
+- 新建描述符未调用本接口时，默认 `batchCount = 1`、两个步长为 0（未启用批量语义的单矩阵）
+- 校验失败时不改写描述符的既有批量属性
+- batch 元数据实际变化时失效描述符既有预处理缓存（sddmm 等），需重新执行对应 Preprocess
+- **当前版本计算接口尚不消费批量属性**：SpMM/SpMV 等按单矩阵布局计算、GetBufferSize 不按 batch 膨胀；批量计算（如 cuSPARSE 的 `C_i = A_i · B_i` 批量 SpMM / SDDMM 模式）待消费算子交付
+
+---
+
 ### aclsparseCreateBsr
 
 ```c
@@ -1040,7 +1076,7 @@ aclsparseStatus_t aclsparseSpMatGetStridedBatch(
 );
 ```
 
-**功能**：获取稀疏矩阵描述符的 batch 数（对标 cuSPARSE `cusparseSpMatGetStridedBatch`）。适用于任意格式（COO/CSR/CSC 等）的稀疏矩阵描述符；接受 const 描述符，非 const 描述符同样支持。未调用过 `aclsparseCooSetStridedBatch` 的新建描述符返回 `1`（未 batch 化）。纯 host 描述符操作，不启动 NPU kernel。
+**功能**：获取稀疏矩阵描述符的 batch 数（对标 cuSPARSE `cusparseSpMatGetStridedBatch`）。适用于任意格式（COO/CSR/CSC 等）的稀疏矩阵描述符；接受 const 描述符，非 const 描述符同样支持。未调用过 `aclsparseCooSetStridedBatch` / `aclsparseBsrSetStridedBatch` / `aclsparseCsrSetStridedBatch` 的新建描述符返回 `1`（未 batch 化）。纯 host 描述符操作，不启动 NPU kernel。
 
 **参数说明**：
 

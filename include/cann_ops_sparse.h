@@ -604,6 +604,39 @@ aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr, int64_t ro
                                          int64_t valuesStride);
 aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr, int64_t* rowOffsetsStride,
                                          int64_t* colIndStride, int64_t* valuesStride);
+
+/**
+ * @brief 设置 CSR 稀疏矩阵描述符的批量（strided batch）属性。
+ *
+ * 对标 cuSPARSE cusparseCsrSetStridedBatch。将 batchCount 与两个 batch 步长写入
+ * CSR 描述符，使其可表达 batch 化稀疏矩阵；步长按元素个数计：
+ * offsetsBatchStride 为相邻 batch 行偏移数组（长度 rows + 1）起始地址间的元素偏移；
+ * columnsValuesBatchStride 为相邻 batch 列索引数组与值数组（长度均为 nnz）起始
+ * 地址间的元素偏移（两数组共用，写入描述符的 columnsBatchStride 与
+ * valuesBatchStride 两个字段）。两个步长取 0 均表示广播——所有 batch 共享对应
+ * 数组。纯 Host 侧描述符操作，不启动
+ * NPU kernel。batchCount 的读回由 aclsparseSpMatGetStridedBatch 提供。
+ *
+ * @param spMatDescr IN/OUT, HOST, CSR 稀疏矩阵描述符（须由 aclsparseCreateCsr
+ *                   创建，其 batchCount / offsetsBatchStride / columnsBatchStride /
+ *                   valuesBatchStride 字段被写入）。
+ * @param batchCount IN, HOST, batch 数，范围为 1..65535。
+ * @param offsetsBatchStride IN, HOST, 相邻 batch 行偏移数组的元素偏移；合法取值为
+ *                           0（广播）或 >= rows + 1，负值非法。
+ * @param columnsValuesBatchStride IN, HOST, 相邻 batch 列索引/值数组的元素偏移；
+ *                                 合法取值为 0（广播）或 >= nnz，负值非法。
+ * @return aclsparseStatus_t 成功返回 ACL_SPARSE_STATUS_SUCCESS；
+ *         spMatDescr 为 nullptr 或签名非法、batchCount 超出 [1, 65535]、
+ *         任一步长非法（负值或 0 < 步长 < 对应数组长度）、地址范围
+ *         (batchCount-1)*步长+数组长度 溢出 int64 或 rows + 1 溢出 int64
+ *         （rows = INT64_MAX，延迟绑定下可创建）返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE；
+ *         描述符格式非 CSR 返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
+ * @note batch 元数据实际变化时失效描述符既有预处理缓存（sddmm 等）。
+ */
+aclsparseStatus_t aclsparseCsrSetStridedBatch(aclsparseSpMatDescr_t spMatDescr, int batchCount,
+                                              int64_t offsetsBatchStride, int64_t columnsValuesBatchStride);
+
 aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr, void* colOffsets, void* rowIndices,
                                           void* values);
 aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr, void* rowIndices, void* colIndices,

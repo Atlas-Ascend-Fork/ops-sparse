@@ -21,7 +21,7 @@
  * 仅返回 batchCount 而不返回 batchStride，与 cuSPARSE 完全一致：stride 签名
  * 是格式相关的（COO 1 个 / CSR 2 个 / BSR 3 个），通用 getter 唯一能跨格式
  * 统一暴露的公共量是 batchCount。batch 元数据的写入由各格式的 SetStridedBatch
- * 接口完成（当前为 aclsparseCooSetStridedBatch）。
+ * 接口完成（当前为 aclsparseCooSetStridedBatch / aclsparseCsrSetStridedBatch）。
  */
 
 #include "log/log.h"
