@@ -2274,6 +2274,16 @@ aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, in
 aclsparseStatus_t aclsparseCooSetStridedBatch(aclsparseSpMatDescr_t spMatDescr,
     int batchCount, int64_t batchStride);
 
+aclsparseStatus_t aclsparseCsrGet(aclsparseSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *nnz, void **csrRowOffsets, void **csrColInd, void **csrValues,
+    aclsparseIndexType_t *csrRowOffsetsType, aclsparseIndexType_t *csrColIndType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
+aclsparseStatus_t aclsparseConstCsrGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows,
+    int64_t *cols, int64_t *nnz, const void **csrRowOffsets, const void **csrColInd,
+    const void **csrValues, aclsparseIndexType_t *csrRowOffsetsType,
+    aclsparseIndexType_t *csrColIndType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
 aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
                                            int64_t sliceNnz, int64_t numSlices, void* sellSlicePtr, void* sellColInd,
                                            void* sellValues, aclsparseIndexType_t sellIdxType,

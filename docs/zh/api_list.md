@@ -32,6 +32,8 @@
 | [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCsrSetStridedBatch](#aclsparsecsrsetstridedbatch) | 设置CSR描述符的batch数与batch步长 |
+| [aclsparseCsrGet](#aclsparsecsrget) | 获取CSR稀疏矩阵描述符的全部字段 |
+| [aclsparseConstCsrGet](#aclsparseconstcsrget) | 获取只读(const)CSR稀疏矩阵描述符的全部字段 |
 | [aclsparseCreateBsr](#aclsparsecreatebsr) | 创建BSR格式稀疏矩阵 |
 | [aclsparseCreateConstBsr](#aclsparsecreateconstbsr) | 创建只读(const) BSR格式稀疏矩阵 |
 | [aclsparseBsrSetStridedBatch](#aclsparsebsrsetstridedbatch) | 设置BSR描述符的strided-batch属性 |
@@ -545,7 +547,7 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 **功能**：创建一个CSR（Compressed Sparse Row）格式的稀疏矩阵。
 
-> **索引类型支持**：当前版本 SpMV / SpMM 仅支持 `ACL_SPARSE_INDEX_32I`，且 `csrRowOffsetsType` 与 `csrColIndType` 必须相同。传入 `ACL_SPARSE_INDEX_64I` 或 ptr/col 类型不一致时，`aclsparseCreateCsr` 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+> **索引类型支持**：`aclsparseCreateCsr` 接受 `ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I`，且 `csrRowOffsetsType` 与 `csrColIndType` 相互独立（四种组合均接受），其他取值返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（accessor 层与 cuSPARSE 一致）。注意：本仓 CSR 计算类接口（SpMV / SpMM 的 execute 路径）当前仅支持 32I 索引，混用计算接口时以计算接口的约束为准。
 
 **参数说明**：
 
@@ -556,8 +558,8 @@ aclsparseStatus_t aclsparseCreateCsr(
 - `csrRowOffsets`（IN）：DEVICE，指向CSR格式行偏移量数组的指针。
 - `csrColInd`（IN）：DEVICE，指向CSR格式列索引数组的指针。
 - `csrValues`（IN）：DEVICE，指向CSR格式非零元素数组的指针。
-- `csrRowOffsetsType`（IN）：HOST，行偏移量数组的数据类型（当前仅支持 `ACL_SPARSE_INDEX_32I`）。
-- `csrColIndType`（IN）：HOST，列索引数组的数据类型（当前仅支持 `ACL_SPARSE_INDEX_32I`，且须与 `csrRowOffsetsType` 一致）。
+- `csrRowOffsetsType`（IN）：HOST，行偏移量数组的数据类型（支持 `ACL_SPARSE_INDEX_32I` / `ACL_SPARSE_INDEX_64I`）。
+- `csrColIndType`（IN）：HOST，列索引数组的数据类型（支持 `ACL_SPARSE_INDEX_32I` / `ACL_SPARSE_INDEX_64I`，独立于 `csrRowOffsetsType`）。
 - `idxBase`（IN）：HOST，索引的基值（0或1）。
 - `valueType`（IN）：HOST，非零元素的数据类型。
 
@@ -713,6 +715,92 @@ aclsparseStatus_t aclsparseBsrSetStridedBatch(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：设置成功。
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：描述符、batch、stride 或数组地址范围非法。
+
+---
+
+### aclsparseCsrGet
+
+```c
+aclsparseStatus_t aclsparseCsrGet(
+    aclsparseSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz,
+    void **csrRowOffsets,
+    void **csrColInd,
+    void **csrValues,
+    aclsparseIndexType_t *csrRowOffsetsType,
+    aclsparseIndexType_t *csrColIndType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取 CSR 稀疏矩阵描述符的全部字段。读回的设备指针与 `aclsparseCreateCsr` 传入的指针逐字一致（accessor 不拷贝、不移动设备数据）。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，CSR 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `nnz`（OUT）：HOST，矩阵的非零元素个数。
+- `csrRowOffsets`（OUT）：DEVICE，行偏移数组指针，长度为 `rows + 1`。
+- `csrColInd`（OUT）：DEVICE，列索引数组指针，长度为 `nnz`。
+- `csrValues`（OUT）：DEVICE，非零元素值数组指针，长度为 `nnz`。
+- `csrRowOffsetsType`（OUT）：HOST，行偏移数组的数据类型。
+- `csrColIndType`（OUT）：HOST，列索引数组的数据类型（与 `csrRowOffsetsType` 相互独立，四种 32I/64I 组合均可读回）。
+- `idxBase`（OUT）：HOST，索引的基值。
+- `valueType`（OUT）：HOST，非零元素的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或非稀疏矩阵描述符句柄（误传其他类型描述符，如稠密向量/稠密矩阵描述符）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 CSR 格式
+- 其他值：失败
+
+---
+
+### aclsparseConstCsrGet
+
+```c
+aclsparseStatus_t aclsparseConstCsrGet(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz,
+    const void **csrRowOffsets,
+    const void **csrColInd,
+    const void **csrValues,
+    aclsparseIndexType_t *csrRowOffsetsType,
+    aclsparseIndexType_t *csrColIndType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取只读(const)CSR 稀疏矩阵描述符的全部字段，是 `aclsparseCsrGet` 的 const 变体：描述符为 `aclsparseConstSpMatDescr_t`，读回的设备指针为 `const void**`。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，只读(const)CSR 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `nnz`（OUT）：HOST，矩阵的非零元素个数。
+- `csrRowOffsets`（OUT）：DEVICE，行偏移数组指针，长度为 `rows + 1`。
+- `csrColInd`（OUT）：DEVICE，列索引数组指针，长度为 `nnz`。
+- `csrValues`（OUT）：DEVICE，非零元素值数组指针，长度为 `nnz`。
+- `csrRowOffsetsType`（OUT）：HOST，行偏移数组的数据类型。
+- `csrColIndType`（OUT）：HOST，列索引数组的数据类型（与 `csrRowOffsetsType` 相互独立，四种 32I/64I 组合均可读回）。
+- `idxBase`（OUT）：HOST，索引的基值。
+- `valueType`（OUT）：HOST，非零元素的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或非稀疏矩阵描述符句柄（误传其他类型描述符，如稠密向量/稠密矩阵描述符）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 CSR 格式
+- 其他值：失败
 
 ---
 
@@ -1102,6 +1190,11 @@ aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDes
 aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     const void *csrRowOffsets, const void *csrColInd, const void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
     aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseConstCsrGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *nnz, const void **csrRowOffsets, const void **csrColInd, const void **csrValues,
+    aclsparseIndexType_t *csrRowOffsetsType, aclsparseIndexType_t *csrColIndType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 
 aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,

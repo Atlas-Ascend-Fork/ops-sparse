@@ -1,0 +1,17 @@
+case_name,rows,cols,nnz,row_off_type,col_ind_type,dtype,idx_base,seed,expect_result
+# L0: CsrGet accessor round-trip 门槛用例（CreateCsr -> CsrGet -> 全字段断言）
+# L1: 功能组合（索引类型 x dtype x idxBase pairwise）+ 边界（单行/单列/空矩阵/未对齐/大 shape）
+# 失败/异常路径（nullptr 描述符、非 CSR 格式、部分 OUT 为 nullptr、Create 前置异常等）在 csr_get_test.cpp 的 CsrGetExceptionTest 中以非 CSV 方式覆盖
+L0_S_fp32_idx0_i32i32_square,128,128,1024,32I,32I,float32,0,1,SUCCESS
+L0_S_fp16_idx1_i32i32_square,64,64,256,32I,32I,float16,1,2,SUCCESS
+L0_S_fp32_idx0_i64i64_square,128,128,1024,64I,64I,float32,0,3,SUCCESS
+L1_M_fp32_idx1_i32i64_nonsquare,512,256,4096,32I,64I,float32,1,4,SUCCESS
+L1_L_fp16_idx0_i32i64_wide,2048,1024,16384,32I,64I,float16,0,5,SUCCESS
+L1_M_fp32_idx1_i64i32_tall,320,640,5120,64I,32I,float32,1,6,SUCCESS
+L1_M_fp16_idx0_i64i32_nonsquare,384,256,3072,64I,32I,float16,0,7,SUCCESS
+L1_L_fp32_idx0_i64i64_large,1024,1024,8192,64I,64I,float32,0,8,SUCCESS
+L1_S_fp16_idx1_i64i64_square,256,256,2048,64I,64I,float16,1,9,SUCCESS
+L1_S_fp32_idx0_i32i32_unaligned,100,100,500,32I,32I,float32,0,10,SUCCESS
+L1_S_fp32_idx1_i32i64_single_row,1,100,10,32I,64I,float32,1,11,SUCCESS
+L1_S_fp32_idx0_i64i32_single_col,100,1,10,64I,32I,float32,0,12,SUCCESS
+L1_S_fp16_idx0_i32i32_empty,10,10,0,32I,32I,float16,0,13,SUCCESS
