@@ -178,9 +178,9 @@ docker run --name cann_container --device /dev/davinci0 --device /dev/davinci_ma
 - **检查CANN版本**
 
     ```bash
-    # 查看CANN toolkit包版本信息（默认路径安装），WebIDE场景下将/usr/local替换为/home/developer
+    # 查看CANN toolkit包版本信息（默认路径安装），CANNLab场景下将/usr/local替换为/home/developer
     cat /usr/local/Ascend/cann/${arch}-linux/ascend_toolkit_install.info
-    # 查看CANN ops包版本信息（默认路径安装），WebIDE场景下将/usr/local替换为/home/developer
+    # 查看CANN ops包版本信息（默认路径安装），CANNLab场景下将/usr/local替换为/home/developer
     cat /usr/local/Ascend/cann/${arch}-linux/ascend_ops_install.info
     ```
 
