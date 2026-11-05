@@ -735,6 +735,15 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 
 aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr, aclsparseFormat_t* format);
 
+/**
+ * @brief 获取稀疏矩阵描述符的索引基值。
+ *
+ * 对标 cuSPARSE cusparseSpMatGetIndexBase。接受 const 描述符（aclsparseCreateConstCsr
+ * 等创建），非 const 描述符同样支持。返回描述符创建时传入的 idxBase。
+ */
+aclsparseStatus_t aclsparseSpMatGetIndexBase(aclsparseConstSpMatDescr_t spMatDescr,
+                                             aclsparseIndexBase_t* idxBase);
+
 aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void** values);
 
 aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr, const void** values);

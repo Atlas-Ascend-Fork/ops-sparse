@@ -1,0 +1,28 @@
+case_name,entry,idx_base,expect_result
+# L1: SpMatGetIndexBase 参数化往返用例（Create 传入 idxBase -> Get 读回一致 + 二次 Get 幂等）
+# entry 引用测试 cpp 内创建入口注册表：11 个带 idxBase 入参的创建入口（6 mutable + 5 const 变体，
+# blocked_ell 无 const 变体）× base{0,1} = 22 用例
+# 失败/异常路径（null 描述符、null OUT、SpVec 误传）与 Set 后活性用例在 spmat_get_indexbase_test.cpp
+# 的 ExceptionTest / LivenessTest 中以非 CSV 方式覆盖（同 coo_get_test.csv 约定）
+csr_idx0,csr,0,SUCCESS
+csr_idx1,csr,1,SUCCESS
+const_csr_idx0,const_csr,0,SUCCESS
+const_csr_idx1,const_csr,1,SUCCESS
+csc_idx0,csc,0,SUCCESS
+csc_idx1,csc,1,SUCCESS
+const_csc_idx0,const_csc,0,SUCCESS
+const_csc_idx1,const_csc,1,SUCCESS
+coo_idx0,coo,0,SUCCESS
+coo_idx1,coo,1,SUCCESS
+const_coo_idx0,const_coo,0,SUCCESS
+const_coo_idx1,const_coo,1,SUCCESS
+bsr_idx0,bsr,0,SUCCESS
+bsr_idx1,bsr,1,SUCCESS
+const_bsr_idx0,const_bsr,0,SUCCESS
+const_bsr_idx1,const_bsr,1,SUCCESS
+blocked_ell_idx0,blocked_ell,0,SUCCESS
+blocked_ell_idx1,blocked_ell,1,SUCCESS
+sliced_ell_idx0,sliced_ell,0,SUCCESS
+sliced_ell_idx1,sliced_ell,1,SUCCESS
+const_sliced_ell_idx0,const_sliced_ell,0,SUCCESS
+const_sliced_ell_idx1,const_sliced_ell,1,SUCCESS

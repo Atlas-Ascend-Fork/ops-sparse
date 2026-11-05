@@ -51,6 +51,7 @@
 | [aclsparseConstBlockedEllGet](#aclsparseconstblockedellget) | 获取只读(const)Blocked-ELL稀疏矩阵描述符的全部字段 |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
 | [aclsparseSpMatGetFormat](#aclsparsespmatgetformat) | 获取稀疏矩阵的存储格式 |
+| [aclsparseSpMatGetIndexBase](#aclsparsespmatgetindexbase) | 获取稀疏矩阵描述符的索引基值 |
 | [aclsparseSpMatGetValues](#aclsparsespmatgetvalues) | 获取稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatSetValues](#aclsparsespmatsetvalues) | 设置稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatGetSize](#aclsparsespmatgetsize) | 获取稀疏矩阵的行数、列数和非零元素个数 |
@@ -415,12 +416,12 @@ aclsparseStatus_t aclsparseSpVecGetIndexBase(
 **参数说明**：
 
 - `spVecDescr`（IN）：HOST，稀疏向量描述符。
-- `idxBase`（OUT）：HOST，索引基值。
+- `idxBase`（OUT）：HOST，索引基值；为空指针时不回写，仍返回成功。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针或签名非法
 
 ---
 
@@ -1340,12 +1341,35 @@ aclsparseStatus_t aclsparseSpMatGetFormat(
 **参数说明**：
 
 - `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
-- `format`（OUT）：HOST，存储格式。
+- `format`（OUT）：HOST，存储格式；为空指针时不回写，仍返回成功。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法
+
+---
+
+### aclsparseSpMatGetIndexBase
+
+```c
+aclsparseStatus_t aclsparseSpMatGetIndexBase(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    aclsparseIndexBase_t *idxBase
+);
+```
+
+**功能**：获取稀疏矩阵描述符的索引基值（`ACL_SPARSE_INDEX_BASE_ZERO` / `ACL_SPARSE_INDEX_BASE_ONE`），即描述符创建时传入的 `idxBase`。对标 cuSPARSE `cusparseSpMatGetIndexBase`。接受 const 描述符，非 const 描述符同样支持。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `idxBase`（OUT）：HOST，索引基值；为空指针时不回写，仍返回成功。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法
 
 ---
 

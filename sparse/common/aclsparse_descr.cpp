@@ -19,6 +19,7 @@
 
 #include "cann_ops_sparse.h"
 #include "aclsparse_descr_internal.h"
+#include "aclsparse_descr_guard.h"
 
 #include <cstdint>
 #include <limits>
@@ -1110,6 +1111,17 @@ aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr,
     if (format != nullptr) {
         *format = spMatDescr->format;
     }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseSpMatGetIndexBase(aclsparseConstSpMatDescr_t spMatDescr,
+    aclsparseIndexBase_t *idxBase)
+{
+    const aclsparseStatus_t st = CheckSpMatHandle("aclsparseSpMatGetIndexBase", spMatDescr);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    WriteOutIfRequested(idxBase, spMatDescr->baseType);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
