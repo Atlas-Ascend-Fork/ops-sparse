@@ -593,6 +593,49 @@ aclsparseStatus_t aclsparseCreateBlockedEll(aclsparseSpMatDescr_t* descr, int64_
                                             aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
                                             aclDataType valueType);
 
+/**
+ * @brief 获取 Blocked-ELL 稀疏矩阵描述符的全部字段。
+ *
+ * 对标 cuSPARSE cusparseBlockedEllGet。从 aclsparseCreateBlockedEll 创建的描述符中
+ * 读回 rows / cols / ellBlockSize / ellCols / ellColInd / ellValue / ellIdxType /
+ * idxBase / valueType。读回的设备指针为描述符当前绑定的指针（初始即 Create 时传入
+ * 的值；经 aclsparseSpMatSetValues 重绑定 values 后读回新指针，accessor 不拷贝、
+ * 不移动设备数据）。任一输出指针可为 nullptr，此时仅返回请求的字段。
+ *
+ * @param spMatDescr IN, HOST, Blocked-ELL 稀疏矩阵描述符。
+ * @param rows OUT, HOST, 矩阵行数。
+ * @param cols OUT, HOST, 矩阵列数。
+ * @param ellBlockSize OUT, HOST, ELL 块大小。
+ * @param ellCols OUT, HOST, Blocked-ELL 格式的实际列数（ellValue 的列数）。
+ * @param ellColInd OUT, DEVICE, 列块索引数组指针，长度为 ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize)。
+ * @param ellValue OUT, DEVICE, 非零值数组指针，按块网格行主序连续存放 ellBlockSize × ellBlockSize
+ *                   块（块内列主序），总容量为 ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize)
+ *                   * ellBlockSize^2。
+ * @param ellIdxType OUT, HOST, ellColInd 的数据类型。
+ * @param idxBase OUT, HOST, ellColInd 的索引基值。
+ * @param valueType OUT, HOST, ellValue 的数据类型。
+ * @return aclsparseStatus_t 返回执行状态，成功则为ACL_SPARSE_STATUS_SUCCESS；
+ *         描述符为空或签名非法（错误类型句柄）返回ACL_SPARSE_STATUS_INVALID_VALUE；
+ *         描述符非 Blocked-ELL 格式返回ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
+ */
+aclsparseStatus_t aclsparseBlockedEllGet(
+    aclsparseSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *ellBlockSize, int64_t *ellCols, void **ellColInd, void **ellValue,
+    aclsparseIndexType_t *ellIdxType, aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType);
+
+/**
+ * @brief 获取只读(const)Blocked-ELL 稀疏矩阵描述符的全部字段。
+ *
+ * 对标 cuSPARSE cusparseConstBlockedEllGet，是 aclsparseBlockedEllGet 的 const 变体：
+ * 描述符为 aclsparseConstSpMatDescr_t，读回的设备指针为 const void**。
+ */
+aclsparseStatus_t aclsparseConstBlockedEllGet(
+    aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *ellBlockSize, int64_t *ellCols, const void **ellColInd,
+    const void **ellValue, aclsparseIndexType_t *ellIdxType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
 aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr, void* rowOffsets, void* colIndices,
                                           void* values);
 /**

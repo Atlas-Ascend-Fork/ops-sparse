@@ -1,0 +1,14 @@
+case_name,rows,cols,ell_block_size,ell_cols,idx_base,dtype,seed,expect_result
+# L1: BlockedEllGet accessor round-trip (CreateBlockedEll -> BlockedEllGet -> 字段回读)
+# 失败/异常路径（nullptr 描述符、非 BELL 格式（CSR/COO/CSC）、非法 Create 参数等）在 blockedell_get_test.cpp 的 BlockedEllGetExceptionTest 中以非 CSV 方式覆盖；
+# 64I 索引、const 变体 round-trip、部分空 OUT、零容量等非参数化成功路径用例在 BlockedEllGetSuccessTest 中覆盖
+S_fp32_bs1_square,128,128,1,128,0,float32,1,SUCCESS
+S_fp16_bs4_square,256,256,4,256,0,float16,2,SUCCESS
+M_fp32_bs8_nonsquare,512,256,8,256,0,float32,3,SUCCESS
+L_fp16_bs16_square,1024,1024,16,1024,0,float16,4,SUCCESS
+S_fp32_bs4_idx1_small,64,64,4,64,1,float32,5,SUCCESS
+M_fp32_bs8_rowtail,100,256,8,256,0,float32,6,SUCCESS
+M_fp32_bs8_coltail,256,100,8,104,0,float32,7,SUCCESS
+S_fp16_bs1_idx1_tall,320,64,1,64,1,float16,8,SUCCESS
+L_fp32_bs16_wide,2048,1024,16,1024,0,float32,9,SUCCESS
+M_fp16_bs2_coltail_idx1,200,101,2,102,1,float16,10,SUCCESS

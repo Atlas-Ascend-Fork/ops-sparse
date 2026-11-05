@@ -43,6 +43,9 @@
 | [aclsparseCooGet](#aclsparsecooget) | 获取COO稀疏矩阵描述符的全部字段 |
 | [aclsparseConstCooGet](#aclsparseconstcooget) | 获取只读(const)COO稀疏矩阵描述符的全部字段 |
 | [aclsparseCooSetStridedBatch](#aclsparsecoosetstridedbatch) | 设置COO描述符的batch数与batch步长 |
+| [aclsparseCreateBlockedEll](#aclsparsecreateblockedell) | 创建Blocked-ELL格式稀疏矩阵 |
+| [aclsparseBlockedEllGet](#aclsparseblockedellget) | 获取Blocked-ELL稀疏矩阵描述符的全部字段 |
+| [aclsparseConstBlockedEllGet](#aclsparseconstblockedellget) | 获取只读(const)Blocked-ELL稀疏矩阵描述符的全部字段 |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
 | [aclsparseSpMatGetFormat](#aclsparsespmatgetformat) | 获取稀疏矩阵的存储格式 |
 | [aclsparseSpMatGetValues](#aclsparsespmatgetvalues) | 获取稀疏矩阵描述符的 values 指针 |
@@ -1037,6 +1040,132 @@ aclsparseStatus_t aclsparseCooSetStridedBatch(
 - 其他值：失败
 
 **说明**：batch 元数据实际变化时失效描述符既有预处理缓存（sddmm 等）。
+
+---
+
+### aclsparseCreateBlockedEll
+
+```c
+aclsparseStatus_t aclsparseCreateBlockedEll(
+    aclsparseSpMatDescr_t *descr,
+    int64_t rows,
+    int64_t cols,
+    int64_t ellBlockSize,
+    int64_t ellCols,
+    void *ellColInd,
+    void *ellValue,
+    aclsparseIndexType_t indexType,
+    aclsparseIndexBase_t indexBase,
+    aclDataType valueType
+);
+```
+
+**功能**：创建一个 Blocked-ELL（Blocked Ellpack）格式的稀疏矩阵描述符（对标 cuSPARSE `cusparseCreateBlockedEll`），将维度、块大小、列块索引与值数组的设备指针连同索引类型、索引基、值类型一并存入描述符。该接口为纯 host 操作，不启动 NPU kernel，不涉及 stream 同步；实现位于公共层，架构无关，随稀疏算子库在全平台构建（BELL 描述符可作为 DenseToSparse 的 BELL 输入，见 densetosparse 算子；`aclsparseBlockedEllGet` / `aclsparseConstBlockedEllGet` 访问器仅 arch35 提供）。
+
+> **数据排布**：`ellColInd` 按块网格行主序排列（`task = 块行号 * ceil(ellCols/ellBlockSize) + 槽号`），长度为 `ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize)`，取值范围 `[idxBase, ceil(cols/ellBlockSize)-1+idxBase]`，空槽用 `-1` 表示；`ellValue` 按 task 连续存放（与 `ellColInd` 的槽一一对应），每个 task 为一个连续的 `ellBlockSize × ellBlockSize` 块，**块内列主序**（`valuePos = task * ellBlockSize^2 + innerCol * ellBlockSize + innerRow`），总容量为 `ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize) * ellBlockSize^2`（尾块补零）。注意：aclsparse 的 `ellValue` 物理排布与 cuSPARSE（按 `rows × ellCols` 跨步行主序、块内行主序）不同，从 cuSPARSE 迁移时需按上述公式重排。
+>
+> **索引类型支持**：`indexType` 支持 `ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I`（accessor 层无 NPU 计算，与 cuSPARSE 一致）。
+
+**参数说明**：
+
+- `descr`（IN/OUT）：HOST，Blocked-ELL 稀疏矩阵描述符（输出句柄），调用前无需初始化。
+- `rows`（IN）：HOST，矩阵的行数。
+- `cols`（IN）：HOST，矩阵的列数。
+- `ellBlockSize`（IN）：HOST，ELL 块大小（正方形块边长）。
+- `ellCols`（IN）：HOST，Blocked-ELL 格式的实际列数（`ellValue` 的列数）。
+- `ellColInd`（IN）：DEVICE，列块索引数组，长度为 `ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize)`。
+- `ellValue`（IN）：DEVICE，非零元素值数组，按块网格行主序连续存放 `ellBlockSize × ellBlockSize` 块（块内列主序），总容量为 `ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize) * ellBlockSize^2`。
+- `indexType`（IN）：HOST，`ellColInd` 的数据类型。
+- `indexBase`（IN）：HOST，索引的基值。
+- `valueType`（IN）：HOST，`ellValue` 的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`descr` 为空指针；或 `rows` / `cols` / `ellCols` 为负、`ellBlockSize <= 0`；或 `indexType` / `indexBase` 取值非法；或 `ellCols` 的块槽数超过 `ceil(cols/ellBlockSize)`；或补齐后块网格容量溢出 int64；或容量 > 0 时 `ellColInd` / `ellValue` 为空指针
+- 其他值：失败
+
+---
+
+### aclsparseBlockedEllGet
+
+```c
+aclsparseStatus_t aclsparseBlockedEllGet(
+    aclsparseSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *ellBlockSize,
+    int64_t *ellCols,
+    void **ellColInd,
+    void **ellValue,
+    aclsparseIndexType_t *ellIdxType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取 Blocked-ELL 稀疏矩阵描述符的全部字段（对标 cuSPARSE `cusparseBlockedEllGet`）。输出参数允许为 `nullptr`，此时仅返回请求的字段；读回的设备指针为描述符**当前绑定**的指针（初始即 `aclsparseCreateBlockedEll` 传入的值；经 `aclsparseSpMatSetValues` 重绑定 values 后读回新指针）。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，Blocked-ELL 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `ellBlockSize`（OUT）：HOST，ELL 块大小。
+- `ellCols`（OUT）：HOST，Blocked-ELL 格式的实际列数（`ellValue` 的列数）。
+- `ellColInd`（OUT）：DEVICE，列块索引数组指针，长度为 `ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize)`。
+- `ellValue`（OUT）：DEVICE，非零元素值数组指针，按块网格行主序连续存放 `ellBlockSize × ellBlockSize` 块（块内列主序），总容量为 `ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize) * ellBlockSize^2`。
+- `ellIdxType`（OUT）：HOST，`ellColInd` 的数据类型。
+- `idxBase`（OUT）：HOST，`ellColInd` 的索引基值。
+- `valueType`（OUT）：HOST，`ellValue` 的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法（错误类型句柄）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 Blocked-ELL 格式
+- 其他值：失败
+
+---
+
+### aclsparseConstBlockedEllGet
+
+```c
+aclsparseStatus_t aclsparseConstBlockedEllGet(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *ellBlockSize,
+    int64_t *ellCols,
+    const void **ellColInd,
+    const void **ellValue,
+    aclsparseIndexType_t *ellIdxType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取只读(const)Blocked-ELL 稀疏矩阵描述符的全部字段，是 `aclsparseBlockedEllGet` 的 const 变体（对标 cuSPARSE `cusparseConstBlockedEllGet`）：描述符为 `aclsparseConstSpMatDescr_t`，读回的设备指针为 `const void**`。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，只读(const)Blocked-ELL 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `ellBlockSize`（OUT）：HOST，ELL 块大小。
+- `ellCols`（OUT）：HOST，Blocked-ELL 格式的实际列数（`ellValue` 的列数）。
+- `ellColInd`（OUT）：DEVICE，列块索引数组指针。
+- `ellValue`（OUT）：DEVICE，非零元素值数组指针。
+- `ellIdxType`（OUT）：HOST，`ellColInd` 的数据类型。
+- `idxBase`（OUT）：HOST，`ellColInd` 的索引基值。
+- `valueType`（OUT）：HOST，`ellValue` 的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针或签名非法（错误类型句柄）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 Blocked-ELL 格式
+- 其他值：失败
 
 ---
 
