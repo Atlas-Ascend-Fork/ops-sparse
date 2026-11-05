@@ -1,0 +1,22 @@
+case_name,rows,cols,nnz,dtype,idx_base,ptr_type,idx_type,value_lo,value_hi,seed,expect_result
+# L0/L1: CscGet accessor round-trip (CreateCsc -> CscGet -> 10 字段逐项断言)
+# 失败/异常路径（nullptr 描述符、非 CSC 格式、CreateCsc 前置校验）与语义边界
+# （ConstCscGet round-trip、选择性回写、全 null、Set->Get）在 csc_get_test.cpp
+# 的 CscGetExceptionTest / CscGetSemanticTest 中以非 CSV 方式覆盖
+S_fp32_i32i32_idx0_square,128,128,1024,float32,0,32,32,-1,1,1,SUCCESS
+S_fp16_i32i32_idx0_square,256,256,2048,float16,0,32,32,-1,1,2,SUCCESS
+S_fp32_i32i32_idx1_small,64,64,256,float32,1,32,32,-1,1,3,SUCCESS
+M_fp32_i32i32_idx0_wide,512,256,4096,float32,0,32,32,-1,1,4,SUCCESS
+M_fp16_i32i32_idx1_square,512,512,4096,float16,1,32,32,-1,1,5,SUCCESS
+M_fp32_i32i32_idx0_tall,320,640,5120,float32,0,32,32,-1,1,6,SUCCESS
+L_fp32_i32i32_idx0_square,2048,2048,32768,float32,0,32,32,-1,1,7,SUCCESS
+L_fp16_i32i32_idx0_square,1024,1024,8192,float16,0,32,32,-1,1,8,SUCCESS
+L_fp32_i32i32_idx0_wide,2048,1024,16384,float32,0,32,32,-1,1,9,SUCCESS
+S_fp32_i32i32_idx0_unaligned,100,100,500,float32,0,32,32,-1,1,10,SUCCESS
+S_fp32_i32i32_idx0_empty,10,10,0,float32,0,32,32,-1,1,11,SUCCESS
+S_fp32_i32i32_idx0_row,1,100,10,float32,0,32,32,-1,1,12,SUCCESS
+S_fp32_i32i32_idx0_col,100,1,10,float32,0,32,32,-1,1,13,SUCCESS
+S_fp32_i32i64_idx0_mix,128,128,1024,float32,0,32,64,-1,1,14,SUCCESS
+S_fp32_i64i32_idx0_mix,128,128,1024,float32,0,64,32,-1,1,15,SUCCESS
+S_fp32_i64i64_idx1_mix,128,128,1024,float32,1,64,64,-1,1,16,SUCCESS
+M_fp16_i64i64_idx0_mix,384,256,3072,float16,0,64,64,-1,1,17,SUCCESS

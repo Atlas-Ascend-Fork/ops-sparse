@@ -38,6 +38,9 @@
 | [aclsparseCreateConstBsr](#aclsparsecreateconstbsr) | 创建只读(const) BSR格式稀疏矩阵 |
 | [aclsparseBsrSetStridedBatch](#aclsparsebsrsetstridedbatch) | 设置BSR描述符的strided-batch属性 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵 |
+| [aclsparseCreateConstCsc](#aclsparsecreateconstcsc) | 创建只读(const)CSC格式稀疏矩阵 |
+| [aclsparseCscGet](#aclsparsecscget) | 获取CSC稀疏矩阵描述符的全部字段 |
+| [aclsparseConstCscGet](#aclsparseconstcscget) | 获取只读(const)CSC稀疏矩阵描述符的全部字段 |
 | [aclsparseCreateCoo](#aclsparsecreatecoo) | 创建COO格式稀疏矩阵 |
 | [aclsparseCreateConstCoo](#aclsparsecreateconstcoo) | 创建只读(const)COO格式稀疏矩阵 |
 | [aclsparseCooGet](#aclsparsecooget) | 获取COO稀疏矩阵描述符的全部字段 |
@@ -827,7 +830,11 @@ aclsparseStatus_t aclsparseCreateCsc(
 );
 ```
 
-**功能**：创建一个CSC（Compressed Sparse Column）格式的稀疏矩阵描述符。
+**功能**：创建一个CSC（Compressed Sparse Column）格式的稀疏矩阵。创建的描述符可供 DenseToSparse 等支持 CSC 格式的接口使用，也可通过 `aclsparseCscGet` / `aclsparseConstCscGet` 读回全部字段。注意：SpMV 当前仅支持 CSR 格式，传入 CSC 描述符将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`；SpMM 当前仅支持 CSR 格式，传入 CSC 描述符将返回 `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`。
+
+> **索引类型支持**：`cscColOffsetsType` 与 `cscRowIndType` 为**两个独立的索引类型**，各自支持 `ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I`（四种组合均接受）。`cscColOffsets` / `cscRowInd` / `cscValues` 允许为 nullptr（延迟绑定语义），可在使用前通过 `aclsparseCscSetPointers` 重新绑定。
+
+> **指针要求**：`cscColOffsets` / `cscRowInd` / `cscValues` 传入非空时，须分别与 `cscColOffsetsType` / `cscRowIndType` / `valueType` 所指定数据类型的大小对齐（如 `ACL_SPARSE_INDEX_32I`、`ACL_FLOAT` 为 4 字节对齐，`ACL_SPARSE_INDEX_64I` 为 8 字节对齐，`ACL_FLOAT16` 为 2 字节对齐）。该要求面向后续消费该描述符的计算接口；描述符访问器类接口（`aclsparseCscGet` / `aclsparseConstCscGet`）仅存取指针本身，不解引用设备数据。
 
 **参数说明**：
 
@@ -835,9 +842,9 @@ aclsparseStatus_t aclsparseCreateCsc(
 - `rows`（IN）：HOST，矩阵的行数。
 - `cols`（IN）：HOST，矩阵的列数。
 - `nnz`（IN）：HOST，矩阵的非零元素个数。
-- `cscColOffsets`（IN）：DEVICE，指向列偏移数组的指针。
-- `cscRowInd`（IN）：DEVICE，指向行索引数组的指针。
-- `cscValues`（IN）：DEVICE，指向非零元素值数组的指针。
+- `cscColOffsets`（IN）：DEVICE，指向列偏移数组的指针，长度为 `cols + 1`。
+- `cscRowInd`（IN）：DEVICE，指向行索引数组的指针，长度为 `nnz`。
+- `cscValues`（IN）：DEVICE，指向非零元素值数组的指针，长度为 `nnz`。
 - `cscColOffsetsType`（IN）：HOST，列偏移数组的数据类型。
 - `cscRowIndType`（IN）：HOST，行索引数组的数据类型。
 - `idxBase`（IN）：HOST，索引的基础值。
@@ -846,6 +853,137 @@ aclsparseStatus_t aclsparseCreateCsc(
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或 `rows` / `cols` / `nnz` 为负，或索引类型非法
+- `ACL_SPARSE_STATUS_ALLOC_FAILED`：描述符内存分配失败
+- 其他值：失败
+
+---
+
+### aclsparseCreateConstCsc
+
+```c
+aclsparseStatus_t aclsparseCreateConstCsc(
+    aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t rows,
+    int64_t cols,
+    int64_t nnz,
+    const void *cscColOffsets,
+    const void *cscRowInd,
+    const void *cscValues,
+    aclsparseIndexType_t cscColOffsetsType,
+    aclsparseIndexType_t cscRowIndType,
+    aclsparseIndexBase_t idxBase,
+    aclDataType valueType
+);
+```
+
+**功能**：创建一个只读(const)CSC 格式的稀疏矩阵，是 `aclsparseCreateCsc` 的 const 变体：数据指针为 `const`，构造出的描述符为 `aclsparseConstSpMatDescr_t`，只能传给接收 const 形参的接口（如 `aclsparseConstCscGet`）。索引类型支持同 `aclsparseCreateCsc`。
+
+**参数说明**：
+
+- `spMatDescr`（IN/OUT）：HOST，只读(const)稀疏矩阵描述符。
+- `rows`（IN）：HOST，矩阵的行数。
+- `cols`（IN）：HOST，矩阵的列数。
+- `nnz`（IN）：HOST，矩阵的非零元素个数。
+- `cscColOffsets`（IN）：DEVICE，指向列偏移数组的指针，长度为 `cols + 1`。
+- `cscRowInd`（IN）：DEVICE，指向行索引数组的指针，长度为 `nnz`。
+- `cscValues`（IN）：DEVICE，指向非零元素值数组的指针，长度为 `nnz`。
+- `cscColOffsetsType`（IN）：HOST，列偏移数组的数据类型。
+- `cscRowIndType`（IN）：HOST，行索引数组的数据类型。
+- `idxBase`（IN）：HOST，索引的基础值。
+- `valueType`（IN）：HOST，非零元素值的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或 `rows` / `cols` / `nnz` 为负，或索引类型非法
+- `ACL_SPARSE_STATUS_ALLOC_FAILED`：描述符内存分配失败
+- 其他值：失败
+
+---
+
+### aclsparseCscGet
+
+```c
+aclsparseStatus_t aclsparseCscGet(
+    aclsparseSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz,
+    void **cscColOffsets,
+    void **cscRowInd,
+    void **cscValues,
+    aclsparseIndexType_t *cscColOffsetsType,
+    aclsparseIndexType_t *cscRowIndType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取 CSC 稀疏矩阵描述符的全部字段。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，CSC 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `nnz`（OUT）：HOST，矩阵的非零元素个数。
+- `cscColOffsets`（OUT）：DEVICE，列偏移数组指针，长度为 `cols + 1`。
+- `cscRowInd`（OUT）：DEVICE，行索引数组指针，长度为 `nnz`。
+- `cscValues`（OUT）：DEVICE，非零元素值数组指针，长度为 `nnz`。
+- `cscColOffsetsType`（OUT）：HOST，列偏移数组的数据类型。
+- `cscRowIndType`（OUT）：HOST，行索引数组的数据类型。
+- `idxBase`（OUT）：HOST，索引的基值。
+- `valueType`（OUT）：HOST，非零元素值的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或非稀疏矩阵描述符句柄（误传其他类型描述符，如稠密向量/稠密矩阵描述符）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 CSC 格式
+- 其他值：失败
+
+---
+
+### aclsparseConstCscGet
+
+```c
+aclsparseStatus_t aclsparseConstCscGet(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz,
+    const void **cscColOffsets,
+    const void **cscRowInd,
+    const void **cscValues,
+    aclsparseIndexType_t *cscColOffsetsType,
+    aclsparseIndexType_t *cscRowIndType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取只读(const)CSC 稀疏矩阵描述符的全部字段，是 `aclsparseCscGet` 的 const 变体：描述符为 `aclsparseConstSpMatDescr_t`，读回的设备指针为 `const void**`。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，只读(const)CSC 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `nnz`（OUT）：HOST，矩阵的非零元素个数。
+- `cscColOffsets`（OUT）：DEVICE，列偏移数组指针，长度为 `cols + 1`。
+- `cscRowInd`（OUT）：DEVICE，行索引数组指针，长度为 `nnz`。
+- `cscValues`（OUT）：DEVICE，非零元素值数组指针，长度为 `nnz`。
+- `cscColOffsetsType`（OUT）：HOST，列偏移数组的数据类型。
+- `cscRowIndType`（OUT）：HOST，行索引数组的数据类型。
+- `idxBase`（OUT）：HOST，索引的基值。
+- `valueType`（OUT）：HOST，非零元素值的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或非稀疏矩阵描述符句柄（误传其他类型描述符，如稠密向量/稠密矩阵描述符）
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 CSC 格式
 - 其他值：失败
 
 ---
@@ -1343,6 +1481,11 @@ aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr
 aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
     int64_t *nnz, const void **cooRowInd, const void **cooColInd, const void **cooValues,
     aclsparseIndexType_t *cooIdxType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
+aclsparseStatus_t aclsparseConstCscGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *nnz, const void **cscColOffsets, const void **cscRowInd, const void **cscValues,
+    aclsparseIndexType_t *cscColOffsetsType, aclsparseIndexType_t *cscRowIndType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 ```
 
 > **支持状态**：`aclsparseCreateConstCsc` 可创建只读 CSC 描述符。当前版本 SpMV / SpMM 仅支持 CSR 稀疏矩阵，CSC 描述符不能用于这两个计算接口。

@@ -577,7 +577,6 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t* spMatDescr, int64_t 
 
 /**
  * @brief 创建只读(const)CSC 稀疏矩阵描述符。
- *
  * @note 可创建只读 CSC 描述符，作为 SparseToDense 的 CSC 输入。
  *       SpMV 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_NOT_SUPPORTED；
  *       SpMM 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
@@ -587,6 +586,43 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t* spMatDescr
                                           const void* cscValues, aclsparseIndexType_t cscColOffsetsType,
                                           aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase,
                                           aclDataType valueType);
+
+/**
+ * @brief 读取 CSC 稀疏矩阵描述符的全部字段（对标 cuSPARSE cusparseCscGet）。
+ *
+ * 纯 Host 侧描述符访问器（SparseAccessor）：不启动 NPU kernel、不涉及 stream
+ * 同步、不拷贝设备数据。任一出参指针可为 nullptr，此时仅回写请求字段。
+ *
+ * @param spMatDescr IN, HOST, CSC 稀疏矩阵描述符。
+ * @param rows OUT, HOST, 矩阵的行数。
+ * @param cols OUT, HOST, 矩阵的列数。
+ * @param nnz OUT, HOST, 矩阵中非零元素的数量。
+ * @param cscColOffsets OUT, DEVICE, 列偏移数组指针（长 cols+1）。
+ * @param cscRowInd OUT, DEVICE, 行索引数组指针（长 nnz）。
+ * @param cscValues OUT, DEVICE, 非零元素值数组指针（长 nnz）。
+ * @param cscColOffsetsType OUT, HOST, 列偏移数组的数据类型。
+ * @param cscRowIndType OUT, HOST, 行索引数组的数据类型。
+ * @param idxBase OUT, HOST, 索引的基础值。
+ * @param valueType OUT, HOST, 非零元素值的数据类型。
+ * @return aclsparseStatus_t 成功返回 ACL_SPARSE_STATUS_SUCCESS；spMatDescr 为
+ *         nullptr 或非稀疏矩阵描述符句柄（误传其他类型描述符）返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE；描述符非 CSC 格式返回
+ *         ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
+ */
+aclsparseStatus_t aclsparseCscGet(aclsparseSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols, int64_t* nnz,
+                                  void** cscColOffsets, void** cscRowInd, void** cscValues,
+                                  aclsparseIndexType_t* cscColOffsetsType, aclsparseIndexType_t* cscRowIndType,
+                                  aclsparseIndexBase_t* idxBase, aclDataType* valueType);
+
+/**
+ * @brief 读取只读(const)CSC 稀疏矩阵描述符的全部字段（对标 cuSPARSE cusparseConstCscGet）。
+ *        语义同 aclsparseCscGet，数据指针出参为 const void**。
+ */
+aclsparseStatus_t aclsparseConstCscGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
+                                       int64_t* nnz, const void** cscColOffsets, const void** cscRowInd,
+                                       const void** cscValues, aclsparseIndexType_t* cscColOffsetsType,
+                                       aclsparseIndexType_t* cscRowIndType, aclsparseIndexBase_t* idxBase,
+                                       aclDataType* valueType);
 
 aclsparseStatus_t aclsparseCreateBlockedEll(aclsparseSpMatDescr_t* descr, int64_t rows, int64_t cols,
                                             int64_t ellBlockSize, int64_t ellCols, void* ellColInd, void* ellValue,
