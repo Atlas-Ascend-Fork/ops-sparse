@@ -20,12 +20,15 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "securec.h"
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
+#include "aclsparse_descr_internal.h"
 #include "spgemm_ref.h"
 #include "spgemm_harness.h"
 #include "gtest/gtest.h"
@@ -3031,6 +3034,84 @@ bool TestEstimateMemoryNullBuffer3(aclsparseHandle_t handle, aclsparseSpGEMMAlg_
     return CompareResult(got, ref, ACL_FLOAT, tag.c_str());
 }
 
+bool PrepareNullScalarStage(SpgemmStageRun &r, int stage, size_t &size1)
+{
+    SPGEMM_ST(aclsparseSpGEMMWorkEstimation(r.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+        ACL_SPARSE_OP_NON_TRANSPOSE, r.alpha, r.matA, r.matB, r.beta, r.matC,
+        r.dt, r.alg, r.descr, &size1, nullptr));
+    if (!r.buf1.Alloc(size1)) {
+        return false;
+    }
+    if (stage > 0 && !RunStageWorkEstimation(r)) {
+        return false;
+    }
+    if (stage > 1 && (!RunStageEstimateMemory(r) || !r.buf2.Alloc(r.bufSize2))) {
+        return false;
+    }
+    return r.buf3.Alloc(64);
+}
+
+aclsparseStatus_t RunNullScalarStage(SpgemmStageRun &r, int stage, bool execute,
+                                     size_t &size1, size_t &size3)
+{
+    if (stage == 0) {
+        return aclsparseSpGEMMWorkEstimation(r.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+            ACL_SPARSE_OP_NON_TRANSPOSE, r.alpha, r.matA, r.matB, r.beta, r.matC,
+            r.dt, r.alg, r.descr, &size1, execute ? r.buf1.Get() : nullptr);
+    }
+    if (stage == 1) {
+        return aclsparseSpGEMMEstimateMemory(r.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+            ACL_SPARSE_OP_NON_TRANSPOSE, r.alpha, r.matA, r.matB, r.beta, r.matC,
+            r.dt, r.alg, r.descr, 0.5f, &size3, execute ? r.buf3.Get() : nullptr, &r.bufSize2);
+    }
+    return aclsparseSpGEMMCompute(r.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+        ACL_SPARSE_OP_NON_TRANSPOSE, r.alpha, r.matA, r.matB, r.beta, r.matC,
+        r.dt, r.alg, r.descr, &r.bufSize2, execute ? r.buf2.Get() : nullptr);
+}
+
+/** Null scalars must be rejected before changing workspace outputs or stage state. */
+void TestNullScalar(aclsparseHandle_t handle, int stage, bool nullAlpha, bool execute,
+                    aclsparsePointerMode_t mode)
+{
+    SCOPED_TRACE(::testing::Message() << "stage=" << stage << " nullAlpha=" << nullAlpha
+                 << " execute=" << execute << " pointerMode=" << mode);
+    const SpgemmRefCsr empty = SpgemmRefBuildCsr(1, 1, 0, 1, 0, false, 237);
+    DeviceCsr dA;
+    DeviceCsr dB;
+    SpgemmMatCHolder c;
+    ASSERT_TRUE(UploadCsr(empty, ACL_FLOAT, dA));
+    ASSERT_TRUE(UploadCsr(empty, ACL_FLOAT, dB));
+    ASSERT_TRUE(SetupMatC(empty, empty, nullptr, ACL_FLOAT, c));
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    DevBuf deviceAlpha;
+    DevBuf deviceBeta;
+    ASSERT_TRUE(deviceAlpha.Alloc(sizeof(alpha)) && deviceAlpha.Upload(&alpha, sizeof(alpha)));
+    ASSERT_TRUE(deviceBeta.Alloc(sizeof(beta)) && deviceBeta.Upload(&beta, sizeof(beta)));
+    const void *alphaPtr = mode == ACL_SPARSE_POINTER_MODE_DEVICE ? deviceAlpha.Get() : &alpha;
+    const void *betaPtr = mode == ACL_SPARSE_POINTER_MODE_DEVICE ? deviceBeta.Get() : &beta;
+    SpgemmStageRun r{handle, dA.descr, dB.descr, c.descr, nullptr, ACL_FLOAT,
+                     ACL_SPARSE_SPGEMM_ALG2, alphaPtr, betaPtr};
+    ASSERT_EQ(aclsparseSpGEMMCreateDescr(&r.descr), ACL_SPARSE_STATUS_SUCCESS);
+    std::unique_ptr<aclsparseSpGEMMDescr, decltype(&aclsparseSpGEMMDestroyDescr)>
+        descrGuard(r.descr, aclsparseSpGEMMDestroyDescr);
+    size_t size1 = 0;
+    ASSERT_TRUE(PrepareNullScalarStage(r, stage, size1));
+    std::array<unsigned char, sizeof(aclsparseSpGEMMDescr)> before{};
+    ASSERT_EQ(memcpy_s(before.data(), before.size(), r.descr, before.size()), EOK);
+    const size_t size1Before = size1;
+    const size_t size2Before = r.bufSize2;
+    size_t size3 = 123;
+    r.alpha = nullAlpha ? nullptr : alphaPtr;
+    r.beta = nullAlpha ? betaPtr : nullptr;
+    const aclsparseStatus_t status = RunNullScalarStage(r, stage, execute, size1, size3);
+    EXPECT_EQ(status, ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(std::memcmp(before.data(), r.descr, before.size()), 0);
+    EXPECT_EQ(size1, size1Before);
+    EXPECT_EQ(r.bufSize2, size2Before);
+    EXPECT_EQ(size3, 123U);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -3059,6 +3140,21 @@ protected:
 };
 aclsparseHandle_t SpGemmArch22Test::s_handle_ = nullptr;
 aclrtStream SpGemmArch22Test::s_stream_ = nullptr;
+
+TEST_F(SpGemmArch22Test, NullScalarsDoNotAdvanceStages) {
+    for (auto mode : {ACL_SPARSE_POINTER_MODE_HOST, ACL_SPARSE_POINTER_MODE_DEVICE}) {
+        ASSERT_EQ(aclsparseSetPointerMode(s_handle_, mode), ACL_SPARSE_STATUS_SUCCESS);
+        for (int stage = 0; stage < 3; ++stage) {
+            for (bool nullAlpha : {true, false}) {
+                for (bool execute : {false, true}) {
+                    TestNullScalar(s_handle_, stage, nullAlpha, execute, mode);
+                }
+            }
+        }
+    }
+    EXPECT_EQ(aclsparseSetPointerMode(s_handle_, ACL_SPARSE_POINTER_MODE_HOST),
+              ACL_SPARSE_STATUS_SUCCESS);
+}
 
 // ---------------------------------------------------------------------------
 // Dtype-parameterized tests

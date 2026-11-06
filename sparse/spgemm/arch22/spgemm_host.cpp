@@ -835,7 +835,7 @@ aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
     aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t spgemmDescr,
     size_t *bufferSize1, void *externalBuffer1)
 {
-    if (bufferSize1 == nullptr) {
+    if (alpha == nullptr || beta == nullptr || bufferSize1 == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     WorkEstimationPlan plan;
@@ -869,6 +869,9 @@ aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
     size_t *bufferSize2)
 {
     (void)externalBuffer3;
+    if (alpha == nullptr || beta == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     StageContext ctx;
     aclsparseStatus_t st = PrepareStage(handle, matA, matB, matC, opA, opB,
                                        computeType, alg, spgemmDescr, ctx);
@@ -1103,7 +1106,7 @@ aclsparseStatus_t aclsparseSpGEMMCompute(
     aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t spgemmDescr,
     size_t *bufferSize2, void *externalBuffer2)
 {
-    if (bufferSize2 == nullptr) {
+    if (alpha == nullptr || beta == nullptr || bufferSize2 == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     StageContext ctx;
