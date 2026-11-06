@@ -39,8 +39,6 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <memory>
-#include <mutex>
 #include <string>
 
 // ============================================================================
@@ -51,16 +49,12 @@ class AclEnvManager
   public:
     static sparse_test::AclEnvScope& Get()
     {
-        std::call_once(once_, []() { instance_ = std::make_unique<sparse_test::AclEnvScope>(); });
-        return *instance_;
+        // Register cleanup after ACL runtime initialization, so its resources
+        // are released before the runtime's own static objects are destroyed.
+        static sparse_test::AclEnvScope environment;
+        return environment;
     }
-
-  private:
-    static std::once_flag once_;
-    static std::unique_ptr<sparse_test::AclEnvScope> instance_;
 };
-std::once_flag AclEnvManager::once_;
-std::unique_ptr<sparse_test::AclEnvScope> AclEnvManager::instance_;
 
 // ============================================================================
 // 标准 matmul 输入 helper：构造合法的 handle + matA(structured) +
@@ -123,17 +117,24 @@ class MatmulDescriptorInitTest : public testing::TestWithParam<sparse_test::Matm
 // 独立函数，控制 TEST_P 的单函数行数。
 // ============================================================================
 
+static void VerifyMatInitResult(aclsparseStatus_t ret, aclsparseStatus_t expect, aclsparseLtMatDescriptor_t mat,
+                                const sparse_test::MatmulDescriptorInitParam& p)
+{
+    EXPECT_EQ(ret, expect) << p.case_name;
+    if (expect != ACL_SPARSE_STATUS_SUCCESS) { EXPECT_EQ(mat, nullptr) << p.case_name; }
+    if (p.verifyFields && ret == ACL_SPARSE_STATUS_SUCCESS)
+    {
+        if (!sparse_test::VerifyMatFields(mat, p.a)) { return; }
+    }
+}
+
 // CsvDriven 用例的 dense 分支
 static void RunDenseCase(const sparse_test::SparseLtHandleGuard& handle,
                          const sparse_test::MatmulDescriptorInitParam& p, aclsparseStatus_t expect)
 {
     sparse_test::MatDescrGuard mat;
     auto ret = mat.initDense(handle.ptr(), p.a.rows, p.a.cols, p.a.ld, p.a.align, p.a.dtype, p.a.order);
-    EXPECT_EQ(ret, expect) << p.case_name;
-    if (p.verifyFields && ret == ACL_SPARSE_STATUS_SUCCESS)
-    {
-        if (!sparse_test::VerifyMatFields(mat.get(), p.a)) { return; }
-    }
+    VerifyMatInitResult(ret, expect, mat.get(), p);
 }
 
 // CsvDriven 用例的 structured 分支
@@ -143,11 +144,7 @@ static void RunStructuredCase(const sparse_test::SparseLtHandleGuard& handle,
     sparse_test::MatDescrGuard mat;
     auto ret = mat.initStructured(handle.ptr(), p.a.rows, p.a.cols, p.a.ld, p.a.align, p.a.dtype, p.a.order,
                                   p.a.sparsity);
-    EXPECT_EQ(ret, expect) << p.case_name;
-    if (p.verifyFields && ret == ACL_SPARSE_STATUS_SUCCESS)
-    {
-        if (!sparse_test::VerifyMatFields(mat.get(), p.a)) { return; }
-    }
+    VerifyMatInitResult(ret, expect, mat.get(), p);
 }
 
 // CsvDriven 用例的 matmul 分支

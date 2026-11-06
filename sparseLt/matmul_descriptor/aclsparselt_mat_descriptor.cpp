@@ -143,6 +143,11 @@ inline aclsparseStatus_t ValidateMatDescCommonParams(const aclsparseLtHandle_t* 
     {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    // Downstream matrix dimensions are stored in int32_t tiling fields.
+    if (rows > INT32_MAX || cols > INT32_MAX)
+    {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     if (!IsSupportedValueType(valueType))
     {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
