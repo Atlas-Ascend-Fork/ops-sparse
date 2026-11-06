@@ -3,10 +3,10 @@
 > 本章罗列的部分目录或文件为可选，请以实际交付件为准。另请注意：
 >
 > - **算子源码目录**：`sparse/` 下按算子名组织（如 `sparse/spmv/`、`sparse/spmm/`），各平台实现放入 `${arch_dir}/` 子目录，由 `--soc` 决定编译哪套实现。
-> - **多架构并存**：910B / 910_93（`dav-2201`）→ `arch22`，950（`dav-3510`）→ `arch35`，310P（`dav-2002`）→ `arch20`。当前 `spmv` 实现位于 `arch22/`（910B），`spmm` 实现位于 `arch35/`（950）。
-> - **sparseLt 目录**：`sparseLt/` 为稀疏矩阵高级运算库（类比 ops-blas 的 blasLt），已实现库管理、描述符、算法选择与执行计划类接口，后续将补充 matmul 计算接口。
+> - **多架构并存**：910B / 910_93（`dav-2201`）→ `arch22`，950（`dav-3510`）→ `arch35`，310P（`dav-2002`）→ `arch20`。当前 `spmv` 和 `spmm` 均包含 `arch22/` 与 `arch35/` 实现，具体支持能力以对应算子说明为准。
+> - **sparseLt 目录**：`sparseLt/` 为稀疏矩阵高级运算库（类比 ops-blas 的 blasLt），已包含库管理、描述符、算法选择、执行计划和 matmul 计算接口。
 > - **测试目录**：`test/` 下按算子名组织（如 `test/spmv/`、`test/spmm/`），每个算子目录包含对应的测试源码和说明文档，可参考 `test/<算子名>/README.md` 了解算子调用样例。
-> - **测试工程**：`test/` 下用例需在配置工程时开启 `BUILD_TEST` 并设置 `TEST_NAMES`（分号分隔的算子测试子目录名）后才会参与构建，详见根目录 [CMakeLists.txt](../../../CMakeLists.txt) 与 [QuickStart](../../../docs/QUICKSTART.md)。
+> - **测试工程**：`test/` 下用例需在配置工程时开启 `BUILD_TEST` 并设置 `OP_LIST`（分号分隔的算子测试子目录名）后才会参与构建，详见根目录 [CMakeLists.txt](../../../CMakeLists.txt) 与 [QuickStart](../../../docs/QUICKSTART.md)。
 > - 若需补充算子或文档，欢迎参考 [贡献指南](../../../CONTRIBUTING.md)。
 
 项目全量目录层级介绍如下：
@@ -47,8 +47,8 @@
 ├── scripts                                            # 辅助脚本（打包安装说明、版本信息生成等）
 │   ├── package
 │   └── util
-├── test                                               # 算子级测试（BUILD_TEST=ON 且配置 TEST_NAMES 时参与构建）
-│   ├── CMakeLists.txt                                 # 按 TEST_NAMES 批量 add_subdirectory
+├── test                                               # 算子级测试（BUILD_TEST=ON 且配置 OP_LIST 时参与构建）
+│   ├── CMakeLists.txt                                 # 按 OP_LIST 批量 add_subdirectory
 │   └── ${operator}                                    # 算子目录（如 spmv、spmm）
 │       ├── CMakeLists.txt
 │       ├── README.md                                  # 可选，算子说明文档与调用样例
