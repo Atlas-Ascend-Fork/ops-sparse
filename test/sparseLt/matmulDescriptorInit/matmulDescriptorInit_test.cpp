@@ -255,6 +255,37 @@ TEST_F(MatmulDescriptorInitFixture, MatmulHandleNullptr)
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
 }
 
+// ---- handle points to an uninitialized handle value ----
+TEST_F(MatmulDescriptorInitFixture, DenseHandleValueNullptr)
+{
+    aclsparseLtHandle_t handle = nullptr;
+    sparse_test::MatDescrGuard mat;
+    EXPECT_EQ(mat.initDense(&handle, 16, 16, 16, 16, ACL_FLOAT, ACL_SPARSE_ORDER_COL),
+              ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
+    EXPECT_EQ(mat.get(), nullptr);
+}
+
+TEST_F(MatmulDescriptorInitFixture, StructuredHandleValueNullptr)
+{
+    aclsparseLtHandle_t handle = nullptr;
+    sparse_test::MatDescrGuard mat;
+    EXPECT_EQ(mat.initStructured(&handle, 16, 16, 16, 16, ACL_FLOAT, ACL_SPARSE_ORDER_COL,
+                                ACL_SPARSE_LT_SPARSITY_50_PERCENT),
+              ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
+    EXPECT_EQ(mat.get(), nullptr);
+}
+
+TEST_F(MatmulDescriptorInitFixture, MatmulHandleValueNullptr)
+{
+    StdMatmulInput in;
+    ASSERT_TRUE(InitStdMatmulInput(in, false));
+    aclsparseLtHandle_t handle = nullptr;
+    EXPECT_EQ(in.mm.init(&handle, ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+                         in.matA.ptr(), in.matB.ptr(), in.matC.ptr(), in.matD.ptr(), ACL_SPARSE_COMPUTE_32F),
+              ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
+    EXPECT_EQ(in.mm.get(), nullptr);
+}
+
 // ---- Dense 输出指针 nullptr / *非空覆盖 ----
 TEST_F(MatmulDescriptorInitFixture, DenseMatDescrNullptr)
 {

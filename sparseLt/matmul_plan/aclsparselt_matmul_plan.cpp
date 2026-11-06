@@ -53,7 +53,7 @@ aclsparseStatus_t aclsparseLtMatmulPlanInit(
     const aclsparseLtMatmulDescriptor_t*   matmulDescr,
     const aclsparseLtMatmulAlgSelection_t* algSelection)
 {
-    if (handle == nullptr) {
+    if (handle == nullptr || *handle == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
     }
 

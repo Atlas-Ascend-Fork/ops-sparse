@@ -131,7 +131,7 @@ inline aclsparseStatus_t ValidateMatDescCommonParams(const aclsparseLtHandle_t* 
                                                      int64_t cols, int64_t ld, uint32_t alignment,
                                                      aclDataType valueType, aclsparseOrder_t order)
 {
-    if (handle == nullptr)
+    if (handle == nullptr || *handle == nullptr)
     {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
     }

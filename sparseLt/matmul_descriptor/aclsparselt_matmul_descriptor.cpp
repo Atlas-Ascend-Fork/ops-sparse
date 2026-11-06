@@ -364,7 +364,7 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
     const aclsparseLtMatDescriptor_t*      matD,
     aclsparseComputeType_t                 computeType)
 {
-    if (handle == nullptr) {
+    if (handle == nullptr || *handle == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
     }
     if (matmulDescr == nullptr || *matmulDescr != nullptr) {

@@ -242,6 +242,27 @@ TEST_F(MatmulPlanInitFixture, PlanHandleNullptr)
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
 }
 
+// ---- handle points to an uninitialized handle value ----
+TEST_F(MatmulPlanInitFixture, AlgSelectionHandleValueNullptr)
+{
+    StdPlanInput in;
+    ASSERT_TRUE(InitStdPlanInput(in, false));
+    aclsparseLtHandle_t handle = nullptr;
+    EXPECT_EQ(in.algSel.init(&handle, in.mm.ptr(), ACL_SPARSE_LT_MATMUL_ALG_DEFAULT),
+              ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
+    EXPECT_EQ(in.algSel.get(), nullptr);
+}
+
+TEST_F(MatmulPlanInitFixture, PlanHandleValueNullptr)
+{
+    StdPlanInput in;
+    ASSERT_TRUE(InitStdPlanInput(in, true));
+    aclsparseLtHandle_t handle = nullptr;
+    sparse_test::PlanGuard plan;
+    EXPECT_EQ(plan.init(&handle, in.mm.ptr(), in.algSel.ptr()), ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR);
+    EXPECT_EQ(plan.get(), nullptr);
+}
+
 // ---- AlgSelection output nullptr / *非空 ----
 TEST_F(MatmulPlanInitFixture, AlgSelectionOutputNullptr)
 {
