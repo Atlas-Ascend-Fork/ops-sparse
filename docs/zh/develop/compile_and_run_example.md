@@ -304,14 +304,16 @@
     # 若为指定路径安装，请替换为：
     # source ${install_path}/cann/set_env.sh
 
-    # 若 ops-sparse 安装路径与 CANN 不同，需额外指定（大多数情况无需设置）
+    # 若 ops-sparse 安装路径与 CANN 不同，编译时指定路径，运行时也需能找到 libops_sparse.so
     # export OPS_SPARSE_PATH=/your/ops-sparse/install/path
+    # export LD_LIBRARY_PATH="${OPS_SPARSE_PATH}/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     ```
 
     > **说明**：
     >
     > - `source set_env.sh` 会自动设置 `ASCEND_HOME_PATH` 环境变量，CMakeLists.txt 通过该变量定位 CANN 头文件和库文件。
     > - 若 ops-sparse 的 run 包已安装到 CANN 目录下（参见 [安装 run 包](#安装-run-包)），则 `OPS_SPARSE_PATH` 默认与 `ASCEND_HOME_PATH` 相同，无需额外设置。
+    > - 自定义 `OPS_SPARSE_PATH` 时请同时设置上面的 `LD_LIBRARY_PATH`；本示例编译使用 `-DCMAKE_SKIP_RPATH=TRUE`，可执行文件不会记录自定义库目录。
 
 ## 步骤三：编译与运行
 
