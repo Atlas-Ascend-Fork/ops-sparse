@@ -97,6 +97,18 @@ public:
                 }
                 attempt++;
             }
+            // Repeated draws may exhaust the budget before the row reaches
+            // its requested size, especially for dense rows. Complete from
+            // the unused columns, sampling them without replacement.
+            if (static_cast<int>(rowCols.size()) < targetNnz) {
+                const auto sampledNnz = rowCols.size();
+                for (int32_t c = 0; c < cols; c++) {
+                    if (visited[c] != static_cast<int>(i))
+                        rowCols.push_back(c);
+                }
+                std::shuffle(rowCols.begin() + sampledNnz, rowCols.end(), rng_);
+                rowCols.resize(targetNnz);
+            }
             std::sort(rowCols.begin(), rowCols.end());
             for (int32_t c : rowCols) {
                 out.colIndices.push_back(c);
