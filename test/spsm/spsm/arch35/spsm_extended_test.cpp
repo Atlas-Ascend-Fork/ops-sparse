@@ -871,9 +871,12 @@ TEST_F(SpsmBoundaryTest, HostPointersAndDestroyedPlanRejected)
     ASSERT_EQ(aclsparseDnMatSetValues(p.b.get(), p.input.data()), SUCCESS);
     EXPECT_EQ(p.Solve(handle.get()), ACL_SPARSE_STATUS_INVALID_VALUE);
     ASSERT_EQ(aclsparseDnMatSetValues(p.b.get(), p.dB.get()), SUCCESS);
-    ASSERT_EQ(aclsparseSpSMDestroyDescr(p.plan.get()), SUCCESS);
+    // release() 先取走句柄：显式销毁与二次销毁均由本用例接管，
+    // 避免 ~SpSMDescrManager 对已销毁句柄再次 DestroyDescr（UAF/double free）。
+    aclsparseSpSMDescr_t rawPlan = p.plan.release();
+    ASSERT_EQ(aclsparseSpSMDestroyDescr(rawPlan), SUCCESS);
     EXPECT_EQ(p.Solve(handle.get()), ACL_SPARSE_STATUS_INVALID_VALUE);
-    EXPECT_EQ(aclsparseSpSMDestroyDescr(p.plan.get()), ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(aclsparseSpSMDestroyDescr(rawPlan), ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
 TEST_F(SpsmBoundaryTest, LargeFiniteComplexDivision)

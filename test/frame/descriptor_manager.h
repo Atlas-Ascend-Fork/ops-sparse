@@ -429,6 +429,45 @@ private:
     aclsparseSpSVDescr_t descr_ = nullptr;
 };
 
+class SpSMDescrManager {
+public:
+    SpSMDescrManager() {
+        auto s = aclsparseSpSMCreateDescr(&descr_);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseSpSMCreateDescr failed");
+    }
+
+    aclsparseSpSMDescr_t get() { return descr_; }
+
+    // 放弃所有权：调用方接管描述符生命周期（显式 DestroyDescr 用例须先
+    // release 取走句柄，避免析构对已销毁句柄二次销毁——UAF/double free）。
+    aclsparseSpSMDescr_t release() {
+        aclsparseSpSMDescr_t d = descr_;
+        descr_ = nullptr;
+        return d;
+    }
+
+    ~SpSMDescrManager() {
+        if (descr_) aclsparseSpSMDestroyDescr(descr_);
+    }
+
+    SpSMDescrManager(const SpSMDescrManager&) = delete;
+    SpSMDescrManager& operator=(const SpSMDescrManager&) = delete;
+    SpSMDescrManager(SpSMDescrManager&& other) noexcept : descr_(other.descr_) {
+        other.descr_ = nullptr;
+    }
+    SpSMDescrManager& operator=(SpSMDescrManager&& other) noexcept {
+        if (this != &other) {
+            if (descr_) aclsparseSpSMDestroyDescr(descr_);
+            descr_ = other.descr_;
+            other.descr_ = nullptr;
+        }
+        return *this;
+    }
+
+private:
+    aclsparseSpSMDescr_t descr_ = nullptr;
+};
+
 }
 
 #endif

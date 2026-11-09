@@ -43,7 +43,8 @@ inline bool VerifySpsmComponent(
         }
         double error = std::abs(x - y);
         maxError = std::max(maxError, error);
-        matched += error <= std::ldexp(1.0, -16) + std::ldexp(1.0, -10) * std::abs(y);
+        // mixed_tolerance_standard.md 2026-09-17 修订版：FLOAT32 rtol = atol = 2^-13
+        matched += error <= std::ldexp(1.0, -13) + std::ldexp(1.0, -13) * std::abs(y);
         int exponent = -125;
         if (y != 0)
         {
