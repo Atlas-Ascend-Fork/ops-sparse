@@ -88,7 +88,7 @@ docker run --name cann_container --device /dev/davinci0 --device /dev/davinci_ma
 
 #### 安装软件
 
-- **场景1：体验master版本能力或基于master版本进行开发**
+- **场景1：基于CANN weekly版本体验最新master能力或开发**
 
     1. **安装驱动与固件（运行态依赖）**
 
@@ -96,36 +96,13 @@ docker run --name cann_container --device /dev/davinci0 --device /dev/davinci_ma
 
     2. **安装CANN包**
 
-        请单击[下载链接](https://ascend.devcloud.huaweicloud.com/artifactory/cann-run-mirror/software/master/)，选择最新时间版本，并根据产品型号和环境架构下载对应包。安装命令如下，更多指导参考《[CANN软件安装指南](https://www.hiascend.com/document/redirect/CannCommunityInstWizard)》。
+        请参考《[CANN快速安装](https://www.hiascend.com/cann/download)》，选择`Weekly版本`，并根据产品系列、CPU架构、操作系统等下载对应包，最后参考页面提供的命令完成安装。
 
-        - 安装CANN toolkit包
+- **场景2：基于CANN 稳定版本体验分支能力或开发**
 
-             ```bash
-            # 确保安装包具有可执行权限
-            chmod +x Ascend-cann-toolkit_${cann_version}_linux-${arch}.run
-            # 安装命令
-            ./Ascend-cann-toolkit_${cann_version}_linux-${arch}.run --install --quiet --install-path=${install_path}
-            ```
+    请参考《[CANN快速安装](https://www.hiascend.com/cann/download)》，选择`稳定版本`（仅支持CANN 9.0.0及后续版本），并根据产品系列、CPU架构、操作系统等下载对应包，最后参考页面提供的命令完成安装。
 
-        - 安装CANN ops包（运行态依赖）
-
-            ops包是运行态依赖，若仅编译算子，可不安装此包。
-
-             ```bash
-            # 确保安装包具有可执行权限
-            chmod +x Ascend-cann-${soc_name}-ops_${cann_version}_linux-${arch}.run
-            # 安装命令
-            ./Ascend-cann-${soc_name}-ops_${cann_version}_linux-${arch}.run --install --quiet --install-path=${install_path}
-            ```
-
-            - \$\{cann\_version\}：表示CANN包版本号。
-            - \$\{arch\}：表示CPU架构，如aarch64、x86_64。
-            - \$\{soc\_name\}：表示NPU型号名称。
-            - \$\{install\_path\}：表示指定安装路径，ops包需与toolkit包安装在相同路径，root用户默认安装在`/usr/local/Ascend`目录。
-
-- **场景2：体验已发布版本能力或基于已发布版本进行开发**
-
-    请访问[CANN官网下载中心](https://www.hiascend.com/cann/download)，选择发布版本（仅支持CANN 9.0.0及后续版本），并根据产品型号和环境架构下载对应包，最后参考网页提供的命令完成安装。
+> 说明：若《CANN快速安装》页面提供的命令以 `./` 开头执行 `.run` 包，请先对下载的 `.run` 包执行 `chmod +x` 赋予可执行权限。
 
 #### 安装基础依赖
 

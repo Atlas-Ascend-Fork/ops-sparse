@@ -12,7 +12,7 @@ ops-sparse是[CANN](https://hiascend.com/software/cann) （Compute Architecture 
 
 ## 🛠️环境准备
 
-[环境部署](docs/zh/install/quick_install.md)是体验本项目能力的前提，请先完成NPU驱动、CANN包安装等，确保环境正常。
+[环境部署](docs/zh/install/quick_install.md)是体验本项目能力的前提，请先完成NPU驱动、CANN包安装等，确保环境正常。CANN 软件包（toolkit/ops 包）请从 [CANN 官网下载中心](https://www.hiascend.com/cann/download) 获取，并按产品系列、CPU 架构、操作系统选择对应版本。
 
 > **说明**：本项目仅支持CANN 9.0.0及后续版本，源码版本与CANN版本配套关系参见[release仓库](https://gitcode.com/cann/release-management)。
 
