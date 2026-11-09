@@ -55,13 +55,16 @@ L1_m64_b100_str64,64,100,64,well_cond,500,0.0001220703125,10.0,1e-5,SUCCESS
 L1_m128_b100_str128,128,100,128,well_cond,501,0.0001220703125,10.0,1e-5,SUCCESS
 L1_m8_b10000_str8,8,10000,8,well_cond,510,0.0001220703125,10.0,1e-5,SUCCESS
 L1_m16_b10000_str16,16,10000,16,well_cond,511,0.0001220703125,10.0,1e-5,SUCCESS
-# L1_m8_b100000_str8: mere_threshold 放宽至 0.0005（2.2.2 联调确认）
-# 原因：batchCount=100000 中仅 b74637 的 MERE=0.000230 略超原阈值 0.000122。
-# 该 batch 解元素 x[4]≈-1.875e-6（接近 0），FP32 绝对差异仅 ~2.3e-8（< 1 ULP），
-# 但相对误差被放大至 0.000920。Thomas FP32 同算法同精度下该元素 relErr=0.000254
-# 也超标，证实为 FP32 精度固有限制（非 CR 算法 bug）。MARE=0.000920 < outlier_limit。
-# 详见 .agent/issues/issue_20260713_b100000_precision_01.md
-L1_m8_b100000_str8,8,100000,8,well_cond,520,0.0005,10.0,1e-5,SUCCESS
+# L1_m8_b100000_str8 历史记录（2026-07 联调）：当时按 MERE_MARE 口径，batchCount=100000
+# 中仅 b74637 因解元素 x[4]≈-1.875e-6（接近 0）相对误差放大（MERE=0.000230 超原阈值
+# 0.000122；FP32 绝对差异 < 1 ULP，Thomas 参考同超，属 FP32 固有舍入而非算法 bug），
+# 曾将 mere_threshold 放宽至 0.0005。
+# 现行验证已切换为 VerifyPrecisionPerBatch -> applyMixedTolerance(ACL_FLOAT)，
+# mere_threshold/mare_multiplier 两列仅被解析、不再被消费；近零元素由混合容差的
+# atol + max(1e-2, 32*ULP) 逐元素机制覆盖。2026-11 本机 Ascend 950PR / CANN 9.1.0
+# 复测该用例 100000 batch 全部通过，历史超限已消除，数值归一回标准值 0.000122（口径
+# 一致性清理，无行为变更）。历史分析详见 .agent/issues/issue_20260713_b100000_precision_01.md
+L1_m8_b100000_str8,8,100000,8,well_cond,520,0.000122,10.0,1e-5,SUCCESS
 # =============================================================================
 # m=2048 纯 UB 路径边界 + m>2048 外层 GM 分块 CR 路径
 # 纯 UB 路径：3 <= m <= 2048（kMaxMForUBPath），bufferSizeExt 返回 0
