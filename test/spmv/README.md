@@ -51,22 +51,6 @@ python3 -m pip install build_out/cann_ops_sparse-*.whl --force-reinstall --no-de
 OPS_SPARSE_LIB_DIR=$PWD/build_out/lib64 python3 -m pytest test/spmv/python/ -v
 ```
 
-## A2/A3 转置 finalize 整数边界回归（无需 NPU）
-
-在仓库根目录运行：
-
-```bash
-g++ -std=c++17 -O2 -Wall -Wextra -Werror -I test/spmv/host/stubs \
-    test/spmv/host/spmv_trans_finalize_boundary_test.cpp \
-    -o /tmp/spmv_trans_finalize_boundary_test
-/tmp/spmv_trans_finalize_boundary_test
-```
-
-测试通过 host stub 执行实际 `SpmvTransFinalize` 模板中的循环，不分配显存。
-覆盖两种 16 位输出类型、`beta=0/1`、空输出、256 元素分块边界、
-`UINT32_MAX` 及相邻长度、多核分块和乘法提升边界，检查偏移、尾块长度和退出条件。
-stub 不执行数值运算、DMA 或同步，不能替代设备精度测试。
-
 ## A5 实现与调用约定
 
 实现位于 `sparse/spmv/arch35/`：
