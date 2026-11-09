@@ -203,7 +203,7 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Helpers: MIXED_TOLERANCE thresholds (experimental_standard.md)
+// Helpers: MIXED_TOLERANCE thresholds (mixed_tolerance_standard.md, 2026-09-17 修订版)
 //   per-element max_abs_error_limit = max(fixed_value, 32 * ULP)
 //   ULP(x) = 2^(floor(log2|x|) - mantissaBits)  for finite x != 0
 //   ULP(0) = 2^(emin - mantissaBits)              (subnormal ULP)
@@ -229,12 +229,17 @@ struct MixedToleranceDefaults {
 inline MixedToleranceDefaults getMixedToleranceDefaults(aclDataType dtype)
 {
     switch (dtype) {
-        case ACL_FLOAT16:       return {0.001953125, 0.001953125, 1e-1, 10, -14};
-        case ACL_BF16:          return {0.015625, 0.015625, 1.0, 7, -126};
-        case ACL_FLOAT:         return {0.0009765625, 1.52587890625e-5, 1e-2, 23, -126};
-        case ACL_FLOAT8_E4M3FN: return {0.25, 0.0625, 1.0, 3, -6};
-        case ACL_FLOAT8_E5M2:   return {0.5, 0.125, 1e-1, 2, -14};
-        default:                return {0.0009765625, 1.52587890625e-5, 1e-2, 23, -126};
+        case ACL_FLOAT16:       return {0.0009765625, 0.0009765625, 1e-1, 10, -14};
+        case ACL_BF16:          return {0.0078125, 0.0078125, 1e-1, 7, -126};
+        case ACL_FLOAT:         return {0.0001220703125, 0.0001220703125, 1e-2, 23, -126};
+        case ACL_FLOAT8_E4M3FN: return {0.125, 0.125, 1.0, 3, -6};
+        case ACL_FLOAT8_E5M2:   return {0.25, 0.25, 1.0, 2, -14};
+        default:
+            // 未列举 dtype（如 ACL_DOUBLE/ACL_HIFLOAT8/ACL_FLOAT8_E8M0 等宽或新格式）无标准行，
+            // 不按 FP16 的 ULP 数学低估误差：保守回落到 FLOAT32 行口径，并显式告警避免静默放宽。
+            std::cout << "[WARN] applyMixedTolerance: unsupported aclDataType " << static_cast<int>(dtype)
+                      << ", falling back to FLOAT32 thresholds" << std::endl;
+            return {0.0001220703125, 0.0001220703125, 1e-2, 23, -126};
     }
 }
 
