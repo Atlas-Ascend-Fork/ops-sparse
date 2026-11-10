@@ -330,12 +330,22 @@ static aclsparseStatus_t LaunchSparseToDenseKernel(
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     sparse2dense_kernel_do(
         reinterpret_cast<GM_ADDR>(matInner->ptrs),
         reinterpret_cast<GM_ADDR>(matInner->idxs),
         reinterpret_cast<GM_ADDR>(matInner->values),
         reinterpret_cast<GM_ADDR>(dnInner->values),
         tiling, useBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSparseToDense", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     OP_LOGI(kTag,
             "SIMT launched: m=%d n=%d fmt=%d blocks=%u nnz=%llu valType=%d order=%s",

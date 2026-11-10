@@ -720,10 +720,20 @@ aclsparseStatus_t LaunchAnalysis(aclsparseHandle_t handle,
   if (status != ACL_SPARSE_STATUS_SUCCESS) {
     return status;
   }
+  // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+  // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+  (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
   densetosparse_analysis_kernel_do(reinterpret_cast<GM_ADDR>(dense->values),
                                    reinterpret_cast<GM_ADDR>(sparse->ptrs),
                                    reinterpret_cast<GM_ADDR>(buffer), blocks,
                                    tiling, context->stream);
+  if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+    OP_LOGE("aclsparseDenseToSparse", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+    return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+  }
+
+
   if (logical == 0) {
     sparse->nnz = 0;
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -795,6 +805,10 @@ aclsparseStatus_t LaunchConvert(aclsparseHandle_t handle,
     return status;
   }
   ApplyConvertTilingMode(dense, sparse, &tiling);
+  // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+  // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+  (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
   densetosparse_convert_kernel_do(reinterpret_cast<GM_ADDR>(dense->values),
                                   reinterpret_cast<GM_ADDR>(buffer),
                                   reinterpret_cast<GM_ADDR>(sparse->ptrs),
@@ -804,6 +818,12 @@ aclsparseStatus_t LaunchConvert(aclsparseHandle_t handle,
                                   reinterpret_cast<GM_ADDR>(sparse->values),
                                   reinterpret_cast<GM_ADDR>(sparse->ellColInd),
                                   blocks, tiling, context->stream);
+  if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+    OP_LOGE("aclsparseDenseToSparse", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+    return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+  }
+
+
   return ACL_SPARSE_STATUS_SUCCESS;
 }
 
