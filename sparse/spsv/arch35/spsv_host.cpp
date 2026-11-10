@@ -471,6 +471,8 @@ static aclsparseStatus_t LaunchSpSVAnalysisKernel(
     GM_ADDR gmValues = reinterpret_cast<GM_ADDR>(ctx.values);
     GM_ADDR gmWorkspace = reinterpret_cast<GM_ADDR>(externalBuffer);
 
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     if (numBlocks <= 1) {
         spsv_analysis_kernel_do(
             gmRowPtr, gmColInd, gmValues, gmWorkspace,
@@ -488,6 +490,16 @@ static aclsparseStatus_t LaunchSpSVAnalysisKernel(
             numBlocks, ctx.tiling, ctx.useStream);
         spsv_analysis_final_kernel_do(
             gmWorkspace, ctx.tiling, ctx.useStream);
+    }
+
+    // clear-then-launch-then-peek（评审响应）：Peek 只读不清除，陈旧线程级错误
+    // 会被归因本次下发且一次失败后永久粘滞；下发前 aclrtGetLastError 清除。
+    // 下发失败不得静默按成功返回；异步执行错误仍由调用方同步观察（issue #357）。
+    const aclError analysisEnqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (analysisEnqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpSV_analysis", "kernel enqueue failed: %d",
+                static_cast<int>(analysisEnqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
 
     spsvDescr->analysisLaunched = true;
@@ -516,6 +528,29 @@ static aclsparseStatus_t ValidateSpSVDenseVecValues(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+// Solve 内核实参的存储区路由（评审响应：自 LaunchSpSVSolveKernel 提取，压函数行数至 50 内）：
+// 转置/CSR workspace 副本优先，无副本时回落用户 currentValues。
+static void RouteSpSVSolveStorage(
+    aclsparseSpSVDescr_t spsvDescr, const SpSVLaunchContext &ctx,
+    uint8_t *&rowPtr, uint8_t *&colInd, uint8_t *&values)
+{
+    if (ctx.tiling.transRowPtrOffset >= 0) {
+        uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
+        rowPtr = ws + ctx.tiling.transRowPtrOffset;
+        colInd = ws + ctx.tiling.transColIndOffset;
+        values = ws + ctx.tiling.transValuesOffset;
+    } else if (ctx.tiling.csrRowPtrOffset >= 0) {
+        uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
+        rowPtr = ws + ctx.tiling.csrRowPtrOffset;
+        colInd = ws + ctx.tiling.csrColIndOffset;
+        values = ws + ctx.tiling.csrValuesOffset;
+    }
+    if (spsvDescr->currentValues != nullptr && ctx.tiling.transRowPtrOffset < 0 &&
+        ctx.tiling.csrRowPtrOffset < 0) {
+        values = reinterpret_cast<uint8_t *>(spsvDescr->currentValues);
+    }
+}
+
 static aclsparseStatus_t LaunchSpSVSolveKernel(
     aclsparseHandle_t handle,
     aclsparseOperation_t opA,
@@ -532,23 +567,7 @@ static aclsparseStatus_t LaunchSpSVSolveKernel(
     uint8_t *rowPtr = ctx.rowPtr;
     uint8_t *colInd = ctx.colInd;
     uint8_t *values = ctx.values;
-
-    if (ctx.tiling.transRowPtrOffset >= 0) {
-        uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
-        rowPtr = ws + ctx.tiling.transRowPtrOffset;
-        colInd = ws + ctx.tiling.transColIndOffset;
-        values = ws + ctx.tiling.transValuesOffset;
-    } else if (ctx.tiling.csrRowPtrOffset >= 0) {
-        uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
-        rowPtr = ws + ctx.tiling.csrRowPtrOffset;
-        colInd = ws + ctx.tiling.csrColIndOffset;
-        values = ws + ctx.tiling.csrValuesOffset;
-    }
-
-    if (spsvDescr->currentValues != nullptr && ctx.tiling.transRowPtrOffset < 0 &&
-        ctx.tiling.csrRowPtrOffset < 0) {
-        values = reinterpret_cast<uint8_t *>(spsvDescr->currentValues);
-    }
+    RouteSpSVSolveStorage(spsvDescr, ctx, rowPtr, colInd, values);
 
     struct aclsparseDnVecDescr *vecXInner = nullptr;
     struct aclsparseDnVecDescr *vecYInner = nullptr;
@@ -566,6 +585,7 @@ static aclsparseStatus_t LaunchSpSVSolveKernel(
     OP_LOGI("aclsparseSpSV_solve", "launching solve kernel: m=%" PRId64 " numBlocks=%u",
             ctx.tiling.m, numBlocks);
 
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
     spsv_solve_kernel_do(
         reinterpret_cast<GM_ADDR>(rowPtr),
         reinterpret_cast<GM_ADDR>(colInd),
@@ -574,6 +594,15 @@ static aclsparseStatus_t LaunchSpSVSolveKernel(
         reinterpret_cast<GM_ADDR>(vecYPtr),
         reinterpret_cast<GM_ADDR>(spsvDescr->workspaceBuffer),
         numBlocks, ctx.tiling, ctx.useStream);
+
+    // clear-then-launch-then-peek（评审响应）：Peek 只读不清除，下发前
+    // aclrtGetLastError 清除陈旧错误（issue #357）。
+    const aclError solveEnqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (solveEnqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpSV_solve", "kernel enqueue failed: %d",
+                static_cast<int>(solveEnqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -606,6 +635,8 @@ static aclsparseStatus_t HandleSolveZeroNnz(
         tiling.alphaDevicePtr = 0;
     }
 
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     if (spsvDescr->cachedDiagType == 1) {
         spsv_scale_copy_kernel_do(
             reinterpret_cast<GM_ADDR>(vecXInner->values),
@@ -616,6 +647,14 @@ static aclsparseStatus_t HandleSolveZeroNnz(
             reinterpret_cast<GM_ADDR>(vecXInner->values),
             reinterpret_cast<GM_ADDR>(vecYInner->values),
             1, tiling, h->stream);
+    }
+    // ZeroNnz 的 scale 内核同样不得静默假成功；clear-then-launch-then-peek
+    // 只归因本次下发（issue #357）。
+    const aclError zeroNnzEnqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (zeroNnzEnqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpSV_solve", "zero-nnz kernel enqueue failed: %d",
+                static_cast<int>(zeroNnzEnqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -919,16 +958,33 @@ aclsparseStatus_t aclsparseSpSV_updateMatrix(
     uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
     uint8_t *newVals = reinterpret_cast<uint8_t *>(newValues);
 
+    // clear-then-launch-then-peek（评审响应）：Peek 只读不清除，陈旧线程级错误
+    // 会被归因本次下发且一次失败后永久粘滞；下发前 aclrtGetLastError 清除
+    // （!424 spsm 分片已实证直接 Peek 误伤 10 例）。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     if (updatePart == ACL_SPARSE_SPSV_UPDATE_GENERAL) {
         UpdateMatrixGeneral(spsvDescr, newValues, ws, newVals, tiling, useStream);
-        spsvDescr->updateMatrixCalled = true;
     } else if (updatePart == ACL_SPARSE_SPSV_UPDATE_DIAGONAL) {
         UpdateMatrixDiagonal(spsvDescr, ws, newVals, tiling, useStream);
-        spsvDescr->updateMatrixCalled = true;
     } else {
         OP_LOGE("aclsparseSpSV_updateMatrix", "unsupported updatePart=%d", updatePart);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+
+    // UpdateMatrixGeneral/Diagonal 为 void helper，含 5 个内部下发点；
+    // 入口单点检查覆盖全部（issue #357）。
+    // 检查必须先于 updateMatrixCalled 置位（评审响应）：失败时若标志已置，
+    // ValidateSpSVSolveConsistency 的 !updateMatrixCalled 放行条件被假标志
+    // 绕过，后续 solve 用陈旧 workspace 副本静默算错。与 analysis 路径
+    // （analysisLaunched 置位前检查）口径一致。
+    const aclError updateEnqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (updateEnqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpSV_updateMatrix", "kernel enqueue failed: %d",
+                static_cast<int>(updateEnqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    spsvDescr->updateMatrixCalled = true;
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
