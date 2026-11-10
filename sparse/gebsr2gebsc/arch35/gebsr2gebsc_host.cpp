@@ -474,7 +474,7 @@ static Gebsr2GebscLaunchParams ComputeGebsr2GebscLaunchParams(
     return p;
 }
 
-static void LaunchGebsr2GebscKernels(
+static aclsparseStatus_t LaunchGebsr2GebscKernels(
     int mb, int nb, int nnzb,
     const void *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
     void *bscVal, int *bscColPtr, int *bscRowInd,
@@ -485,6 +485,9 @@ static void LaunchGebsr2GebscKernels(
     int32_t copyMode, int32_t dirAVal,
     uint32_t aivCoreNum, aclrtStream stream)
 {
+    // clear-then-launch-then-peek（issue #357 分族）
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     auto *gmColInd = reinterpret_cast<GM_ADDR>(const_cast<int *>(bsrColIndA));
     auto *gmRowPtr = reinterpret_cast<GM_ADDR>(const_cast<int *>(bsrRowPtrA));
     auto *gmBsrVal = reinterpret_cast<GM_ADDR>(const_cast<void *>(bsrValA));
@@ -504,6 +507,12 @@ static void LaunchGebsr2GebscKernels(
                   mb, nb, nnzb, baseVal, copyVal, stripeSize, valSize,
                   rowBlockDimA, colBlockDimA, rowBlockDimC, colBlockDimC,
                   copyMode, dirAVal, numBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("gebsr2gebsc", "kernel enqueue failed");
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+
 }
 
 static aclsparseStatus_t LaunchGebsr2GebscKernel(
@@ -555,12 +564,15 @@ static aclsparseStatus_t LaunchGebsr2GebscKernel(
             rowBlockDimA, colBlockDimA, rowBlockDimC, colBlockDimC,
             lp.copyMode, lp.dirAVal);
 
-    LaunchGebsr2GebscKernels(
+    aclsparseStatus_t launchSt = LaunchGebsr2GebscKernels(
         mb, nb, nnzb, bsrValA, bsrRowPtrA, bsrColIndA,
         bscVal, bscColPtr, bscRowInd,
         workspace, lp.valSize, lp.copyVal, baseVal, lp.numBlocks, lp.stripeSize,
         rowBlockDimA, colBlockDimA, rowBlockDimC, colBlockDimC,
         lp.copyMode, lp.dirAVal, aivCoreNum, h->stream);
+    if (launchSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return launchSt;
+    }
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
