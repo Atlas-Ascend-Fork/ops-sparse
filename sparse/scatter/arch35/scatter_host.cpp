@@ -219,11 +219,20 @@ static aclsparseStatus_t LaunchScatterKernel(
             static_cast<unsigned long long>(tiling.nnz), tiling.numBlocks,
             tiling.threadsPerBlock, tiling.idxBase, tiling.idxType, tiling.valType);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     scatter_kernel_do(
         reinterpret_cast<GM_ADDR>(xInner->indices),
         reinterpret_cast<GM_ADDR>(xInner->values),
         reinterpret_cast<GM_ADDR>(yInner->values),
         tiling, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseScatter", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

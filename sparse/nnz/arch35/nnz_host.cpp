@@ -175,6 +175,10 @@ static aclsparseStatus_t ComputeTilingAndLaunch(
             tiling.lda, tiling.dirA, tiling.totalUnits, tiling.unitSize, numBlocks,
             (h->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) ? "HOST" : "DEVICE");
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     nnz_kernel_do(
         reinterpret_cast<GM_ADDR>(const_cast<float *>(A)),
         reinterpret_cast<GM_ADDR>(nnzPerRowColumn),
@@ -182,6 +186,11 @@ static aclsparseStatus_t ComputeTilingAndLaunch(
         tiling, numBlocks, stream);
 
     OP_LOGI("aclsparseSnnz", "Kernel launched, numBlocks=%u", numBlocks);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSnnz", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

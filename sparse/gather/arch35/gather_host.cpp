@@ -233,9 +233,18 @@ static aclsparseStatus_t LaunchGatherKernel(
         "aclsparseGather", "Tiling: nnz=%ld, idxBase=%d, valType=%d, idxType=%d, numBlocks=%u", tiling.nnz,
         tiling.idxBase, tiling.valType, tiling.idxType, tiling.numBlocks);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     gather_kernel_do(
         reinterpret_cast<GM_ADDR>(vecX->indices), reinterpret_cast<GM_ADDR>(const_cast<void*>(vecY->values)),
         reinterpret_cast<GM_ADDR>(vecX->values), tiling, handle->stream);
+
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseGather", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }
