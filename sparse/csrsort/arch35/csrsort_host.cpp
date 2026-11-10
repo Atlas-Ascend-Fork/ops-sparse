@@ -132,10 +132,18 @@ LaunchCsrsortKernel(aclsparseHandle_t handle, int m, int nnz,
 
   OP_LOGI("aclsparseXcsrsort", "launching kernel: blockDim=%u, stream=%p",
           tiling.coreNum, stream);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
   csrsort_kernel_do(
       reinterpret_cast<uint8_t *>(const_cast<int *>(csrRowPtr)),
       reinterpret_cast<uint8_t *>(csrColInd), reinterpret_cast<uint8_t *>(P),
       reinterpret_cast<uint8_t *>(pBuffer), tiling, tiling.coreNum, stream);
+  if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+    return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+  }
+
   return ACL_SPARSE_STATUS_SUCCESS;
 }
 

@@ -224,7 +224,15 @@ static aclsparseStatus_t LaunchCoosortKernel(
     auto *gmP = reinterpret_cast<GM_ADDR>(pOut);
 
     constexpr uint32_t numBlocks = 1;
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     coosort_kernel_do(gmRow, gmCol, gmP, tiling, numBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -247,7 +255,15 @@ static aclsparseStatus_t LaunchCoosortMultiCoreKernel(
     auto *gmP = reinterpret_cast<GM_ADDR>(pOut);
     auto *gmWs = reinterpret_cast<GM_ADDR>(pBuffer);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     coosort_multi_core_kernel_do(gmRow, gmCol, gmP, gmWs, tiling, tiling.coreNum, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

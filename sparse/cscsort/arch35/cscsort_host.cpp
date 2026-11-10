@@ -126,11 +126,19 @@ static aclsparseStatus_t LaunchCscsortKernel(aclsparseHandle_t handle, int m, in
     }
 
     OP_LOGI("aclsparseXcscsort", "launching kernel: blockDim=%u, stream=%p", tiling.coreNum, stream);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     cscsort_kernel_do(reinterpret_cast<GM_ADDR>(const_cast<int *>(cscColPtr)),
                       reinterpret_cast<GM_ADDR>(cscRowInd),
                       reinterpret_cast<GM_ADDR>(P),
                       reinterpret_cast<GM_ADDR>(pBuffer),
                       tiling, tiling.coreNum, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

@@ -374,7 +374,15 @@ static aclsparseStatus_t LaunchKernel(
     GM_ADDR gmRowPtr = reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(csrRowPtr));
     GM_ADDR gmCooRowInd = reinterpret_cast<GM_ADDR>(cooRowInd);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     csr2coo_kernel_do(gmRowPtr, gmCooRowInd, tiling, numBlocks, ToInternalHandle(handle)->stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
