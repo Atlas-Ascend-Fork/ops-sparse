@@ -539,12 +539,16 @@ static SpGemmValidateTilingData MakeValidateTiling(
     return validate;
 }
 
-static void LaunchValidation(
+static aclsparseStatus_t LaunchValidation(
     aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
     uint8_t *base, const SpGemmWorkLayout &layout,
     const SpGemmValidateTilingData &validate, uint32_t validateBlocks,
     aclrtStream stream)
 {
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spgemm_validate_kernel_do(
         reinterpret_cast<GM_ADDR>(matA->ptrs), reinterpret_cast<GM_ADDR>(matA->idxs),
         reinterpret_cast<GM_ADDR>(matB->ptrs), reinterpret_cast<GM_ADDR>(matB->idxs),
@@ -552,6 +556,11 @@ static void LaunchValidation(
         reinterpret_cast<GM_ADDR>(base + layout.total),
         reinterpret_cast<GM_ADDR>(base + layout.regular),
         reinterpret_cast<GM_ADDR>(base + layout.error), validate, validateBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpGEMM", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 static aclsparseStatus_t LaunchProductCount(
@@ -572,16 +581,30 @@ static aclsparseStatus_t LaunchProductCount(
     work.nnzA = static_cast<int32_t>(matA->nnz);
     work.nnzB = static_cast<int32_t>(matB->nnz);
     work.rowsPerBlock = RowsPerBlock(matA->rows, workBlocks);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spgemm_work_kernel_do(
         reinterpret_cast<GM_ADDR>(matA->ptrs), reinterpret_cast<GM_ADDR>(matA->idxs),
         reinterpret_cast<GM_ADDR>(matB->ptrs), reinterpret_cast<GM_ADDR>(base + layout.counts),
         reinterpret_cast<GM_ADDR>(base + layout.regular),
         reinterpret_cast<GM_ADDR>(base + layout.error), work, workBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpGEMM", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
     SpGemmScanTilingData scan{};
     scan.count = static_cast<int32_t>(matA->rows);
     scan.numChunks = static_cast<int32_t>(NumScanChunks(matA->rows));
     scan.chunkSize = static_cast<int32_t>(ScanChunkSize(matA->rows));
     scan.outerBlocks = ScanBlocks(matA->rows);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spgemm_scan_i64_kernel_do(
         reinterpret_cast<GM_ADDR>(base + layout.counts),
         reinterpret_cast<GM_ADDR>(base + layout.offsets),
@@ -590,6 +613,12 @@ static aclsparseStatus_t LaunchProductCount(
         reinterpret_cast<GM_ADDR>(base + layout.total),
         reinterpret_cast<GM_ADDR>(base + layout.regular),
         reinterpret_cast<GM_ADDR>(base + layout.error), scan, scan.outerBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpGEMM", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -687,12 +716,16 @@ static aclsparseStatus_t ValidateComputeOutput(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static void LaunchComputeKernel(
+static aclsparseStatus_t LaunchComputeKernel(
     aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
     aclsparseSpMatDescr_t matC, uint8_t *workBase, uint8_t *computeBase,
     const SpGemmWorkLayout &workLayout, const SpGemmComputeLayout &computeLayout,
     const SpGemmComputeTilingData &compute, uint32_t blocks, aclrtStream stream)
 {
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spgemm_compute_kernel_do(
         reinterpret_cast<GM_ADDR>(matA->ptrs), reinterpret_cast<GM_ADDR>(matA->idxs),
         reinterpret_cast<GM_ADDR>(matA->values), reinterpret_cast<GM_ADDR>(matB->ptrs),
@@ -704,9 +737,14 @@ static void LaunchComputeKernel(
         reinterpret_cast<GM_ADDR>(computeBase + computeLayout.candidateVals),
         reinterpret_cast<GM_ADDR>(computeBase + computeLayout.uniqueCounts),
         reinterpret_cast<GM_ADDR>(computeBase + computeLayout.error), compute, blocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpGEMM", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static void LaunchNnzScan(
+static aclsparseStatus_t LaunchNnzScan(
     aclsparseConstSpMatDescr_t matA, aclsparseSpMatDescr_t matC,
     uint8_t *base, const SpGemmComputeLayout &layout, aclrtStream stream)
 {
@@ -715,6 +753,10 @@ static void LaunchNnzScan(
     scan.numChunks = static_cast<int32_t>(NumScanChunks(matA->rows));
     scan.chunkSize = static_cast<int32_t>(ScanChunkSize(matA->rows));
     scan.outerBlocks = ScanBlocks(matA->rows);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spgemm_scan_i32_kernel_do(
         reinterpret_cast<GM_ADDR>(base + layout.uniqueCounts),
         reinterpret_cast<GM_ADDR>(matC->ptrs),
@@ -722,6 +764,11 @@ static void LaunchNnzScan(
         reinterpret_cast<GM_ADDR>(base + layout.blockOffsets),
         reinterpret_cast<GM_ADDR>(base + layout.total),
         reinterpret_cast<GM_ADDR>(base + layout.error), scan, scan.outerBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpGEMM", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 static aclsparseStatus_t LaunchNonEmptyCompute(
@@ -757,8 +804,11 @@ static aclsparseStatus_t LaunchNonEmptyCompute(
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     auto *workBase = static_cast<uint8_t *>(descr->externalBuffer1);
-    LaunchComputeKernel(matA, matB, matC, workBase, base,
+    status = LaunchComputeKernel(matA, matB, matC, workBase, base,
         workLayout, layout, compute, blocks, context->stream);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
     complete = compute.regularDegree > 0;
     if (complete) {
         matC->nnz = static_cast<uint64_t>(descr->numProducts);
@@ -766,7 +816,10 @@ static aclsparseStatus_t LaunchNonEmptyCompute(
         descr->copyRequired = compute.directOutput == 0;
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    LaunchNnzScan(matA, matC, base, layout, context->stream);
+    status = LaunchNnzScan(matA, matC, base, layout, context->stream);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -898,6 +951,10 @@ static aclsparseStatus_t LaunchCopy(
     copy.numBlocks = blocks;
     auto *workBase = static_cast<uint8_t *>(descr->externalBuffer1);
     auto *computeBase = static_cast<uint8_t *>(descr->externalBuffer2);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spgemm_copy_kernel_do(
         reinterpret_cast<GM_ADDR>(workBase + workLayout.offsets),
         reinterpret_cast<GM_ADDR>(computeBase + computeLayout.uniqueCounts),
@@ -905,6 +962,12 @@ static aclsparseStatus_t LaunchCopy(
         reinterpret_cast<GM_ADDR>(computeBase + computeLayout.candidateVals),
         reinterpret_cast<GM_ADDR>(matC->ptrs), reinterpret_cast<GM_ADDR>(matC->idxs),
         reinterpret_cast<GM_ADDR>(matC->values), copy, blocks, context->stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpGEMM", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
