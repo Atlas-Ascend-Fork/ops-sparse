@@ -98,7 +98,7 @@ static aclsparseStatus_t FillCsrRowPtrZero(
 // ===========================================================================
 // 公共：K1 (CountRows) launch
 // ===========================================================================
-static void LaunchCountKernel(
+static aclsparseStatus_t LaunchCountKernel(
     aclrtStream stream,
     GM_ADDR gmRowInd, GM_ADDR gmWorkspace,
     int32_t nnz, int32_t baseVal, int32_t m,
@@ -116,10 +116,17 @@ static void LaunchCountKernel(
     countTiling.idxBase = baseVal;
     countTiling.m = m;
 
+    // clear-then-launch-then-peek（issue #357 分族）
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     coo2csr_count_kernel_do(
         gmRowInd, gmWorkspace, countTiling, numBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
     OP_LOGD("aclsparseXcoo2csr",
             "K1 (CountRows) launched, blocks=%u", numBlocks);
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 // ===========================================================================
@@ -174,8 +181,15 @@ static aclsparseStatus_t LaunchFusedKernel(
     fusedTiling.m = m;
     fusedTiling.idxBase = baseVal;
 
+    // clear-then-launch-then-peek（issue #357 分族）
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     coo2csr_fused_kernel_do(
         gmRowInd, gmWorkspace, gmCsrRowPtr, fusedTiling, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     OP_LOGD("aclsparseXcoo2csr",
             "Fused kernel launched (nnz=%d, m=%d)", nnz, m);
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -184,12 +198,16 @@ static aclsparseStatus_t LaunchFusedKernel(
 // ===========================================================================
 // 多核并行前缀和 Phase A/B/C
 // ===========================================================================
-static void LaunchPrefixSumPhases(
+static aclsparseStatus_t LaunchPrefixSumPhases(
     aclrtStream stream,
     GM_ADDR gmWorkspace, GM_ADDR gmCsrRowPtr, GM_ADDR gmBlockTotals,
     int32_t m, int32_t baseVal,
     uint32_t chunkSize, uint32_t numBlocksPS)
 {
+    // clear-then-launch-then-peek（issue #357 分族）
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
+
     // Phase A: 各 block 局部前缀和
     Coo2CsrPrefixSumLocalTilingData localTiling{};
     localTiling.m = m;
@@ -214,19 +232,26 @@ static void LaunchPrefixSumPhases(
 
     coo2csr_prefixsum_correct_kernel_do(
         gmCsrRowPtr, gmBlockTotals, correctTiling, numBlocksPS, stream);
+
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 // ===========================================================================
-// 多核并行前缀和路径：K1 + Phase A/B/C（3 阶段）
+// 前缀和路径：K1 + (多核 Phase A/B/C | 单核单 kernel)，按 useParallel 分支
+// （评审响应：合并两个同签名函数，从根源消重复）
 // ===========================================================================
-static aclsparseStatus_t LaunchParallelPrefixSum(
-    aclrtStream stream,
-    GM_ADDR gmRowInd, GM_ADDR gmWorkspace, GM_ADDR gmCsrRowPtr,
-    int32_t nnz, int32_t m, int32_t baseVal,
-    uint32_t aivCoreNum)
+static aclsparseStatus_t LaunchPrefixSum(
+    aclrtStream stream, GM_ADDR gmRowInd, GM_ADDR gmWorkspace, GM_ADDR gmCsrRowPtr,
+    int32_t nnz, int32_t m, int32_t baseVal, uint32_t aivCoreNum, bool useParallel)
 {
-    LaunchCountKernel(stream, gmRowInd, gmWorkspace,
+    aclsparseStatus_t countSt = LaunchCountKernel(stream, gmRowInd, gmWorkspace,
                       nnz, baseVal, m, aivCoreNum);
+    if (countSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return countSt;
+    }
 
     uint32_t chunkSize = CeilDiv<uint32_t>(
         static_cast<uint32_t>(m), aivCoreNum);
@@ -239,8 +264,30 @@ static aclsparseStatus_t LaunchParallelPrefixSum(
     size_t rowCountSize = static_cast<size_t>(m) * sizeof(int32_t);
     auto *gmBlockTotals = reinterpret_cast<GM_ADDR>(gmWorkspace + rowCountSize);
 
-    LaunchPrefixSumPhases(stream, gmWorkspace, gmCsrRowPtr, gmBlockTotals,
-                          m, baseVal, chunkSize, numBlocksPS);
+    if (!useParallel) {
+        Coo2CsrPrefixSumTilingData psTiling{};
+        psTiling.m = m;
+        psTiling.idxBase = baseVal;
+
+        // clear-then-launch-then-peek（issue #357 分族，评审响应：peek 移到下发后）
+        (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
+        coo2csr_prefixsum_kernel_do(
+            gmWorkspace, gmCsrRowPtr, psTiling, stream);
+        if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+        }
+        OP_LOGD("aclsparseXcoo2csr", "K2 (PrefixSum) launched");
+
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    aclsparseStatus_t psRet = LaunchPrefixSumPhases(
+        stream, gmWorkspace, gmCsrRowPtr, gmBlockTotals,
+        m, baseVal, chunkSize, numBlocksPS);
+    if (psRet != ACL_SPARSE_STATUS_SUCCESS) {
+        return psRet;
+    }
 
     OP_LOGD("aclsparseXcoo2csr",
             "K2 (ParallelPrefixSum) launched, blocksPS=%u, chunkSize=%u",
@@ -249,28 +296,7 @@ static aclsparseStatus_t LaunchParallelPrefixSum(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-// ===========================================================================
-// 单核前缀和路径：K1 + 单核 PrefixSum
-// ===========================================================================
-static aclsparseStatus_t LaunchSingleCorePrefixSum(
-    aclrtStream stream,
-    GM_ADDR gmRowInd, GM_ADDR gmWorkspace, GM_ADDR gmCsrRowPtr,
-    int32_t nnz, int32_t m, int32_t baseVal,
-    uint32_t aivCoreNum)
-{
-    LaunchCountKernel(stream, gmRowInd, gmWorkspace,
-                      nnz, baseVal, m, aivCoreNum);
 
-    Coo2CsrPrefixSumTilingData psTiling{};
-    psTiling.m = m;
-    psTiling.idxBase = baseVal;
-
-    coo2csr_prefixsum_kernel_do(
-        gmWorkspace, gmCsrRowPtr, psTiling, stream);
-    OP_LOGD("aclsparseXcoo2csr", "K2 (PrefixSum) launched");
-
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
 
 // ===========================================================================
 // Kernel launch 主入口
@@ -323,14 +349,10 @@ static aclsparseStatus_t LaunchCoo2CsrKernel(
         return LaunchFusedKernel(
             stream, gmRowInd, gmWorkspace, gmCsrRowPtr,
             nnz, m, baseVal);
-    } else if (useParallel) {
-        return LaunchParallelPrefixSum(
-            stream, gmRowInd, gmWorkspace, gmCsrRowPtr,
-            nnz, m, baseVal, aivCoreNum);
     } else {
-        return LaunchSingleCorePrefixSum(
+        return LaunchPrefixSum(
             stream, gmRowInd, gmWorkspace, gmCsrRowPtr,
-            nnz, m, baseVal, aivCoreNum);
+            nnz, m, baseVal, aivCoreNum, useParallel);
     }
 }
 
