@@ -124,13 +124,20 @@ struct bfloat16_t {
         return x.f;
     }
     bfloat16_t &operator=(float f) {
-        // round half away from zero，与 kernel 侧 Cast(CAST_ROUND) 舍入一致
+        // Round to nearest, ties to even, matching the kernel CAST_RINT conversion.
         union {
             float f;
             uint32_t u;
         } x = {f};
-        x.u += 0x8000u;
-        bits = static_cast<uint16_t>(x.u >> 16);
+        if ((x.u & 0x7f800000u) == 0x7f800000u) {
+            bits = static_cast<uint16_t>(x.u >> 16);
+            if ((x.u & 0x007fffffu) != 0) {
+                bits |= 0x0040u; // Keep every NaN a NaN, including a payload in discarded bits.
+            }
+        } else {
+            x.u += 0x7fffu + ((x.u >> 16) & 1u);
+            bits = static_cast<uint16_t>(x.u >> 16);
+        }
         return *this;
     }
 };
@@ -298,6 +305,60 @@ std::vector<OutT> SpmvTransCpu(const std::vector<int32_t> &csrRowPtr,
     return z;
 }
 
+// Pure FP32 tests use a higher-precision oracle, retained through verification.
+// Other paths retain their existing product rounding and output semantics.
+template <typename CompT, typename ValT, typename OutT>
+using SpmvGoldenT = std::conditional_t<std::is_same_v<CompT, float> &&
+    std::is_same_v<ValT, float> && std::is_same_v<OutT, float>, double, OutT>;
+
+template <typename CompT, typename ValT, typename OutT>
+struct SpmvGoldenInput {
+    const std::vector<int32_t> &rowPtr;
+    const std::vector<int32_t> &colInd;
+    const std::vector<ValT> &values;
+    const std::vector<ValT> &x;
+    const std::vector<OutT> &y;
+    size_t rows;
+    size_t cols;
+    CompT alpha;
+    CompT beta;
+    bool transpose;
+    bool productsInValT;
+};
+
+template <typename CompT, typename ValT, typename OutT>
+std::vector<SpmvGoldenT<CompT, ValT, OutT>> BuildSpmvGolden(
+    const SpmvGoldenInput<CompT, ValT, OutT> &input) {
+    using GoldenT = SpmvGoldenT<CompT, ValT, OutT>;
+    using RefCompT = std::conditional_t<std::is_same_v<GoldenT, double>, double, CompT>;
+    const std::vector<GoldenT> goldenY(input.y.begin(), input.y.end());
+    // Cube references retain their existing product rounding and accumulation.
+    if (input.productsInValT && !input.transpose) {
+        const auto rounded = SpmvCpu<CompT, ValT, OutT>(input.rowPtr, input.colInd,
+            input.values, input.x, input.y, input.alpha, input.beta, true);
+        return std::vector<GoldenT>(rounded.begin(), rounded.end());
+    }
+    if (input.transpose) {
+        return SpmvTransCpu<RefCompT, ValT, GoldenT>(input.rowPtr, input.colInd,
+            input.values, input.x, goldenY, input.rows, input.cols, input.alpha, input.beta);
+    }
+    return SpmvCpu<RefCompT, ValT, GoldenT>(input.rowPtr, input.colInd,
+        input.values, input.x, goldenY, input.alpha, input.beta, input.productsInValT);
+}
+
+bool TestSpmvGoldenPrecision() {
+    const std::vector<int32_t> rowPtr{0, 3};
+    const std::vector<int32_t> colInd{0, 1, 2};
+    const std::vector<float> values{16777216.0f, 1.0f, -16777216.0f};
+    const std::vector<float> x{1.0f, 1.0f, 1.0f};
+    const auto golden = BuildSpmvGolden<float, float, float>({rowPtr, colInd,
+        values, x, {0.0f}, 1, 3, 1.0f, 0.0f, false, false});
+    static_assert(std::is_same_v<typename decltype(golden)::value_type, double>);
+    const auto cube = BuildSpmvGolden<float, float, float>({rowPtr, colInd,
+        values, x, {0.0f}, 1, 3, 1.0f, 0.0f, false, true});
+    return golden[0] == 1.0 && cube[0] == 0.0;
+}
+
 // ===================== 精度验证（生态算子开源精度标准：混合容差） =====================
 
 struct MixedToleranceParams {
@@ -322,7 +383,8 @@ MixedToleranceParams GetMixedToleranceParams() {
 }
 
 /* 浮点结果判定：matchedRatio / maxAbsError 双门限，打印告警与汇总，返回 0/1 */
-int32_t CheckMatchedRatioAndAbsError(float matchedRatio, float maxAbsError,
+template <typename ErrorT>
+int32_t CheckMatchedRatioAndAbsError(float matchedRatio, ErrorT maxAbsError,
                                      const MixedToleranceParams &params) {
     int32_t status = 0;
     if (matchedRatio < params.requiredMatchedRatio) {
@@ -341,113 +403,7 @@ int32_t CheckMatchedRatioAndAbsError(float matchedRatio, float maxAbsError,
     return status;
 }
 
-template <typename T>
-int32_t Verification(const std::vector<T> &cpuGolden,
-                     const std::vector<T> &npuRet,
-                     float &MARE, float &MERE,
-                     const MixedToleranceParams &params,
-                     std::string *worstInfo = nullptr) {
-    if (npuRet.size() != cpuGolden.size()) {
-        std::cout << "[ERROR] The size of npuRet and cpuGolden is not equal!\n";
-        return 1;
-    }
-
-    int32_t status = 0;
-    std::cout << "Verification...\n";
-    for (int i = 0; i < std::min(static_cast<int64_t>(npuRet.size()), static_cast<int64_t>(10)); ++i) {
-        std::cout << "golden[" << i << "]=" << static_cast<float>(cpuGolden[i])
-                  << " npu_result[" << i << "]=" << static_cast<float>(npuRet[i]) << "\n";
-    }
-
-    size_t passCount = 0;
-    size_t worstIdx = 0;
-    float worstGolden = 0.0f;
-    float worstNpu = 0.0f;
-    float maxAbsError = 0.0f;
-    float worstMargin = 0.0f;
-
-    for (size_t i = 0; i < npuRet.size(); ++i) {
-        float npuVal = static_cast<float>(npuRet[i]);
-        float cpuVal = static_cast<float>(cpuGolden[i]);
-
-        if (!std::isfinite(npuVal) || !std::isfinite(cpuVal)) {
-            // Non-finite values must not be excused by the matched-ratio tolerance:
-            // fabs(NaN) compares false against both the running max error and the
-            // per-element tolerance, so without this check a lone NaN element is
-            // silently skipped and a 99%-match result can still report success.
-            maxAbsError = std::numeric_limits<float>::infinity();
-            worstIdx = i;
-            worstGolden = cpuVal;
-            worstNpu = npuVal;
-            worstMargin = std::numeric_limits<float>::infinity();
-            std::cout << "[WARNING] value[" << i << "] is not finite: golden=" << cpuVal
-                      << " npu_result=" << npuVal << "\n";
-            continue;
-        }
-
-        float aError = std::fabs(npuVal - cpuVal);
-        if (aError > maxAbsError) {
-            maxAbsError = aError;
-        }
-
-        if constexpr (std::is_same_v<T, int32_t>) {
-            if (npuRet[i] == cpuGolden[i]) {
-                passCount++;
-            } else {
-                std::cout << "[WARNING] value[" << i
-                          << "] in result is not equal to golden, the value is: "
-                          << npuRet[i] << " while the golden is: " << cpuGolden[i] << "\n";
-                const float margin = aError;
-                if (margin > worstMargin) {
-                    worstMargin = margin;
-                    worstIdx = i;
-                    worstGolden = cpuVal;
-                    worstNpu = npuVal;
-                }
-            }
-        } else {
-            const float tolerance = params.atol + params.rtol * std::fabs(cpuVal);
-            if (aError <= tolerance) {
-                passCount++;
-            } else {
-                const float margin = aError - tolerance;
-                if (margin > worstMargin) {
-                    worstMargin = margin;
-                    worstIdx = i;
-                    worstGolden = cpuVal;
-                    worstNpu = npuVal;
-                }
-            }
-        }
-    }
-
-    const float matchedRatio = npuRet.empty() ? 1.0f
-                                              : static_cast<float>(passCount) / static_cast<float>(npuRet.size());
-    MARE = maxAbsError;
-    MERE = matchedRatio;
-
-    if constexpr (std::is_same_v<T, int32_t>) {
-        if (matchedRatio < params.requiredMatchedRatio) {
-            std::cout << "[WARNING] Integer exact match check fail!\n";
-            status = 1;
-        }
-        std::cout << "Matched Ratio = " << matchedRatio
-                  << "; Max Absolute Error = " << maxAbsError << "\n";
-    } else {
-        status = CheckMatchedRatioAndAbsError(matchedRatio, maxAbsError, params);
-    }
-
-    if (worstInfo) {
-        std::ostringstream oss;
-        oss << "worst[" << worstIdx << "] golden=" << worstGolden << " npu=" << worstNpu;
-        if constexpr (!std::is_same_v<T, int32_t>) {
-            oss << " margin=" << worstMargin;
-        }
-        *worstInfo = oss.str();
-    }
-
-    return status;
-}
+#include "spmv_test_verification.h"
 
 // ===================== 设备资源创建 =====================
 
@@ -730,18 +686,16 @@ int Test(const size_t M, const size_t N, const float sparsity,
 
     std::vector<ValT> xVec;
     std::vector<OutT> yVec; {
-        std::mt19937 rng(fixedSeed != 0 ? fixedSeed : static_cast<uint32_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
+        const uint32_t seed = fixedSeed != 0 ? fixedSeed : static_cast<uint32_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        std::cout << "Dense vector seed = " << seed << "\n";
+        std::mt19937 rng(seed);
         GenerateDenseVector<ValT>(xSize, xVec, rng);
         GenerateDenseVector<OutT>(ySize, yVec, rng);
     }
 
-    std::vector<OutT> output_cpu;
-    if (transpose)
-        output_cpu = SpmvTransCpu<CompT, ValT, OutT>(csrRowPtr, csrColInd, csrVal, xVec, yVec, M, N, alphaVal, betaVal);
-    else
-        output_cpu = SpmvCpu<CompT, ValT, OutT>(csrRowPtr, csrColInd, csrVal, xVec, yVec, alphaVal, betaVal,
-                                               productsInValT);
+    const auto output_cpu = BuildSpmvGolden<CompT, ValT, OutT>({csrRowPtr, csrColInd,
+        csrVal, xVec, yVec, M, N, alphaVal, betaVal, transpose, productsInValT});
 
     std::vector<int32_t> csrRowPtrUp, csrColIndUp;
     ShiftCsrIndexBase(csrRowPtr, csrColInd, indexBase, csrRowPtrUp, csrColIndUp);
@@ -870,9 +824,11 @@ struct TestStats {
 static size_t PresmokeSpmvDimension(size_t dimension, const std::string &tag)
 {
     // Fixed synchronization and transpose precision regressions retain the
-    // exact dimensions that originally exposed their failures.
+    // exact dimensions that originally exposed their failures. The fixed-seed
+    // FP16 alpha2 fixture also retains the shape that exposed double rounding.
     if (SparseTestFullEnabled() || dimension <= 64 ||
-        tag.find("sync-fixed-") == 0 || tag.find("transpose-") == 0) {
+        tag.find("sync-fixed-") == 0 || tag.find("transpose-") == 0 ||
+        tag == "f16-f16-alpha2") {
         return dimension;
     }
     // Round upward to retain non-aligned dimensions such as 513 -> 129.
@@ -1865,10 +1821,15 @@ static void RunTwoProdRegression(TestStats &stats, aclrtStream stream) {
 // TwoProd 零值行漏入快路径回归（依赖 TestStats / SpmvRunEnv / SetupSpmvRunEnv，
 // include 位置须在上述定义之后，参照 spmv_test_c64.h / spmv_test_cube.h 先例）
 #include "spmv_test_zero_row.h"
+#include "spmv_test_rne16.h"
 
 // ===================== main =====================
 
 int main(int32_t /*argc*/, char * /*argv*/[]) {
+    if (!TestSpmvVerification()) {
+        std::cout << "[FAIL] SpMV host verification regression\n";
+        return 1;
+    }
     int32_t deviceId = 0;
     aclrtStream stream = nullptr;
     int ret = Init(deviceId, &stream);
@@ -2197,7 +2158,10 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     // ---- Float16→Float16 Non-Transpose ----
     std::cout << "\n======== Float16→Float16 Non-Transpose ========\n";
     RunAndTrack<float, half, half>(512, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "f16-f16-default");
-    RunAndTrack<float, half, half>(512, 1024, 0.9f, 2.0f, 0.0f, false, stats, stream, "f16-f16-alpha2");
+    // Keep the FP16 midpoint regression reproducible with the original acceptance.
+    RunAndTrack<float, half, half>(512, 1024, 0.9f, 2.0f, 0.0f, false, stats, stream,
+        "f16-f16-alpha2", 0, 0.0f, nullptr, nullptr, nullptr,
+        ACL_SPARSE_SPMV_ALG_DEFAULT, false, false, 11u);
     RunAndTrack<float, half, half>(512, 1024, 0.9f, 1.0f, 1.0f, false, stats, stream, "f16-f16-beta1");
     RunAndTrack<float, half, half>(256, 2048, 0.95f, 1.5f, 0.2f, false, stats, stream, "f16-f16-mix");
     RunAndTrack<float, half, half>(512, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "f16-f16-sparse");
@@ -2281,7 +2245,11 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
         for (auto &v : ltValF)
             v = valDist(rng);
         RunAndTrack<float, float, float>(128, 20480, 0.0f, 1.0f, 0.0f, false, stats, stream,
-                           "longtail-f32", 0, 0.0f, &ltRowPtr, &ltColInd, &ltValF);
+                           "longtail-f32", 0, 0.0f, &ltRowPtr, &ltColInd, &ltValF,
+                           ACL_SPARSE_SPMV_ALG_DEFAULT, false, false, 30u);
+        RunAndTrack<float, float, float>(128, 20480, 0.0f, 1.0f, 0.0f, false, stats, stream,
+                           "longtail-f32-seed81", 0, 0.0f, &ltRowPtr, &ltColInd, &ltValF,
+                           ACL_SPARSE_SPMV_ALG_DEFAULT, false, false, 81u);
         RunAndTrack<float, float, float>(128, 20480, 0.0f, 1.5f, 0.2f, true, stats, stream,
                            "longtail-trans-f32", 0, 0.0f, &ltRowPtr, &ltColInd, &ltValF);
         std::vector<int32_t> ltValI(ltColInd.size());
@@ -2317,6 +2285,7 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
 
     // ---- TwoProd 零值行漏入快路径（P2 评审反例，确定性精确值判定） ----
     RunZeroRowRegression(stats, stream);
+    RunSpmvRne16Regression(stats, stream);
 
     // ---- 空行混合（emptyRowProb=0.5） ----
     std::cout << "\n======== Empty-Row Mixed Tests ========\n";

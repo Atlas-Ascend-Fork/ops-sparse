@@ -541,7 +541,8 @@ __aicore__ inline void SpmvRneMidpointRecheck(uint32_t chunkSize, const __ubuf__
         uint16_t nb = nbBits[j];
         if (nb == b)
             continue;
-        float mid = (yfPtr[j] + nfPtr[j]) * 0.5f;   // 中点，f32 精确可表示
+        // Compute the midpoint without overflowing the sum of finite neighbours.
+        float mid = yfPtr[j] + (nfPtr[j] - yfPtr[j]) * 0.5f;
         if (stgPtr[j] != mid)
             continue;
         float d3 = (hiPtr[j] - mid) + loPtr[j];     // 真值 - 中点（双字）
@@ -551,6 +552,34 @@ __aicore__ inline void SpmvRneMidpointRecheck(uint32_t chunkSize, const __ubuf__
         bool nfUp = nfPtr[j] > yfPtr[j];
         yBits[j] = (up == nfUp) ? nb : b;
     }
+}
+
+// Round a double-single value once to 16 bits. All Cast buffers are disjoint;
+// callers may reuse dead input storage for yf/nf/neighbors after the full barrier.
+template <typename OutT>
+__aicore__ inline void SpmvRneFinalize16(uint32_t count, const __ubuf__ float *hiPtr,
+                                        const __ubuf__ float *loPtr,
+                                        AscendC::LocalTensor<float> rounded,
+                                        AscendC::LocalTensor<OutT> output,
+                                        AscendC::LocalTensor<float> yf,
+                                        AscendC::LocalTensor<float> nf,
+                                        AscendC::LocalTensor<OutT> neighbors) {
+    const __ubuf__ float *stgPtr = reinterpret_cast<__ubuf__ float *>(rounded.GetPhyAddr());
+    AscendC::PipeBarrier<PIPE_ALL>();
+    AscendC::Cast<OutT, float>(output, rounded, AscendC::RoundMode::CAST_RINT, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Cast<float, OutT>(yf, output, AscendC::RoundMode::CAST_NONE, count);
+    // Vector writes must be visible before scalar midpoint inspection.
+    AscendC::PipeBarrier<PIPE_ALL>();
+    auto *yfPtr = reinterpret_cast<__ubuf__ float *>(yf.GetPhyAddr());
+    auto *bits = reinterpret_cast<__ubuf__ uint16_t *>(output.GetPhyAddr());
+    auto *nbBits = reinterpret_cast<__ubuf__ uint16_t *>(neighbors.GetPhyAddr());
+    SpmvRnePickNeighbors<OutT>(count, loPtr, stgPtr, yfPtr, bits, nbBits);
+    AscendC::PipeBarrier<PIPE_ALL>();
+    AscendC::Cast<float, OutT>(nf, neighbors, AscendC::RoundMode::CAST_NONE, count);
+    AscendC::PipeBarrier<PIPE_ALL>();
+    auto *nfPtr = reinterpret_cast<__ubuf__ float *>(nf.GetPhyAddr());
+    SpmvRneMidpointRecheck<OutT>(count, hiPtr, loPtr, stgPtr, yfPtr, nfPtr, bits, nbBits);
 }
 
 /**
@@ -635,6 +664,10 @@ private:
     __aicore__ inline void ConvertVals(const AscendC::LocalTensor<ValT> &raw,
                                        const AscendC::LocalTensor<CompT> &dst, uint32_t count);
     __aicore__ inline void FinalizeGroup(uint32_t groupStart, uint32_t groupCount);
+    __aicore__ inline void FinalizeIntGroup(uint32_t groupStart, uint32_t groupCount,
+                                            AscendC::LocalTensor<CompT> acc);
+    __aicore__ inline void CombineOutputRows(uint32_t groupCount, __ubuf__ CompT *accPtrW,
+        __ubuf__ CompT *accLoPtr, const __ubuf__ OutT *yRawPtr, const __ubuf__ CompT *yCPtr);
     __aicore__ inline CompT ReduceProdSegment(const AscendC::LocalTensor<CompT> &prod,
                                               int32_t start, int32_t len);
     // 一次性矢量归约全向量 max|x|（仅 CompT==float 调用；供 Dot2 守卫外提谓词）
@@ -876,34 +909,77 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::LoadNzTile(int32_t t0, int
 }
 
 template <typename CompT, typename ValT, typename OutT>
+__aicore__ inline void SpmvKernel<CompT, ValT, OutT>::FinalizeIntGroup(
+    uint32_t groupStart, uint32_t groupCount, AscendC::LocalTensor<CompT> acc) {
+    // INT32 精确路径：标量整数运算
+    AscendC::LocalTensor<OutT> yRaw = bufYRaw.Get<OutT>();
+    if (this->readY != 0) {
+        AscendC::DataCopyExtParams cp{1, (uint32_t)(groupCount * sizeof(OutT)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<OutT> pad{false, 0, 0, 0};
+        AscendC::DataCopyPad(yRaw, yVecGm[groupStart], cp, pad);
+        // MTE2→标量读 yRaw
+        AscendC::PipeBarrier<PIPE_MTE2>();
+    }
+    for (uint32_t r = 0; r < groupCount; r++) {
+        int32_t out = this->alpha * acc.GetValue(r);
+        if (this->readY != 0) {
+            out += this->beta * yRaw.GetValue(r);
+        }
+        acc.SetValue(r, out);
+    }
+    // 标量写 acc→MTE3 写出：无细粒度屏障可用（PipeBarrier<PIPE_S> 实测有毒），保留全屏障
+    AscendC::PipeBarrier<PIPE_ALL>();
+    AscendC::DataCopyExtParams cp{1, (uint32_t)(groupCount * sizeof(OutT)), 0, 0, 0};
+    AscendC::DataCopyPad(yVecGm[groupStart], acc, cp);
+    // MTE3 读 acc→次组矢量清零覆写 WAR：MTE3 细粒度屏障对 V 不可靠风险，保留全屏障
+    AscendC::PipeBarrier<PIPE_ALL>();
+    return;
+}
+
+template <typename CompT, typename ValT, typename OutT>
+__aicore__ inline void SpmvKernel<CompT, ValT, OutT>::CombineOutputRows(
+    uint32_t groupCount, __ubuf__ CompT *accPtrW, __ubuf__ CompT *accLoPtr,
+    const __ubuf__ OutT *yRawPtr, const __ubuf__ CompT *yCPtr) {
+    for (uint32_t r = 0; r < groupCount; r++) {
+        float pA, eA;
+        SpmvTwoProd(this->alpha, accPtrW[r], pA, eA);
+        float resH = pA;
+        float resL = eA + this->alpha * accLoPtr[r]; // alpha*accLo 的舍入为 ~2^-48 量级，可忽略
+        if (this->readY != 0) {
+            float yv;
+            if constexpr (std::is_same_v<CompT, OutT>) {
+                yv = yRawPtr[r];
+            }
+            else {
+                yv = yCPtr[r];
+            }
+            float pB, eB;
+            SpmvTwoProd(this->beta, yv, pB, eB);
+            float t = resH + pB;
+            float bp = t - resH;
+            resL += (resH - (t - bp)) + (pB - bp) + eB;
+            resH = t;
+        }
+        if constexpr (std::is_same_v<OutT, half> || std::is_same_v<OutT, bfloat16_t>) {
+            // Keep the residual until the final 16-bit midpoint decision.
+            float rounded, residual;
+            SpmvTwoSum(resH, resL, rounded, residual);
+            accPtrW[r] = rounded;
+            accLoPtr[r] = residual;
+        } else {
+            accPtrW[r] = static_cast<CompT>(resH + resL);
+        }
+    }
+}
+
+template <typename CompT, typename ValT, typename OutT>
 __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::FinalizeGroup(uint32_t groupStart, uint32_t groupCount) {
     // 组收尾全屏障：去屏障实测破环（float N 路径），保留
     AscendC::PipeBarrier<PIPE_ALL>();
     AscendC::LocalTensor<CompT> acc = bufAcc.Get<CompT>();
 
     if constexpr (std::is_same_v<CompT, int32_t>) {
-        // INT32 精确路径：标量整数运算
-        AscendC::LocalTensor<OutT> yRaw = bufYRaw.Get<OutT>();
-        if (this->readY != 0) {
-            AscendC::DataCopyExtParams cp{1, (uint32_t)(groupCount * sizeof(OutT)), 0, 0, 0};
-            AscendC::DataCopyPadExtParams<OutT> pad{false, 0, 0, 0};
-            AscendC::DataCopyPad(yRaw, yVecGm[groupStart], cp, pad);
-            // MTE2→标量读 yRaw
-            AscendC::PipeBarrier<PIPE_MTE2>();
-        }
-        for (uint32_t r = 0; r < groupCount; r++) {
-            int32_t out = this->alpha * acc.GetValue(r);
-            if (this->readY != 0) {
-                out += this->beta * yRaw.GetValue(r);
-            }
-            acc.SetValue(r, out);
-        }
-        // 标量写 acc→MTE3 写出：无细粒度屏障可用（PipeBarrier<PIPE_S> 实测有毒），保留全屏障
-        AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::DataCopyExtParams cp{1, (uint32_t)(groupCount * sizeof(OutT)), 0, 0, 0};
-        AscendC::DataCopyPad(yVecGm[groupStart], acc, cp);
-        // MTE3 读 acc→次组矢量清零覆写 WAR：MTE3 细粒度屏障对 V 不可靠风险，保留全屏障
-        AscendC::PipeBarrier<PIPE_ALL>();
+        FinalizeIntGroup(groupStart, groupCount, acc);
         return;
     }
 
@@ -931,28 +1007,7 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::FinalizeGroup(uint32_t gro
             yCPtr = reinterpret_cast<__ubuf__ CompT *>(yC.GetPhyAddr());
         }
     }
-    for (uint32_t r = 0; r < groupCount; r++) {
-        float pA, eA;
-        SpmvTwoProd(this->alpha, accPtrW[r], pA, eA);
-        float resH = pA;
-        float resL = eA + this->alpha * accLoPtr[r]; // alpha*accLo 的舍入为 ~2^-48 量级，可忽略
-        if (this->readY != 0) {
-            float yv;
-            if constexpr (std::is_same_v<CompT, OutT>) {
-                yv = yRawPtr[r];
-            }
-            else {
-                yv = yCPtr[r];
-            }
-            float pB, eB;
-            SpmvTwoProd(this->beta, yv, pB, eB);
-            float t = resH + pB;
-            float bp = t - resH;
-            resL += (resH - (t - bp)) + (pB - bp) + eB;
-            resH = t;
-        }
-        accPtrW[r] = static_cast<CompT>(resH + resL);
-    }
+    CombineOutputRows(groupCount, accPtrW, accLoPtr, yRawPtr, yCPtr);
     // 标量写 acc→矢量 Cast/MTE3 写出：无细粒度屏障可用，保留全屏障
     AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -962,8 +1017,10 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::FinalizeGroup(uint32_t gro
     }
     else {
         AscendC::LocalTensor<OutT> yOut = bufYOut.Get<OutT>();
-        AscendC::Cast<OutT, CompT>(yOut, acc, AscendC::RoundMode::CAST_ROUND, groupCount);
-        AscendC::PipeBarrier<PIPE_V>();
+        // Old y has been consumed; reuse its storage only as neighbor bit patterns.
+        SpmvRneFinalize16<OutT>(groupCount, accPtrW, accLoPtr, acc, yOut,
+            bufColIdx.Get<float>(), bufValsC.Get<float>(), bufYRaw.Get<OutT>());
+        AscendC::PipeBarrier<PIPE_ALL>();
         AscendC::DataCopyExtParams cp{1, (uint32_t)(groupCount * sizeof(OutT)), 0, 0, 0};
         AscendC::DataCopyPad(yVecGm[groupStart], yOut, cp);
     }
@@ -1300,7 +1357,7 @@ private:
                                          __ubuf__ float *outPtr);
     // 16bit 输出的 RNE 中点重判（见 SpmvRnePickNeighbors/SpmvRneMidpointRecheck）
     __aicore__ inline void RneMidpointFix16(uint32_t chunkSize, const __ubuf__ float *hiPtr,
-                                            const __ubuf__ float *loPtr, const __ubuf__ float *stgPtr);
+                                            const __ubuf__ float *loPtr);
 
 private:
     AscendC::TPipe pipe;
@@ -1728,7 +1785,7 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::FinalizeDs() {
             }
         }
         if constexpr (!OUT_F32) {
-            RneMidpointFix16(chunkSize, hiPtr, loPtr, stgPtr);
+            RneMidpointFix16(chunkSize, hiPtr, loPtr);
         }
         // 标量/矢量写 yChunk→MTE3 写出（含标量写路径），保留全屏障
         AscendC::PipeBarrier<PIPE_ALL>();
@@ -1801,35 +1858,9 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::CombineBetaY0(
 
 template <typename CompT, typename ValT, typename OutT>
 __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::RneMidpointFix16(
-    uint32_t chunkSize, const __ubuf__ float *hiPtr, const __ubuf__ float *loPtr,
-    const __ubuf__ float *stgPtr) {
-    AscendC::LocalTensor<float> tmpT = bufColIdx.Get<float>();
-    AscendC::LocalTensor<float> tmpU = bufValsC.Get<float>();
-    AscendC::LocalTensor<float> tmpV = bufXRow.Get<float>();
-    AscendC::LocalTensor<OutT> yChunk = bufYRaw.Get<OutT>();
-    AscendC::LocalTensor<float> stgHi = bufYAcc.Get<float>();
-    // 标量写 stgPtr(tmpV)→矢量 Cast 读（RAW）：无细粒度屏障可用，保留全屏障
-    AscendC::PipeBarrier<PIPE_ALL>();
-    AscendC::Cast<OutT, float>(yChunk, tmpV, AscendC::RoundMode::CAST_RINT, chunkSize);
-    // 矢量写 yChunk → 矢量 Cast 读（同管程序序，屏障作防御）
-    AscendC::PipeBarrier<PIPE_V>();
-    // bisheng 不支持标量 bf16 转换：16bit→f32 一律矢量 Cast staging
-    //（tmpT = cast 后结果 yf，tmpU = 邻居值 nf，bufYAcc 复用为邻居位型暂存）
-    AscendC::Cast<float, OutT>(tmpT, yChunk, AscendC::RoundMode::CAST_NONE, chunkSize);
-    // 矢量写 tmpT → 标量读 yfPtr/yBits
-    AscendC::PipeBarrier<PIPE_V>();
-    __ubuf__ float *yfPtr = reinterpret_cast<__ubuf__ float *>(tmpT.GetPhyAddr());
-    __ubuf__ uint16_t *yBits = reinterpret_cast<__ubuf__ uint16_t *>(yChunk.GetPhyAddr());
-    __ubuf__ uint16_t *nbBits = reinterpret_cast<__ubuf__ uint16_t *>(stgHi.GetPhyAddr());
-    AscendC::LocalTensor<OutT> nbT = bufYAcc.Get<OutT>();
-    SpmvRnePickNeighbors<OutT>(chunkSize, loPtr, stgPtr, yfPtr, yBits, nbBits);
-    // 标量写 nbBits→矢量 Cast 读（RAW）：无细粒度屏障可用，保留全屏障
-    AscendC::PipeBarrier<PIPE_ALL>();
-    AscendC::Cast<float, OutT>(tmpU, nbT, AscendC::RoundMode::CAST_NONE, chunkSize);
-    // 矢量写 tmpU → 标量读 nfPtr
-    AscendC::PipeBarrier<PIPE_V>();
-    __ubuf__ float *nfPtr = reinterpret_cast<__ubuf__ float *>(tmpU.GetPhyAddr());
-    SpmvRneMidpointRecheck<OutT>(chunkSize, hiPtr, loPtr, stgPtr, yfPtr, nfPtr, yBits, nbBits);
+    uint32_t chunkSize, const __ubuf__ float *hiPtr, const __ubuf__ float *loPtr) {
+    SpmvRneFinalize16<OutT>(chunkSize, hiPtr, loPtr, bufXRow.Get<float>(),
+        bufYRaw.Get<OutT>(), bufColIdx.Get<float>(), bufValsC.Get<float>(), bufYAcc.Get<OutT>());
 }
 
 template <typename CompT, typename ValT, typename OutT>
