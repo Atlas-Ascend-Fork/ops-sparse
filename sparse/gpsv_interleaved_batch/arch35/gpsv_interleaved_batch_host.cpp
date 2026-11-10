@@ -155,6 +155,11 @@ static aclsparseStatus_t LaunchGpsvInterleavedBatchKernel(
     // wsD4 at indices 0..m-4 and wsD5 at indices 0..m-5 — fully covered by the
     // writes. Positions m-2 and m-1 are never read by back-substitution for d4'/d5'.
 
+    // clear-then-launch-then-peek（评审响应）：Peek 只读不清除，线程级 last error
+    // 会保留先前已被正确处理的 ACL 调用错误（误报归属错位），且一次失败后线程内
+    // 永久粘滞。下发前 aclrtGetLastError 清除，使 Peek 只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     gpsv_interleaved_batch_kernel_do(
         reinterpret_cast<GM_ADDR>(ds),
         reinterpret_cast<GM_ADDR>(dl),
@@ -169,6 +174,15 @@ static aclsparseStatus_t LaunchGpsvInterleavedBatchKernel(
 
     OP_LOGI("aclsparseSgpsvInterleavedBatch",
             "Kernel launched, numBlocks=%u", numBlocks);
+    // 下发失败不得静默按成功返回（对齐 ops-solver #361/#366 修复口径）：
+    // PeekAtLastError 捕获 enqueue 期错误（非法启动配置等）；异步执行错误仍由
+    // 调用方同步流后经既有契约观察。
+    const aclError enqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (enqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSgpsvInterleavedBatch", "kernel enqueue failed: %d", static_cast<int>(enqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

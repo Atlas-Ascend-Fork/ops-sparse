@@ -155,6 +155,11 @@ static aclsparseStatus_t LaunchGtsv2NopivotKernel(
             "launch: m=%d, n=%d, ldb=%d, numBlocks=%u (SIMT), aivCoreNum=%u, wsBytes=%zu",
             m, n, ldb, numBlocks, aivCoreNum, bufferSize);
 
+    // clear-then-launch-then-peek（评审响应）：Peek 只读不清除，线程级 last error
+    // 会保留先前已被正确处理的 ACL 调用错误（误报归属错位），且一次失败后线程内
+    // 永久粘滞。下发前 aclrtGetLastError 清除，使 Peek 只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     gtsv2_nopivot_kernel_do(
         reinterpret_cast<GM_ADDR>(const_cast<float *>(dl)),
         reinterpret_cast<GM_ADDR>(const_cast<float *>(d)),
@@ -167,6 +172,15 @@ static aclsparseStatus_t LaunchGtsv2NopivotKernel(
 
     OP_LOGI("aclsparseSgtsv2Nopivot",
             "Kernel launched, numBlocks=%u", numBlocks);
+
+    // 下发失败不得静默按成功返回（对齐 ops-solver #361/#366 修复口径）：
+    // PeekAtLastError 捕获 enqueue 期错误（非法启动配置等）；异步执行错误仍由
+    // 调用方同步流后经既有契约观察。
+    const aclError enqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (enqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsolverSgtsv2Nopivot", "kernel enqueue failed: %d", static_cast<int>(enqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
 
     return ACL_SPARSE_STATUS_SUCCESS;
 }

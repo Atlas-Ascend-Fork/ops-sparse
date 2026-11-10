@@ -314,6 +314,26 @@ static void SetupTilingData(
     tiling.workspacePerBatchBytes = params.workspacePerBatchBytes;
 }
 
+/// Tiling 详情日志（评审响应：自 LaunchGtsv2StridedBatchKernel 提取，压函数行数至 50 内）
+static void LogStridedBatchTiling(const Gtsv2StridedBatchTilingData &tiling,
+                                  const Gtsv2LaunchParams &params)
+{
+    OP_LOGD("aclsparseSgtsv2StridedBatch",
+            "Tiling: m=%d, batchCount=%d, batchStride=%d, batchPerCoreBase=%d, remainder=%d, numBlocks=%u, "
+            "numLayers=%d, saveBufSize=%d, useGmWorkspace=%d, mPad=%d, alignedM=%d, "
+            "outerLevels=%d, outerTileElems=%d, mPadOuter=%lld, regionBByteOffset=%lld, "
+            "saveRegionByteOffset=%lld, workspacePerBatchBytes=%lld",
+            tiling.m, tiling.batchCount, tiling.batchStride, tiling.batchPerCoreBase,
+            tiling.remainder, params.numBlocks,
+            tiling.numLayers, tiling.saveBufSize, tiling.useGmWorkspace,
+            tiling.mPad, tiling.alignedM,
+            tiling.outerLevels, tiling.outerTileElems,
+            static_cast<long long>(tiling.mPadOuter),
+            static_cast<long long>(tiling.regionBByteOffset),
+            static_cast<long long>(tiling.saveRegionByteOffset),
+            static_cast<long long>(tiling.workspacePerBatchBytes));
+}
+
 /// Kernel launch（异步，不调用 aclrtSynchronizeStream）
 static aclsparseStatus_t LaunchGtsv2StridedBatchKernel(
     aclsparseHandle_t handle, int m,
@@ -346,21 +366,7 @@ static aclsparseStatus_t LaunchGtsv2StridedBatchKernel(
     }
     Gtsv2StridedBatchTilingData tiling;
     SetupTilingData(tiling, m, batchCount, batchStride, params, useGmWorkspace);
-
-    OP_LOGD("aclsparseSgtsv2StridedBatch",
-            "Tiling: m=%d, batchCount=%d, batchStride=%d, batchPerCoreBase=%d, remainder=%d, numBlocks=%u, "
-            "numLayers=%d, saveBufSize=%d, useGmWorkspace=%d, mPad=%d, alignedM=%d, "
-            "outerLevels=%d, outerTileElems=%d, mPadOuter=%lld, regionBByteOffset=%lld, "
-            "saveRegionByteOffset=%lld, workspacePerBatchBytes=%lld",
-            tiling.m, tiling.batchCount, tiling.batchStride, tiling.batchPerCoreBase,
-            tiling.remainder, params.numBlocks,
-            tiling.numLayers, tiling.saveBufSize, tiling.useGmWorkspace,
-            tiling.mPad, tiling.alignedM,
-            tiling.outerLevels, tiling.outerTileElems,
-            static_cast<long long>(tiling.mPadOuter),
-            static_cast<long long>(tiling.regionBByteOffset),
-            static_cast<long long>(tiling.saveRegionByteOffset),
-            static_cast<long long>(tiling.workspacePerBatchBytes));
+    LogStridedBatchTiling(tiling, params);
 
     auto *gmDl = reinterpret_cast<GM_ADDR>(const_cast<float *>(dl));
     auto *gmD = reinterpret_cast<GM_ADDR>(const_cast<float *>(d));
@@ -368,9 +374,23 @@ static aclsparseStatus_t LaunchGtsv2StridedBatchKernel(
     auto *gmX = reinterpret_cast<GM_ADDR>(x);
     auto *gmBuf = reinterpret_cast<GM_ADDR>(pBuffer);
 
+    // clear-then-launch-then-peek（评审响应）：Peek 只读不清除，线程级 last error
+    // 会保留先前已被正确处理的 ACL 调用错误（误报归属错位），且一次失败后线程内
+    // 永久粘滞。下发前 aclrtGetLastError 清除，使 Peek 只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     gtsv2_strided_batch_kernel_do(gmDl, gmD, gmDu, gmX, gmBuf, tiling, params.numBlocks, stream);
 
     OP_LOGI("aclsparseSgtsv2StridedBatch", "Kernel launched, numBlocks=%u", params.numBlocks);
+    // 下发失败不得静默按成功返回（对齐 ops-solver #361/#366 修复口径）：
+    // PeekAtLastError 捕获 enqueue 期错误（非法启动配置等）；异步执行错误仍由
+    // 调用方同步流后经既有契约观察。
+    const aclError enqueueStatus = aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL);
+    if (enqueueStatus != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSgtsv2StridedBatch", "kernel enqueue failed: %d", static_cast<int>(enqueueStatus));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
