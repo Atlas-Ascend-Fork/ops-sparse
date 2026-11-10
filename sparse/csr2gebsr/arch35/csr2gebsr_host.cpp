@@ -396,11 +396,17 @@ static aclsparseStatus_t LaunchPrefixSumAndCopyback(
 
     if (useBlocks == 1) {
         // 退化路径：原单 kernel 串行 O(mb) prefix sum
+        // clear-then-launch-then-peek（issue #357 分族）
+        (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
         csr2gebsr_prefixsum_kernel_do(
             gmNnzBlocksPerRow, gmBsrRowPtrC, gmNnzbDev,
             psTiling, stream);
     } else {
         // 融合并行路径：单 kernel Phase1→SyncAll→Phase2→SyncAll→Phase3
+        // clear-then-launch-then-peek（issue #357 分族）
+        (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
         csr2gebsr_prefixsum_fused_kernel_do(
             gmNnzBlocksPerRow, gmBsrRowPtrC, gmNnzbDev, gmSegSum,
             psTiling, useBlocks, stream);
@@ -423,6 +429,10 @@ static aclsparseStatus_t LaunchPrefixSumAndCopyback(
                   OP_LOGE("aclsparseXcsr2gebsrNnz",
                           "async copy nnzb failed, ret=%d", aclRetCopy);
                   return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+    }
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseXcsr2gebsrNnz", "prefixsum enqueue failed");
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -467,9 +477,16 @@ static aclsparseStatus_t LaunchNnzKernel(
         auto *gmMarker = reinterpret_cast<GM_ADDR>(wsBase + mb + 1);
         auto *gmRowPtrA = reinterpret_cast<GM_ADDR>(const_cast<int *>(csrRowPtrA));
         auto *gmColIndA = reinterpret_cast<GM_ADDR>(const_cast<int *>(csrColIndA));
+        // clear-then-launch-then-peek（issue #357 分族，评审响应：peek 移到下发后）
+        (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
         csr2gebsr_nnz_kernel_do(
             gmRowPtrA, gmColIndA, gmNnzBlocksPerRow, gmMarker,
             nnzTiling, useBlocks, stream);
+        if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+            OP_LOGE("aclsparseXcsr2gebsrNnz", "nnz kernel enqueue failed");
+            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+        }
         OP_LOGD("aclsparseXcsr2gebsrNnz",
                 "Kernel 1 launched: mb=%d, nb=%d, blocks=%u", mb, nb, useBlocks);
     }
@@ -643,10 +660,19 @@ static aclsparseStatus_t LaunchConvertKernel(
     auto *gmBsrRowPtrC = reinterpret_cast<GM_ADDR>(bsrRowPtrC);
     auto *gmBsrColIndC = reinterpret_cast<GM_ADDR>(bsrColIndC);
 
+    // clear-then-launch-then-peek（issue #357 分族）
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     csr2gebsr_convert_kernel_do(
         csrValA, gmRowPtrA, gmColIndA,
         gmBsrRowPtrC, gmBsrColIndC, bsrValC,
         gmMarker, tiling, useBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseCsr2gebsr", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     OP_LOGI("aclsparseCsr2gebsr",
             "Kernel 3 (convert) launched, blocks=%u", useBlocks);
