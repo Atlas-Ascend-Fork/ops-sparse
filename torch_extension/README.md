@@ -43,6 +43,38 @@ Just-In-Time（JIT）编译，将 PyTorch 接口接入 `ops-sparse` 的 ACLSpars
     python3 -m pip install build_out/cann_ops_sparse-*.whl --force-reinstall --no-deps
     ```
 
+
+## 构建自包含源码包（sdist）
+
+源码包包含所选算子的 Python 注册代码、C++ 封装源码、公共头文件和许可证，
+解压后无需访问 Git 仓库中的 `sparse/` 或 `include/` 目录即可构建相同内容的 wheel。
+现有仓内 wheel 构建方式保持不变。
+
+```sh
+# 仅需 Python 构建依赖；此步骤不编译 CANN kernel，也不导入 torch_npu。
+python3 -m pip install "setuptools>=70.1" wheel build
+cd torch_extension
+TORCH_EXTENSION_OPS=spgemm python3 -m build --sdist --no-isolation
+
+# 在仓库外解压，构建 wheel。可将 archive 替换为生成的实际文件名。
+archive="$PWD/dist/cann_ops_sparse-0.1.0.tar.gz"
+mkdir -p /tmp/ops-sparse-source-build
+tar -xf "$archive" -C /tmp/ops-sparse-source-build
+cd /tmp/ops-sparse-source-build/cann_ops_sparse-0.1.0
+python3 -m build --wheel --no-isolation
+```
+
+不设置 `TORCH_EXTENSION_OPS` 时源码包包含全部可用算子；设置逗号分隔的算子列表时
+只收集这些算子的扩展源码。解压后的源码包默认构建其所含的全部算子，也可用同一变量
+继续筛选子集；请求未归档的算子会报错。`_sdist_sources/` 保存归档所需的仓库外来源，
+其 `LICENSE` 为仓库原许可证；源码包根目录也保留同一份 `LICENSE`，wheel 的
+`.dist-info` 会随包携带该许可证正文。`_sdist_sources/` 由 sdist 命令仅在发布暂存目录中生成，
+不写入工作树。
+
+外部依赖不随源码包分发：构建 wheel 需要 Python 及上述构建工具；安装和实际 JIT/NPU
+运行仍需要匹配的 PyTorch、`torch_npu`、CANN Toolkit、C++ 编译器、ninja，以及包含目标
+算子的 `libops_sparse.so`。源码包到 wheel 的 CPU 回归不代表这些运行依赖或 NPU 已验证。
+
 ## 快速开始
 
 以 `spgemm` 算子为例，其注册的标准 ATen 算子为 `aten::_sparse_sparse_matmul`，并适配
