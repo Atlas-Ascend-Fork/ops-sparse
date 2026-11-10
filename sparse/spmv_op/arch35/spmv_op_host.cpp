@@ -398,12 +398,21 @@ static aclsparseStatus_t LaunchSpMVOpBetaYKernel(
     auto *yInner = SpmvOpToVecInner(vecY);
     auto *zInner = SpmvOpToVecInner(vecZ);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spmv_op_beta_y_kernel_do(
         reinterpret_cast<GM_ADDR>(yInner->values),
         reinterpret_cast<GM_ADDR>(zInner->values),
         tiling, useBlocks, stream);
 
     OP_LOGI(kTag, "beta_y kernel launched: m=%d, numBlocks=%u", m, useBlocks);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpMVOp", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -450,6 +459,10 @@ static aclsparseStatus_t LaunchSpMVOpNnzKernel(
         gmReorder = reinterpret_cast<GM_ADDR>(wsBase + layout.reorderOffset);
         gmBinEdge = reinterpret_cast<GM_ADDR>(wsBase + layout.binEdgeOffset);
     }
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spmv_op_kernel_do(
         gmRowOffsets, gmColInd, gmValues,
         reinterpret_cast<GM_ADDR>(xInner->values),
@@ -460,6 +473,11 @@ static aclsparseStatus_t LaunchSpMVOpNnzKernel(
             m, static_cast<unsigned long long>(nnz), useBlocks,
             static_cast<int>(tiling.algType),
             (tiling.rowOffsetType == SPMV_OP_IDX_RT_I32) ? "i32" : "i64");
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpMVOp", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -560,6 +578,10 @@ static aclsparseStatus_t CreateDescrPreprocessAlg2(
     SpmvOpWorkspaceLayout layout{};
     layout.Compute(mInt, useBlocks);
     auto *wsBase = static_cast<uint8_t *>(buffer);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spmv_op_preprocess_kernel_do(
         reinterpret_cast<GM_ADDR>(newDescr->csrRowOffsets),
         reinterpret_cast<GM_ADDR>(wsBase + layout.reorderOffset),
@@ -572,6 +594,11 @@ static aclsparseStatus_t CreateDescrPreprocessAlg2(
             ? SPMV_OP_IDX_RT_I32 : SPMV_OP_IDX_RT_I64,
         hCtx->stream);
     OP_LOGI(kTag, "createDescr ALG2: preprocess kernel launched async");
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpMVOp", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

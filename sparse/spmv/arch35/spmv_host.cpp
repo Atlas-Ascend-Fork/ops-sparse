@@ -559,11 +559,22 @@ aclsparseStatus_t PreprocessSpmv(
     }
     if (mat->rows > 0U) {
         // Normalize on one AIV to avoid cross-core writes to the same cache line.
+        // clear-then-launch-then-peek（issue #357 分族，评审响应：peek 移入分支内，
+        // 避免空矩阵路径读到未清除的陈旧线程级错误误判为下发失败）。
+        (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
         spmv_arch35_preprocess_kernel_do(
             reinterpret_cast<GM_ADDR>(mat->ptrs), reinterpret_cast<GM_ADDR>(externalBuffer),
             static_cast<uint32_t>(mat->rows), static_cast<int32_t>(mat->baseType),
             mat->ptrStride, 1U, SpmvArch35ToHandle(handle)->stream);
+
+        if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+            OP_LOGE("aclsparseSpMV", "kernel enqueue failed: %d",
+                    static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+        }
     }
+
     SpmvArch35RecordActivePlan(mat, SpmvArch35ToVec(vecX),
                                SpmvArch35ToVec(vecY), opA, computeType, alg,
                                externalBuffer, SpmvArch35ToHandle(handle)->stream,
@@ -601,6 +612,10 @@ aclsparseStatus_t ExecuteSpmv(
         mat->activeBuffer = nullptr;
         mat->activeSpmvBuffer = nullptr;
     }
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spmv_arch35_kernel_do(
         reinterpret_cast<GM_ADDR>(mat->ptrs), reinterpret_cast<GM_ADDR>(mat->idxs),
         reinterpret_cast<GM_ADDR>(mat->values), reinterpret_cast<GM_ADDR>(x->values),
@@ -608,6 +623,11 @@ aclsparseStatus_t ExecuteSpmv(
         tiling, SpmvBlockDim(), SpmvArch35ToHandle(handle)->stream);
     OP_LOGI("aclsparseSpMV", "A5 kernel launched blockDim=%u op=%u alg=%u",
             SpmvBlockDim(), tiling.opA, tiling.alg);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseSpMV", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
