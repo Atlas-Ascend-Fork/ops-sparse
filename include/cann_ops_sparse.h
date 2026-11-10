@@ -842,8 +842,11 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
  * 用于描述 SpMM 中的 B / C 稠密矩阵。
  *
  * @param dnMatDescr IN/OUT, HOST，输出的稠密矩阵描述符。
- * @param rows       IN, HOST，矩阵的行数，允许为 0，不允许为负数。
- * @param cols       IN, HOST，矩阵的列数，允许为 0，不允许为负数。
+ * @param rows       IN, HOST，矩阵的行数，允许为 0，不允许为负数，
+ *                   且不超过 INT32_MAX（消费算子按 I32 索引假设编排，
+ *                   超限在创建期返回 ACL_SPARSE_STATUS_INVALID_VALUE）。
+ * @param cols       IN, HOST，矩阵的列数，允许为 0，不允许为负数，
+ *                   且不超过 INT32_MAX（同 rows）。
  * @param ld         IN, HOST，leading dimension，必须非负。行主序时需 >= cols；
  *                   列主序时需 >= rows；该约束同样适用于零维矩阵。
  * @param values     IN, DEVICE，矩阵数据指针；rows*cols 非零时必须非空，

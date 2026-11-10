@@ -898,9 +898,11 @@ TEST(DenseToSparseDescriptorTest, EmptyShapesPreserveValidation) {
       {0, 0, 1, false, ACL_SPARSE_STATUS_SUCCESS},
       {-1, 0, 1, false, ACL_SPARSE_STATUS_INVALID_VALUE},
       {0, -1, 1, false, ACL_SPARSE_STATUS_INVALID_VALUE},
-      {0, 0, 0, false, ACL_SPARSE_STATUS_INVALID_VALUE},
+      // 零维时 ld 须 >= cols/rows（0>=0 满足）、values 可为空（头文件契约），
+      // 描述符创建按现行契约返回 SUCCESS；负 ld 仍拒绝。
+      {0, 0, 0, false, ACL_SPARSE_STATUS_SUCCESS},
       {0, 0, -1, false, ACL_SPARSE_STATUS_INVALID_VALUE},
-      {0, 0, 1, true, ACL_SPARSE_STATUS_INVALID_VALUE},
+      {0, 0, 1, true, ACL_SPARSE_STATUS_SUCCESS},
   };
   for (bool isConst : {false, true}) {
     for (auto order : {ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL}) {
@@ -939,7 +941,7 @@ TEST(DenseToSparseDescriptorTest, EmptyShapesPreserveValidation) {
   }
 }
 
-TEST_F(DenseToSparseExceptionTest, Int32MaxAcceptedAndPlusOneRejectedByApi) {
+TEST_F(DenseToSparseExceptionTest, Int32MaxAcceptedAndPlusOneRejectedAtCreation) {
   uint32_t value = 0;
   aclsparseConstDnMatDescr_t dense = nullptr;
   ASSERT_EQ(aclsparseCreateConstDnMat(&dense,
@@ -963,25 +965,16 @@ TEST_F(DenseToSparseExceptionTest, Int32MaxAcceptedAndPlusOneRejectedByApi) {
   aclsparseDestroyDnMat(dense);
 
   dense = nullptr;
-  ASSERT_EQ(
+  // 自 ea6c016 起，aclsparseCreateDnMat 对超过 INT32_MAX 的维度在创建期
+  // 拒绝（消费算子按 I32 索引假设编排），plus-one 在创建期即返回
+  // INVALID_VALUE，不再到达算子层。
+  EXPECT_EQ(
       aclsparseCreateConstDnMat(
           &dense, static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1,
           0, static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1,
           &value, ACL_FLOAT, ACL_SPARSE_ORDER_ROW),
-      ACL_SPARSE_STATUS_SUCCESS);
-  sparse = nullptr;
-  ASSERT_EQ(aclsparseCreateCoo(
-                &sparse,
-                static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1,
-                0, 0, nullptr, nullptr, nullptr, ACL_SPARSE_INDEX_64I,
-                ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT),
-            ACL_SPARSE_STATUS_SUCCESS);
-  EXPECT_EQ(aclsparseDenseToSparseGetBufferSize(
-                handle_->get(), dense, sparse,
-                ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT, &workspace),
-            ACL_SPARSE_STATUS_INVALID_VALUE);
-  aclsparseDestroySpMat(sparse);
-  aclsparseDestroyDnMat(dense);
+      ACL_SPARSE_STATUS_INVALID_VALUE);
+  EXPECT_EQ(dense, nullptr);
 }
 
 struct DenseToSparseL2Param {
@@ -1411,6 +1404,17 @@ TEST_P(DenseToSparseBoundaryTest, DescriptorOrBufferSizeOnly) {
   const bool reject = p.m > std::numeric_limits<int32_t>::max() ||
                       p.n > std::numeric_limits<int32_t>::max();
   aclsparseConstDnMatDescr_t dense = nullptr;
+  if (reject) {
+    // 超过 INT32_MAX 的维度在 aclsparseCreateDnMat 创建期即被拒绝，
+    // TB 超限用例验证创建期边界后提前返回。
+    EXPECT_EQ(aclsparseCreateConstDnMat(&dense, p.m, p.n, p.ld, &denseValue,
+                                        ACL_FLOAT,
+                                        DenseToSparseOrder(p.order)),
+              ACL_SPARSE_STATUS_INVALID_VALUE)
+        << p.caseId();
+    EXPECT_EQ(dense, nullptr);
+    return;
+  }
   ASSERT_EQ(aclsparseCreateConstDnMat(&dense, p.m, p.n, p.ld, &denseValue,
                                       ACL_FLOAT, DenseToSparseOrder(p.order)),
             ACL_SPARSE_STATUS_SUCCESS);
