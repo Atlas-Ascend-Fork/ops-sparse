@@ -44,7 +44,7 @@ dl[i] * X[i-1,j] + d[i] * X[i,j] + du[i] * X[i+1,j] = B[i,j]
 | --- | --- |
 | Atlas A2 训练/推理系列 | 支持，arch22 / DAV_2201 |
 | Atlas A3 训练/推理系列 | 支持，arch22 / DAV_2201 |
-| Ascend 950PR / Ascend 950DT | 本 PR 未提供 arch35 数值后端，不宣称支持 |
+| Ascend 950PR / Ascend 950DT | 支持，arch35 / DAV_3510 |
 
 #### 函数原型
 
@@ -85,7 +85,7 @@ aclsparseStatus_t aclsparseCgtsv2(aclsparseHandle_t handle, int m, int n,
 示例为 `m=3,n=1,ldb=3`，矩阵主对角线为 4、两条副对角线为 1，右端项为 `[6,12,14]`，
 解析解为 `[1,2,3]`，虚部均为 0。该接口不使用 MatDescr，也没有需要 PointerMode 的标量指针参数。
 示例使用 `AclContext` 和 `std::unique_ptr` 管理 ACL、句柄、Device 输入及 workspace，包含完整查询、执行和结果检查。
-编译与运行方式见[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)，目标 SoC 按实际 A2/A3 设备选择。
+编译与运行方式见[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)，目标 SoC 按实际 A2/A3 或 Ascend 950 设备选择。
 
 ```cpp
 #include <array>
@@ -274,9 +274,10 @@ aclsparseStatus_t aclsparseCgtsv2_bufferSizeExt(aclsparseHandle_t handle,
 `cgtsv2_api.cpp` 统一两个公开 C 入口和尺寸、handle、指针、地址跨度、workspace 对齐校验。
 `cgtsv2_backend.h` 声明内部 `Cgtsv2WorkspaceBytes` 和 `Cgtsv2Dispatch` 钩子。
 `arch22/cgtsv2_host.cpp` 只负责本架构 workspace、UB 准入和 kernel 派发。
-未来 arch35 后端可复用公共入口并独立计算自己的布局；本 PR 不提供该数值后端。
+`arch35/cgtsv2_host.cpp` 接入同一组内部钩子，独立查询有界 RHS 槽位工作区并派发 950 内核。
+两个架构复用上游的 `aclsparseComplex_t`（`aclsparseComplex` 的 `x/y` 别名），保持两组 FP32、8 字节及 float 对齐的公共布局。
 
-### 数值与内存路径
+### arch22 数值与内存路径
 
 通用有限输入路径以高低 FP32 尾数及实虚部分别独立的 int64 指数表示中间值，减少中间溢出。
 原始 B 保留到最终转换；列工作数组供求解和原方程残差修正复用，workspace 为 O(m)。
@@ -303,3 +304,21 @@ Host 与 Device 共用 `arch22/cgtsv2_tiling_data.h` 常量；准入额外保留
 仓内测试位于 `test/cgtsv2/`，复用 GTest/CSV、ACL RAII 和内存检查设施；
 构建、覆盖与任务特定比较器的差异说明见[测试说明](../../test/cgtsv2/README.md)。
 官方验收使用原任务包及其原始比较器，独立于仓内回归；本文不将仓外验收数量列为仓内用例。
+
+### arch35 数值与内存路径
+
+Ascend 950 使用带相邻部分选主元的 twofold FP32 复数求解，实部、虚部保留独立指数。
+满足设备端强对角占优及数值范围门槛的输入走共享系数 PCR，其余输入走扩展范围通用路径。
+内部计算仍使用 real/imag 表示，公共数据的 x/y 分量按同一字节顺序读写。
+
+非空 RHS 的工作区为 `128 + align_up(96*m*min(n,128),128)` 字节，定义位于
+`arch35/cgtsv2_workspace.h`；多于 128 列时复用有界槽位。容量以当前动态库查询值为准。
+输入系数只读，B 原地更新，padding 保留，合法 `n=0` 不下发 kernel。
+
+下发链入口清除陈旧线程错误，每个 kernel 下发后立即检查线程 Runtime 错误；失败时
+停止后续下发并返回 `ACL_SPARSE_STATUS_EXECUTION_FAILED`，日志记录阶段、错误码、维度和 stream。
+接口保持异步，Device 执行错误在调用方同步 stream 时检查。中途失败前已提交的任务仍可能执行，
+释放或复用数据及工作区前仍须同步。
+
+950 实现依据[官方 950 任务书](https://www.hiascend.com/activities/task-center/details/3c8d06bce4f54557b895de27e3737e0f)。
+编译运行示例：`bash build.sh --soc=ascend950 --ops=cgtsv2 --run --device=0`。

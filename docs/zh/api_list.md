@@ -2624,10 +2624,11 @@ aclsparseStatus_t aclsparseCgtsv2(
 
 **功能**：求解复数三对角线性方程组 **A · X = B**，支持多个右端项。A 由只读的下对角线 `dl`、主对角线 `d` 和上对角线 `du` 表示，采用相邻部分选主元。解 X 原地写回 B，每列第 m 行之后的 padding 保持不变。
 
-复数类型为 `aclsparseComplex_t`，由两个连续的 FP32 字段 `real`、`imag` 组成，大小为 8 字节。B 按列主序存储，元素 `(i, j)` 位于 `B[i + j * ldb]`。
+复数类型为 `aclsparseComplex_t`（`aclsparseComplex` 的别名），由两个连续的 FP32 字段 `x`、`y` 组成，大小为 8 字节。B 按列主序存储，元素 `(i, j)` 位于 `B[i + j * ldb]`。
 
 **产品支持情况**：
 
+- Ascend 950PR / Ascend 950DT：支持（arch35 / DAV_3510）
 - Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 - Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
 
@@ -2656,6 +2657,7 @@ aclsparseStatus_t aclsparseCgtsv2(
 - `ACL_SPARSE_STATUS_SUCCESS`：Host 参数校验及提交成功；合法 n=0 调用直接返回。
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空。
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：维度、必需指针、地址跨度或工作区对齐非法。
+- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：arch35 Probe、通用求解或 PCR 阶段下发失败。
 - `ACL_SPARSE_STATUS_INTERNAL_ERROR`：平台资源不可用。
 - 其他值：调用句柄或运行时接口失败。
 
@@ -2671,10 +2673,11 @@ aclsparseStatus_t aclsparseCgtsv2_bufferSizeExt(
     int ldb, size_t* pBufferSizeInBytes);
 ```
 
-**功能**：查询 `aclsparseCgtsv2` 所需的调用方工作区字节数。查询不读取设备数据、不修改 B，也不启动计算 kernel。非空 RHS 的工作区由 m 决定，与 RHS 列数 n 无关；合法 n=0 调用返回 0。
+**功能**：查询 `aclsparseCgtsv2` 所需的调用方工作区字节数。查询不读取设备数据、不修改 B，也不启动计算 kernel。arch22 非空 RHS 的工作区由 m 决定，与 RHS 列数 n 无关；arch35 使用 `128 + align_up(96*m*min(n,128),128)` 字节的有界槽位布局。合法 n=0 调用返回 0，容量均以当前查询值为准。
 
 **产品支持情况**：
 
+- Ascend 950PR / Ascend 950DT：支持（arch35 / DAV_3510）
 - Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
 - Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
 

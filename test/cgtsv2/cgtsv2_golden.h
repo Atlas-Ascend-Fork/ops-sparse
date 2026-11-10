@@ -13,6 +13,8 @@
 #define TEST_CGTSV2_GOLDEN_H_
 
 #include <complex>
+#include <cmath>
+#include <cstddef>
 #include <utility>
 #include <stdexcept>
 #include <string>
@@ -168,5 +170,73 @@ inline std::vector<High> Golden(const Input &x)
     }
     return result;
 }
+// Independent host reference: adjacent-row partial pivoting with an explicit
+// second upper diagonal. Storage and work are O(m*n), without a dense matrix.
+inline std::vector<High> SolveGolden(int m, int n, int ldb,
+    const std::vector<High>& lower, const std::vector<High>& diagonal,
+    const std::vector<High>& upper, const std::vector<High>& b)
+{
+    if (m < 3 || n < 0 || ldb < m || lower.size() != static_cast<size_t>(m) ||
+        diagonal.size() != static_cast<size_t>(m) || upper.size() != static_cast<size_t>(m) ||
+        b.size() != static_cast<size_t>(ldb) * n) {
+        throw std::invalid_argument("invalid Cgtsv2 Golden input");
+    }
+    std::vector<High> x(static_cast<size_t>(m) * n);
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            x[static_cast<size_t>(j) * m + i] = b[static_cast<size_t>(j) * ldb + i];
+        }
+    }
+    if (n == 0) {
+        return x;
+    }
+    auto d = diagonal;
+    auto u = upper;
+    std::vector<High> second(m, High{});
+    for (int i = 0; i < m - 1; ++i) {
+        const High candidate = lower[i + 1];
+        if (std::abs(d[i]) >= std::abs(candidate)) {
+            if (d[i] == High{}) {
+                throw std::runtime_error("singular Cgtsv2 Golden");
+            }
+            const High factor = candidate / d[i];
+            d[i + 1] -= factor * u[i];
+            for (int j = 0; j < n; ++j) {
+                const size_t offset = static_cast<size_t>(j) * m + i;
+                x[offset + 1] -= factor * x[offset];
+            }
+        } else {
+            const High factor = d[i] / candidate;
+            const High nextDiagonal = d[i + 1];
+            d[i] = candidate;
+            d[i + 1] = u[i] - factor * nextDiagonal;
+            u[i] = nextDiagonal;
+            if (i + 2 < m) {
+                second[i] = u[i + 1];
+                u[i + 1] *= -factor;
+            }
+            for (int j = 0; j < n; ++j) {
+                const size_t offset = static_cast<size_t>(j) * m + i;
+                const High old = x[offset];
+                x[offset] = x[offset + 1];
+                x[offset + 1] = old - factor * x[offset + 1];
+            }
+        }
+    }
+    if (d.back() == High{}) {
+        throw std::runtime_error("singular Cgtsv2 Golden");
+    }
+    for (int j = 0; j < n; ++j) {
+        const size_t offset = static_cast<size_t>(j) * m;
+        x[offset + m - 1] /= d[m - 1];
+        x[offset + m - 2] = (x[offset + m - 2] - u[m - 2] * x[offset + m - 1]) / d[m - 2];
+        for (int i = m - 3; i >= 0; --i) {
+            x[offset + i] = (x[offset + i] - u[i] * x[offset + i + 1] -
+                second[i] * x[offset + i + 2]) / d[i];
+        }
+    }
+    return x;
+}
+
 } // namespace cgtsv2_test
 #endif

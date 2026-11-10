@@ -15,7 +15,7 @@ source /actual/CANN/set_env.sh
 bash build.sh --soc=ascend910b3 --ops=cgtsv2 --run --device=0
 ```
 
-SoC 和设备号按实际 A2/A3 环境选择。GTest 必需，Eigen3 不需要。
+Ascend 950 使用 `--soc=ascend950`；SoC 和设备号按实际环境选择。GTest 必需，Eigen3 不需要。
 直接运行测试二进制时，应在其构建目录下执行，以便读取 `cgtsv2_test.csv`。
 
 ## 测试文件
@@ -30,7 +30,7 @@ SoC 和设备号按实际 A2/A3 环境选择。GTest 必需，Eigen3 不需要�
 | `cgtsv2_golden.h` | 无 Eigen3 的独立 complex128 参考 |
 | `../frame/mixed_anchor.h` | 共享 FLOAT64 Golden、最大误差点 cap 比较策略，经 VerifyConfig/Verifier 调用 |
 
-## 覆盖说明
+## arch22 覆盖说明
 
 当前共 40 项 GTest：26 条 CSV 参数化用例、9 项定向接口/数值回归、5 项 Host 比较器契约测试。
 覆盖复数/零主元、纯虚对角线、多 RHS、padding、尾部、系数只读、workspace 哨兵、重复确定性、
@@ -52,13 +52,36 @@ Jacobi 边界包含占优比 1.26、1.35、1.36、1.5、2.0、2.01，每种均�
 第 3.2 节规定：保留 complex128 Golden，实/虚部分别使用 `rtol=atol=2^-13`，匹配率至少 0.99；
 再在该分量最大有限绝对误差点检查 `max(0.01,32*ULP(g_low))`，`g_low` 为该点的 FLOAT32 Golden，
 ULP 使用带符号值朝正无穷方向的相邻值。非有限值由独立特殊值测试处理。
-仓内确定性 ST 将匹配率提高为 1.0，未改官方验收比较器。
+arch22 确定性 ST 将匹配率提高为 1.0，未改官方验收比较器。
 
-按评审要求统一调用共享 `test/frame/VerifyConfig/Verifier`。框架新增显式
+arch22 按评审要求调用共享 `test/frame/VerifyConfig/Verifier`。框架新增显式
 `MIXED_TOLERANCE_ANCHOR` 模式，接收 FLOAT32 输出和未舍入的 FLOAT64 Golden，
-使用配置中的容差、匹配率及最大误差点 cap；删除算子目录内的自定义比较器。
+使用配置中的容差、匹配率及最大误差点 cap；该路径复用公共比较器。
 既有 `MIXED_TOLERANCE` 模式仍保持逐元素 cap，其他算子的默认判定规则不变。
 五项契约测试覆盖两种 cap 口径差异、未舍入参考精度、带符号 ULP、形状/配置错误、
 空向量与非有限值，以及配置的容差和匹配率。官方特殊值测试仍使用原任务包比较器。
 
 原任务包验收独立执行，输入、Golden、阈值及原比较器保持不变；仓外验收数量不冒充本目录用例数。
+
+## arch35 文件与覆盖
+
+| 文件 | 用途 |
+| --- | --- |
+| `arch35/cgtsv2_test.cpp` | 950 数值、接口、守卫及 Runtime 陈旧错误回归 |
+| `arch35/cgtsv2_test.csv` | 950 原有 97 条确定性参数 |
+| `arch35/cgtsv2_npu_wrapper.h` | 950 RAII 缓冲及异步执行流程 |
+
+共 112 个 GTest 实例：97 条 CSV 参数化用例、15 个独立测试。装载要求总数恰为 97，
+L0=24、L1=73，且 case_name 唯一；缺失、增删行、重复或分级数量漂移在注册阶段抛 runtime_error。
+原有 m/n/ldb、seed、uniform/normal 分布及派发预期保持不变，日志记录实际用例和种子。
+
+覆盖通用复数矩阵、选主元、PCR、1024/1025 行及 129 列槽位复用、独立实虚指数、
+极端 RHS、非有限值分类、奇异系统、只读系数、padding、缓冲守卫、三次重复和非默认 stream。
+真实 Runtime 陈旧错误回归同时覆盖分批 PCR 和多 RHS 路径，验证下发链入口清理错误状态。
+
+公共参数头同时保留 arch22 的 Param 和 arch35 的 Cgtsv2Param。公共 Golden 保留 arch22
+的 `Golden(Input)`（含 padding 的 ldb*n 输出）和 arch35 的 `SolveGolden`（紧凑 m*n 输出），
+二者都在 complex128 中执行带部分选主元求解。此次整合保留两套参考函数的运算次序和精度判据。
+arch35 保留实部、虚部各 99% 混合容差及最大误差位置有限 ULP 上限，以及 FLT_MAX 离群值拒绝回归。
+
+950 编译命令：`bash build.sh --soc=ascend950 --ops=cgtsv2 --run --device=0`。

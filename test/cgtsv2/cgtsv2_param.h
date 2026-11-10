@@ -15,6 +15,13 @@
 #include "csv_loader.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <ostream>
+#include <set>
+#include <string>
+#include <vector>
 #include <array>
 #include <charconv>
 #include <stdexcept>
@@ -56,5 +63,66 @@ struct Param : sparse_test::SparseTestParamBase {
     }
     std::string caseId() const override { return name; }
 };
+struct Cgtsv2Param : public sparse_test::SparseTestParamBase {
+    std::string caseName;
+    std::string level;
+    int m = 0;
+    int n = 0;
+    int ldb = 0;
+    uint32_t seed = 0;
+    std::string distribution;
+    bool dominant = false;
+    std::string expectedPath;
+    std::string description;
+
+    void fillCustom(const sparse_test::csv_map& row) override
+    {
+        caseName = sparse_test::parseString(row, "case_name");
+        level = sparse_test::parseString(row, "level");
+        m = sparse_test::parseInt(row, "m");
+        n = sparse_test::parseInt(row, "n");
+        ldb = sparse_test::parseInt(row, "ldb");
+        const int64_t parsedSeed = sparse_test::parseStrictInt64(row, "seed");
+        distribution = sparse_test::parseString(row, "distribution");
+        dominant = sparse_test::parseBool(row, "dominant");
+        expectedPath = sparse_test::parseString(row, "expected_path");
+        description = sparse_test::parseString(row, "description");
+        if (caseName.empty() || (level != "L0" && level != "L1") || m < 3 || n < 0 || ldb < m ||
+            row.find("seed") == row.end() || row.at("seed").empty() ||
+            parsedSeed < 0 || parsedSeed > std::numeric_limits<uint32_t>::max() ||
+            (distribution != "uniform" && distribution != "normal") ||
+            (expectedPath != "any" && expectedPath != "pcr" && expectedPath != "twofold")) {
+            throw std::invalid_argument("Invalid Cgtsv2 CSV row: " + caseName);
+        }
+        seed = static_cast<uint32_t>(parsedSeed);
+    }
+    std::string caseId() const override { return caseName; }
+};
+
+inline void PrintTo(const Cgtsv2Param& p, std::ostream* stream)
+{
+    *stream << p.caseName << ": m=" << p.m << " n=" << p.n << " ldb=" << p.ldb
+            << " seed=" << p.seed << " distribution=" << p.distribution
+            << " dominant=" << p.dominant << " expected_path=" << p.expectedPath;
+}
+
+inline std::vector<Cgtsv2Param> LoadCases(const std::string& path)
+{
+    auto cases = sparse_test::GetCasesFromCsvChecked<Cgtsv2Param>(path, 97);
+    size_t l0Cases = 0;
+    std::set<std::string> caseIds;
+    for (const auto& param : cases) {
+        l0Cases += (param.level == "L0" ? 1U : 0U);
+        if (!caseIds.insert(param.caseId()).second) {
+            throw std::runtime_error("Duplicate Cgtsv2 CSV case: " + param.caseId() + " in " + path);
+        }
+    }
+    if (l0Cases != 24) {
+        throw std::runtime_error("Cgtsv2 CSV must contain L0=24 and L1=73: " + path +
+            " (loaded L0=" + std::to_string(l0Cases) + ", L1=" +
+            std::to_string(cases.size() - l0Cases) + ")");
+    }
+    return cases;
+}
 } // namespace cgtsv2_test
 #endif
