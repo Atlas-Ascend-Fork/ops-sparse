@@ -69,6 +69,12 @@
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
+| [aclsparseSpSV_createDescr](../../sparse/spsv/README.md#aclsparsespsv_createdescr) | 创建SpSV描述符 |
+| [aclsparseSpSV_destroyDescr](../../sparse/spsv/README.md#aclsparsespsv_destroydescr) | 销毁SpSV描述符 |
+| [aclsparseSpSV_bufferSize](../../sparse/spsv/README.md#aclsparsespsv_buffersize) | 查询SpSV设备工作区大小 |
+| [aclsparseSpSV_analysis](../../sparse/spsv/README.md#aclsparsespsv_analysis) | SpSV稀疏矩阵预处理 |
+| [aclsparseSpSV_solve](../../sparse/spsv/README.md#aclsparsespsv_solve) | 求解稀疏三角线性系统 |
+| [aclsparseSpSV_updateMatrix](../../sparse/spsv/README.md#aclsparsespsv_updatematrix) | 更新SpSV矩阵数值 |
 | [aclsparseSDDMMBufferSize](#aclsparsesddmmbuffersize) | 获取SDDMM工作区大小 |
 | [aclsparseSDDMMPreprocess](#aclsparsesddmmpreprocess) | SDDMM稀疏pattern校验与预处理 |
 | [aclsparseSDDMM](#aclsparsesddmm) | 采样稠密-稠密矩阵乘法 |

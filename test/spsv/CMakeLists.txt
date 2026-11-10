@@ -9,3 +9,11 @@
 # ----------------------------------------------------------------------------------------------------------
 
 ops_sparse_add_gtest_tests(spsv ${OPS_SPARSE} EIGEN)
+
+if(TARGET spsv_test AND "arch22" IN_LIST SOC_ARCH_DIRS)
+    target_include_directories(spsv_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/sparse/spsv/arch22/host"
+        "${CMAKE_SOURCE_DIR}/sparse/spsv/arch22/kernel"
+    )
+    target_sources(spsv_test PRIVATE arch22/spsv_invalid_enum_calls.c arch22/spsv_scaled_math_test.cpp)
+endif()

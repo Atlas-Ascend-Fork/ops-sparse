@@ -204,6 +204,7 @@ target_compile_options(${OPS_SPARSE} PRIVATE
 )
 
 target_link_libraries(${OPS_SPARSE} PRIVATE
+    ${CMAKE_DL_LIBS}
     tiling_api
     platform
     graph  # ge::Shape / ge::DataType, used by coosort host GetSortMaxMinTmpSize
