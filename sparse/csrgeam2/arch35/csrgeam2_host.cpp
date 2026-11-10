@@ -63,7 +63,17 @@ static aclsparseStatus_t FillEmptyCRowPtrC(
     fillTiling.count = static_cast<int32_t>(countElems);
     fillTiling.value = baseC;
     auto *gmDst = reinterpret_cast<GM_ADDR>(csrSortedRowPtrC);
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     csrgeam2_fill_kernel_do(gmDst, fillTiling, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseCsrgeam2", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     if (h->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
         // Synchronous: matches cuSPARSE semantic (this API blocks until result is ready)
@@ -167,7 +177,17 @@ static aclsparseStatus_t LaunchPrefixSumAndCopyNnz(
     auto *gmRowPtrC = reinterpret_cast<GM_ADDR>(csrSortedRowPtrC);
     auto *gmNnzCDev = reinterpret_cast<GM_ADDR>(nnzCDev);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     csrgeam2_prefixsum_kernel_do(nnzPerRow, gmRowPtrC, gmNnzCDev, psTiling, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseCsrgeam2", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     OP_LOGD("aclsparseXcsrgeam2Nnz",
             "Kernel 3 (prefix sum) launched, m=%d, baseC=%d", m, baseC);
@@ -335,9 +355,19 @@ static aclsparseStatus_t LaunchNnzKernel(
     auto *gmNnzPerRow = reinterpret_cast<GM_ADDR>(static_cast<int32_t *>(workspace));
 
     // Launch Kernel 1（逐行计数）
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     csrgeam2_nnz_kernel_do(
         gmRowPtrA, gmColIndA, gmRowPtrB, gmColIndB, gmNnzPerRow,
         tiling, useBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseCsrgeam2", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     OP_LOGD("aclsparseXcsrgeam2Nnz", "Kernel 1 (nnz) launched, blocks=%u", useBlocks);
 
@@ -416,6 +446,30 @@ static aclsparseStatus_t ValidateScsrgeam2Params(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+// 构建 compute kernel 的 tiling 并处理 alpha/beta pointer mode（评审响应：
+// 自 LaunchComputeKernel 提取，压函数 NBNC 至 50 内）。
+static void BuildComputeTiling(Csrgeam2TilingData &tiling,
+    int m, int n, int32_t baseA, int32_t baseB, int32_t baseC,
+    uint32_t rowsPerBlock, const float *alpha, const float *beta,
+    aclsparsePointerMode_t pointerMode)
+{
+    tiling.m = static_cast<int32_t>(m);
+    tiling.n = static_cast<int32_t>(n);
+    tiling.baseA = baseA;
+    tiling.baseB = baseB;
+    tiling.baseC = baseC;
+    tiling.rowsPerBlock = rowsPerBlock;
+    if (pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
+        tiling.alpha = (alpha != nullptr) ? *alpha : 0.0f;
+        tiling.beta = (beta != nullptr) ? *beta : 0.0f;
+        tiling.alphaPtr = 0;
+        tiling.betaPtr = 0;
+    } else {
+        tiling.alphaPtr = reinterpret_cast<uint64_t>(alpha);
+        tiling.betaPtr = reinterpret_cast<uint64_t>(beta);
+    }
+}
+
 // ===========================================================================
 // Scsrgeam2 - Kernel launch
 // ===========================================================================
@@ -442,31 +496,9 @@ static aclsparseStatus_t LaunchComputeKernel(
                                                      m, useBlocks, rowsPerBlock);
     if (splitSt != ACL_SPARSE_STATUS_SUCCESS) { return splitSt; }
 
-    // 构建 Tiling
     Csrgeam2TilingData tiling{};
-    tiling.m = static_cast<int32_t>(m);
-    tiling.n = static_cast<int32_t>(n);
-    tiling.baseA = baseA;
-    tiling.baseB = baseB;
-    tiling.baseC = baseC;
-    tiling.rowsPerBlock = rowsPerBlock;
-    // HOST mode: alpha/beta 是 host 指针，直接解引用，值通过 tiling 传给 kernel
-    // DEVICE mode: alpha/beta 是 device 指针，kernel 直接从 device 内存读取，无需 D2H 中转
-    if (h->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
-        tiling.alpha = (alpha != nullptr) ? *alpha : 0.0f;
-        tiling.beta = (beta != nullptr) ? *beta : 0.0f;
-        tiling.alphaPtr = 0;
-        tiling.betaPtr = 0;
-    } else {
-        tiling.alphaPtr = reinterpret_cast<uint64_t>(alpha);
-        tiling.betaPtr = reinterpret_cast<uint64_t>(beta);
-    }
-
-    OP_LOGD("aclsparseScsrgeam2",
-            "tiling: m=%d, n=%d, rowsPerBlock=%u, numBlocks=%u, alpha=%f, beta=%f, ptrMode=%s",
-            tiling.m, tiling.n, tiling.rowsPerBlock, useBlocks,
-            tiling.alpha, tiling.beta,
-            (h->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) ? "HOST" : "DEVICE");
+    BuildComputeTiling(tiling, m, n, baseA, baseB, baseC, rowsPerBlock,
+                       alpha, beta, h->pointerMode);
 
     // GM_ADDR 转换
     auto *gmRowPtrA = reinterpret_cast<GM_ADDR>(const_cast<int *>(csrSortedRowPtrA));
@@ -480,11 +512,21 @@ static aclsparseStatus_t LaunchComputeKernel(
     auto *gmValC = reinterpret_cast<GM_ADDR>(csrSortedValC);
 
     // Launch Kernel 2（逐行合并）
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     csrgeam2_compute_kernel_do(
         gmRowPtrA, gmColIndA, gmValA,
         gmRowPtrB, gmColIndB, gmValB,
         gmRowPtrC, gmColIndC, gmValC,
         tiling, useBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseCsrgeam2", "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     OP_LOGD("aclsparseScsrgeam2", "Kernel 2 (compute) launched, blocks=%u", useBlocks);
 
