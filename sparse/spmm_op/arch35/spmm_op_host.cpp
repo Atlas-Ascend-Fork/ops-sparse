@@ -574,9 +574,19 @@ static aclsparseStatus_t LaunchSpMMOpBetaCKernel(
 
     const auto *cInner = SpmmOpToDnMatInner(matC);
 
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spmm_op_beta_c_kernel_do(
         static_cast<GM_ADDR>(cInner->values),
         tiling, useBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE(SPMM_OP_TAG, "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
 
     OP_LOGI(SPMM_OP_TAG, "beta_c kernel launched: m=%d, n=%d, numBlocks=%u", m, tiling.n, useBlocks);
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -624,11 +634,21 @@ static aclsparseStatus_t LaunchSpMMOpNnzKernel(
         gmReorder = wsBase + layout.reorderOffset;
         gmBinEdge = wsBase + layout.binEdgeOffset;
     }
+    // clear-then-launch-then-peek（issue #357 分族）：Peek 只读不清除，
+    // 下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次下发。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     spmm_op_kernel_do(
         gmRowOffsets, gmColInd, gmValues,
         static_cast<GM_ADDR>(bInner->values),
         static_cast<GM_ADDR>(cInner->values),
         gmReorder, gmBinEdge, tiling, useBlocks, h->stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE(SPMM_OP_TAG, "kernel enqueue failed: %d", static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+
     OP_LOGI(SPMM_OP_TAG, "spmm_op kernel launched: m=%d, n=%d, nnz=%llu, numBlocks=%u, alg=%d, dtype=%d, opB=%d",
             m, tiling.n, static_cast<unsigned long long>(nnz), useBlocks,
             static_cast<int>(tiling.algType), static_cast<int>(tiling.dtype),
