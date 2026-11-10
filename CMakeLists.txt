@@ -184,6 +184,13 @@ target_include_directories(${OPS_SPARSE} PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
 )
 
+if("arch22" IN_LIST SOC_ARCH_DIRS)
+    target_compile_definitions(${OPS_SPARSE} PRIVATE OPS_SPARSE_CGTSV2_ARCH22)
+elseif(SOC_VERSION_LOWER MATCHES "^ascend950" AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sparse/cgtsv2/arch35/cgtsv2_host.cpp")
+    target_compile_definitions(${OPS_SPARSE} PRIVATE OPS_SPARSE_CGTSV2_ARCH35)
+endif()
+
 if(SOC_VERSION_LOWER MATCHES "^ascend950")
     # DAV-3510 Cube kernels use the CANN Tensor API in addition to the base
     # Ascend C headers. Keep these private to the core implementation.
@@ -202,6 +209,10 @@ target_compile_options(${OPS_SPARSE} PRIVATE
     "$<$<COMPILE_LANGUAGE:ASC>:SHELL:-iquote ${CMAKE_CURRENT_SOURCE_DIR}/sparse/common>"
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH}>
 )
+
+# Bound fixed-loop expansion in the complex solver without changing other operators.
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/sparse/cgtsv2/arch22/cgtsv2_device.cpp"
+    APPEND PROPERTY COMPILE_OPTIONS -fno-unroll-loops)
 
 target_link_libraries(${OPS_SPARSE} PRIVATE
     ${CMAKE_DL_LIBS}

@@ -19,6 +19,7 @@
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -161,6 +162,18 @@ std::vector<ParamType> GetCasesFromCsv(const std::string& csvPath) {
         ParamType p;
         p.fillCustom(row);
         cases.push_back(std::move(p));
+    }
+    return cases;
+}
+
+// Opt-in count check: a truncated or missing CSV must not silently reduce coverage.
+template <typename ParamType>
+std::vector<ParamType> GetCasesFromCsvChecked(const std::string& csvPath, size_t expectedCount)
+{
+    auto cases = GetCasesFromCsv<ParamType>(csvPath);
+    if (cases.size() != expectedCount) {
+        throw std::runtime_error("CSV case count mismatch for " + csvPath + ": expected " +
+            std::to_string(expectedCount) + ", got " + std::to_string(cases.size()));
     }
     return cases;
 }

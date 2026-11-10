@@ -14,6 +14,7 @@
 #define CANN_OPS_SPARSE_H_
 
 #include <unistd.h>
+#include <stddef.h>
 #include <stdint.h>
 #if defined(OPS_SPARSE_TORCH_NPU_BUILD)
 // torch_npu ships the ACL declarations used by its C++ extension headers.
@@ -210,6 +211,10 @@ typedef struct aclsparseDoubleComplex {
     double x;
     double y;
 } aclsparseDoubleComplex;
+
+// Cgtsv2 reuses the existing public complex64 type (x: real, y: imaginary).
+// This alias does not introduce another struct or require pointer reinterpretation.
+typedef aclsparseComplex aclsparseComplex_t;
 
 // Computation direction (used by Legacy API, e.g. aclsparseSnnz).
 typedef enum aclsparseDirection_t {
@@ -1813,6 +1818,62 @@ aclsparseStatus_t aclsparseSgtsv2(aclsparseHandle_t handle, int m, int n, const 
 aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(aclsparseHandle_t handle, int m, int n, const float* dl, const float* d,
                                                 const float* du, const float* B, int ldb, size_t* pBufferSizeInBytes);
 
+// ============================================================================
+// Legacy API: aclsparseCgtsv2
+// Required by the A2/A3 community task book, section 2.2 (Kernel direct call).
+// Task: https://www.hiascend.com/activities/task-center/details/b8289b3a952d4e13a9e79c3a242a8338
+// ============================================================================
+
+/**
+ * @brief Query workspace size for a complex64 tridiagonal solve with partial pivoting.
+ *
+ * dl, d and du are read-only device arrays of m complex64 values. B stores n
+ * column-major right-hand sides with leading dimension ldb. No data is read
+ * from the device and B is not modified by this query.
+ *
+ * @param handle IN, HOST, valid aclsparse handle.
+ * @param m IN, HOST, system size, m >= 3, including when n == 0.
+ * @param n IN, HOST, right-hand side count, n >= 0.
+ * @param dl IN, DEVICE, sub-diagonal [m]; dl[0] must be zero.
+ * @param d IN, DEVICE, main diagonal [m].
+ * @param du IN, DEVICE, super-diagonal [m]; du[m - 1] must be zero.
+ * @param B IN, DEVICE, column-major right-hand sides [ldb * n].
+ * @param ldb IN, HOST, leading dimension, ldb >= m.
+ * @param pBufferSizeInBytes OUT, HOST, non-null byte-count output.
+ * @return Existing aclsparse status code. For valid n == 0, writes zero and
+ *         permits null device data pointers. For n > 0, all data pointers
+ *         must be non-null. Integer/byte-span overflow is invalid.
+ */
+aclsparseStatus_t aclsparseCgtsv2_bufferSizeExt(aclsparseHandle_t handle, int m, int n, const aclsparseComplex_t* dl,
+                                                const aclsparseComplex_t* d, const aclsparseComplex_t* du,
+                                                const aclsparseComplex_t* B, int ldb, size_t* pBufferSizeInBytes);
+
+/**
+ * @brief Solve A * X = B for complex64 tridiagonal A, using partial pivoting.
+ *
+ * A is defined by read-only dl/d/du. X replaces the first m values of each
+ * column of B in place; B padding is preserved. Work is enqueued on the
+ * handle's stream. SUCCESS reports host-side validation/dispatch, not device
+ * completion. The caller checks asynchronous errors at stream synchronization.
+ *
+ * @param handle IN, HOST, valid aclsparse handle.
+ * @param m IN, HOST, system size, m >= 3, including when n == 0.
+ * @param n IN, HOST, right-hand side count, n >= 0.
+ * @param dl IN, DEVICE, sub-diagonal [m]; dl[0] must be zero.
+ * @param d IN, DEVICE, main diagonal [m].
+ * @param du IN, DEVICE, super-diagonal [m]; du[m - 1] must be zero.
+ * @param B IN/OUT, DEVICE, column-major right-hand sides and solutions [ldb * n].
+ * @param ldb IN, HOST, leading dimension, ldb >= m.
+ * @param pBuffer IN, DEVICE, 128-byte aligned workspace of at least the queried
+ *                size, held with the inputs/output until stream completion.
+ * @return Existing aclsparse status code. Valid n == 0 is a no-op and permits
+ *         null data/workspace pointers. The ABI does not provide allocation
+ *         sizes; sufficient storage and disjoint mutable workspaces are the
+ *         caller's responsibility. Singular output is not an accuracy pass.
+ */
+aclsparseStatus_t aclsparseCgtsv2(aclsparseHandle_t handle, int m, int n, const aclsparseComplex_t* dl,
+                                  const aclsparseComplex_t* d, const aclsparseComplex_t* du, aclsparseComplex_t* B,
+                                  int ldb, void* pBuffer);
 // ============================================================================
 // Legacy API: aclsparseSgpsvInterleavedBatch
 // ============================================================================

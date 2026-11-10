@@ -94,6 +94,8 @@
 | [aclsparseSpMMOp](#aclsparsespmmop) | 稀疏矩阵-稠密矩阵乘法（descriptor/plan 生命周期模式） |
 | [aclsparseSgtsv2](#aclsparsesgtsv2) | 三对角线性方程组带选主元求解（FP32，Multiple RHS） |
 | [aclsparseSgtsv2_bufferSizeExt](#aclsparsesgtsv2_buffersizeext) | 查询 aclsparseSgtsv2 所需工作区大小 |
+| [aclsparseCgtsv2](#aclsparsecgtsv2) | 复数三对角线性方程组带部分选主元求解（complex64，Multiple RHS） |
+| [aclsparseCgtsv2_bufferSizeExt](#aclsparsecgtsv2_buffersizeext) | 查询 aclsparseCgtsv2 所需工作区大小 |
 | [aclsparseXcscsort_bufferSizeExt](#aclsparsexcscsort_buffersizeext) | 获取CSC排序缓冲区大小 |
 | [aclsparseXcscsort](#aclsparsexcscsort) | CSC格式按列稳定排序 |
 | [aclsparseLtMatmulAlgSetAttribute](#aclsparseltmatmulalgsetattribute) | 设置结构化稀疏矩阵乘法的算法属性 |
@@ -2594,6 +2596,97 @@ aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：参数非法（m/n/ldb 越界、空指针等）
 - 其他值：失败
+
+---
+
+### aclsparseCgtsv2
+
+```cpp
+aclsparseStatus_t aclsparseCgtsv2(
+    aclsparseHandle_t handle, int m, int n,
+    const aclsparseComplex_t* dl, const aclsparseComplex_t* d,
+    const aclsparseComplex_t* du, aclsparseComplex_t* B,
+    int ldb, void* pBuffer);
+```
+
+**功能**：求解复数三对角线性方程组 **A · X = B**，支持多个右端项。A 由只读的下对角线 `dl`、主对角线 `d` 和上对角线 `du` 表示，采用相邻部分选主元。解 X 原地写回 B，每列第 m 行之后的 padding 保持不变。
+
+复数类型为 `aclsparseComplex_t`，由两个连续的 FP32 字段 `real`、`imag` 组成，大小为 8 字节。B 按列主序存储，元素 `(i, j)` 位于 `B[i + j * ldb]`。
+
+**产品支持情况**：
+
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+
+**参数说明**：
+
+- `handle`（IN）：HOST，有效的 ops-sparse 句柄，计算提交到句柄绑定的 stream。
+- `m`（IN）：HOST，三对角矩阵行数和列数，需 ≥ 3；n=0 时仍校验。
+- `n`（IN）：HOST，右端项列数，需 ≥ 0。
+- `dl`（IN）：DEVICE，complex64 下对角线数组 [m]，调用方需设置 `dl[0] = 0`。
+- `d`（IN）：DEVICE，complex64 主对角线数组 [m]。
+- `du`（IN）：DEVICE，complex64 上对角线数组 [m]，调用方需设置 `du[m-1] = 0`。
+- `B`（IN/OUT）：DEVICE，列主序右端项及解矩阵 [ldb × n]；每列前 m 个元素被解覆盖。
+- `ldb`（IN）：HOST，B 的 leading dimension，以复数元素计，需 ≥ m；n=0 时仍校验。
+- `pBuffer`（IN）：DEVICE，128 字节对齐的调用方工作区，容量不少于 `aclsparseCgtsv2_bufferSizeExt` 的查询结果。
+
+**约束说明**：
+
+- n > 0 时，`dl`、`d`、`du`、`B` 和 `pBuffer` 均不可为 nullptr。
+- 合法的 n=0 调用不启动 kernel，允许数据指针和工作区指针为 nullptr；句柄和整数维度仍需有效。
+- 调用方负责提供足够的设备存储，并保持输入、输出和工作区有效直到 stream 执行完成；并发调用使用独立的可写工作区。
+- 该接口异步执行。返回 SUCCESS 表示 Host 参数校验及提交成功，调用方仍需在 stream 同步时检查异步错误。奇异或非有限输入的输出不能作为普通有限值精度通过的依据。
+- 工作区大小以当前查询接口返回值为准，不应硬编码容量。详细接口约定见 [Cgtsv2 算子说明](../../sparse/cgtsv2/README.md)。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：Host 参数校验及提交成功；合法 n=0 调用直接返回。
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：维度、必需指针、地址跨度或工作区对齐非法。
+- `ACL_SPARSE_STATUS_INTERNAL_ERROR`：平台资源不可用。
+- 其他值：调用句柄或运行时接口失败。
+
+---
+
+### aclsparseCgtsv2_bufferSizeExt
+
+```cpp
+aclsparseStatus_t aclsparseCgtsv2_bufferSizeExt(
+    aclsparseHandle_t handle, int m, int n,
+    const aclsparseComplex_t* dl, const aclsparseComplex_t* d,
+    const aclsparseComplex_t* du, const aclsparseComplex_t* B,
+    int ldb, size_t* pBufferSizeInBytes);
+```
+
+**功能**：查询 `aclsparseCgtsv2` 所需的调用方工作区字节数。查询不读取设备数据、不修改 B，也不启动计算 kernel。非空 RHS 的工作区由 m 决定，与 RHS 列数 n 无关；合法 n=0 调用返回 0。
+
+**产品支持情况**：
+
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+
+**参数说明**：
+
+- `handle`（IN）：HOST，有效的 ops-sparse 句柄。
+- `m`（IN）：HOST，三对角矩阵行数和列数，需 ≥ 3；n=0 时仍校验。
+- `n`（IN）：HOST，右端项列数，需 ≥ 0。
+- `dl`、`d`、`du`（IN）：DEVICE，长度为 m 的只读 complex64 系数数组，布局与求解接口一致。
+- `B`（IN）：DEVICE，列主序右端项矩阵 [ldb × n]；n > 0 时必须为非空指针。
+- `ldb`（IN）：HOST，B 的 leading dimension，需 ≥ m；n=0 时仍校验。
+- `pBufferSizeInBytes`（OUT）：HOST，工作区字节数输出指针，不可为 nullptr。
+
+**约束说明**：
+
+- n > 0 时，`dl`、`d`、`du` 和 `B` 均不可为 nullptr；整数运算或地址跨度溢出返回 INVALID_VALUE。
+- n=0 时允许数据指针为 nullptr，但句柄、维度及输出指针仍需有效。
+- 返回的非零工作区大小包含 128 字节对齐，调用方应按查询值分配，并将 128 字节对齐的设备地址传给求解接口。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：查询成功。
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空。
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：维度、必需指针或地址跨度非法。
+- 其他值：调用句柄接口失败。
 
 ---
 

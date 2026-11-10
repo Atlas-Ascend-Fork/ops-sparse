@@ -23,6 +23,7 @@
 
 #include "acl/acl.h"
 #include "types.h"
+#include "mixed_anchor.h"
 
 namespace sparse_test {
 
@@ -332,6 +333,18 @@ private:
 
 class Verifier {
 public:
+    static bool verifyVector(const std::vector<float>& output, const std::vector<double>& golden,
+                             const VerifyConfig& cfg, const std::string& caseId,
+                             MixedAnchorResult* details = nullptr) {
+        const auto result = EvaluateMixedAnchor(output, golden, cfg);
+        if (details != nullptr) { *details = result; }
+        std::cout << "[" << caseId << "] " << (result.passed ? "PASSED" : "FAILED")
+                  << " (matched=" << result.matched << "/" << result.total
+                  << ", maxAbsErr=" << result.maxAbsError << ", anchor=" << result.maxErrorIndex
+                  << ", limit=" << result.absoluteLimit << ", " << result.reason << ")" << std::endl;
+        return result.passed;
+    }
+
     // Preserve integer values while comparing them.  Converting int32 values
     // to float first loses the low bit at and above 2^24.
     template <typename T, typename std::enable_if_t<std::is_integral_v<T>, int> = 0>
@@ -360,11 +373,18 @@ public:
 
     static bool verifyVector(const float* output, const float* golden, size_t count, int64_t stride,
                              const VerifyConfig& cfg, const std::string& caseId) {
+        if (cfg.mode == PrecisionMode::MIXED_TOLERANCE_ANCHOR) {
+            std::cout << "[" << caseId << "] FAILED: anchor mode requires FLOAT64 Golden" << std::endl;
+            return false;
+        }
         auto strategy = createStrategy(cfg);
         return strategy->verify(output, golden, count, stride, caseId);
     }
 
     static bool verifyScalar(float output, float golden, const VerifyConfig& cfg, const std::string& caseId) {
+        if (cfg.mode == PrecisionMode::MIXED_TOLERANCE_ANCHOR) {
+            return verifyVector(std::vector<float>{output}, std::vector<double>{golden}, cfg, caseId);
+        }
         std::cout << "[" << caseId << "] Output: " << output << " Golden: " << golden << std::endl;
         if (output == golden) return true;
         if (std::isnan(output) && std::isnan(golden)) return true;

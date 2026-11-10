@@ -23,6 +23,7 @@ enum class PrecisionMode {
     EXACT,
     INTEGER,
     MIXED_TOLERANCE,
+    MIXED_TOLERANCE_ANCHOR, // FLOAT64 reference; cap at the maximum finite-error position.
 };
 
 struct VerifyConfig {
