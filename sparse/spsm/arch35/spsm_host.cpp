@@ -364,6 +364,36 @@ aclsparseStatus_t ReadSummary(aclsparseSpSMDescr_t d, SpsmDeviceSummary& summary
     return OK;
 }
 
+// clear-then-launch-then-peek + summary 回读（评审响应：消重复块 + 统一约定）。
+// Peek 只读不清除，陈旧线程级错误会被归因本次下发且一次失败后永久粘滞
+// （AlphaPointer 对 host 指针查询属性失败即留粘滞 last error）；
+// 每次调用先 aclrtGetLastError 清除，只归因本次下发。
+static aclsparseStatus_t LaunchChecked(aclsparseSpSMDescr_t d, SpsmPhase phase,
+    const void* values, void* dense, int64_t width, uint32_t blocks)
+{
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+    Launch(d, phase, values, dense, width, blocks);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS)
+    {
+        return ReportFailure(ACL_SPARSE_STATUS_EXECUTION_FAILED, __func__, __LINE__);
+    }
+    return OK;
+}
+
+// CHECK 段：下发 + enqueue 查错 + summary 回读（Analysis 尾段与 Update 的
+// CHECK 段共用；返回 OK 时 summary 已填）。
+static aclsparseStatus_t LaunchCheckAndReadSummary(
+    aclsparseSpSMDescr_t d, SpsmPhase phase, const void* values,
+    void* dense, int64_t width, uint32_t blocks, SpsmDeviceSummary& summary)
+{
+    const aclsparseStatus_t status = LaunchChecked(d, phase, values, dense, width, blocks);
+    if (status != OK)
+    {
+        return status;
+    }
+    return ReadSummary(d, summary);
+}
+
 void SetAnalysisMetadata(aclsparseSpSMDescr_t d, const SpsmDeviceSummary& s)
 {
     d->plan.levels = s.levels;
@@ -713,7 +743,16 @@ aclsparseStatus_t aclsparseSpSMAnalysis(aclsparseHandle_t h, aclsparseOperation_
     {
         return status;
     }
+    // 下发失败不得依赖后续 ReadSummary 掩盖：enqueue 期失败时流上无在途任务，
+    // 同步会空转成功而读到陈旧 summary。clear-then-launch-then-peek：先清线程级
+    // 陈旧错误（先前已正确处理翻译为状态码的校验失败会留下粘滞 last error，如
+    // AlphaPointer 对 host 指针查询属性失败），只归因本路径下发（issue #357）。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
     BuildPlan(d, a);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS)
+    {
+        return ReportFailure(ACL_SPARSE_STATUS_EXECUTION_FAILED, __func__, __LINE__);
+    }
     SpsmDeviceSummary summary { };
     status = ReadSummary(d, summary);
     if (status != OK)
@@ -742,17 +781,29 @@ aclsparseStatus_t aclsparseSpSM(aclsparseHandle_t h, aclsparseOperation_t opA, a
         return status;
     }
     SetHostAlpha(d, alpha);
+    // Solve 无 host 等待/回读，是三阶段中唯一完全无法经同步观察失败的路径：
+    // enqueue 失败必须显式上报。clear-then-launch-then-peek 只归因本路径下发
+    // （issue #357）。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
     if (d->plan.levels == 1)
     {
         SolveDiagonalPlan(d, b, c);
-        return OK;
     }
-    SolveGeneralPlan(d, b, c);
+    else
+    {
+        SolveGeneralPlan(d, b, c);
+    }
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS)
+    {
+        return ReportFailure(ACL_SPARSE_STATUS_EXECUTION_FAILED, __func__, __LINE__);
+    }
     return OK;
 }
 
-aclsparseStatus_t aclsparseSpSMUpdateMatrix(
-    aclsparseHandle_t h, aclsparseSpSMDescr_t d, const void* newValues, aclsparseSpSMUpdate_t part)
+// Update 入口的句柄/描述符/部件校验与绑定匹配（评审响应：压函数行数至 50 内）。
+static aclsparseStatus_t ValidateUpdateCall(
+    aclsparseHandle_t h, aclsparseSpSMDescr_t d, const void* newValues, aclsparseSpSMUpdate_t part,
+    bool& general)
 {
     if (h == nullptr)
     {
@@ -766,12 +817,19 @@ aclsparseStatus_t aclsparseSpSMUpdateMatrix(
     {
         return ReportFailure(INVALID, __func__, __LINE__);
     }
-    auto status = Match(h, d, d->alpha, d->inputA, d->inputB, d->outputC, d->opA, d->opB);
+    general = part == ACL_SPARSE_SPSM_UPDATE_GENERAL;
+    return Match(h, d, d->alpha, d->inputA, d->inputB, d->outputC, d->opA, d->opB);
+}
+
+aclsparseStatus_t aclsparseSpSMUpdateMatrix(
+    aclsparseHandle_t h, aclsparseSpSMDescr_t d, const void* newValues, aclsparseSpSMUpdate_t part)
+{
+    bool general = false;
+    auto status = ValidateUpdateCall(h, d, newValues, part, general);
     if (status != OK)
     {
         return status;
     }
-    bool general = part == ACL_SPARSE_SPSM_UPDATE_GENERAL;
     int64_t count = general ? d->plan.nnz : d->plan.m;
     if (!DeviceSpan(d->buffer, d->cachedBufferSize, d->device)
         || (count > 0 && !DeviceSpan(newValues, count * 4 * d->plan.components, d->device))
@@ -781,21 +839,25 @@ aclsparseStatus_t aclsparseSpSMUpdateMatrix(
     }
     // Unit diagonals are implicit; their supplied values have no effect.
     // A GENERAL update still refreshes every off-diagonal value.
+    // 该分支无 ReadSummary 同步兜底，是 Update 中唯一完全无失败观测的路径：
+    // 同样走 clear-then-launch-then-peek（评审响应补齐，issue #359）。
     if (d->plan.unit)
     {
         if (general)
         {
-            Launch(d, SpsmPhase::COMMIT_GENERAL, newValues);
+            return LaunchChecked(d, SpsmPhase::COMMIT_GENERAL, newValues, nullptr, 0, 0);
         }
         return OK;
     }
-    Launch(d, general ? SpsmPhase::CHECK_GENERAL : SpsmPhase::CHECK_DIAGONAL, newValues, nullptr, 0, 1);
     SpsmDeviceSummary summary { };
-    status = ReadSummary(d, summary);
+    status = LaunchCheckAndReadSummary(
+        d, general ? SpsmPhase::CHECK_GENERAL : SpsmPhase::CHECK_DIAGONAL,
+        newValues, nullptr, 0, 1, summary);
     if (status != OK)
     {
         return status;
     }
-    Launch(d, general ? SpsmPhase::COMMIT_GENERAL : SpsmPhase::COMMIT_DIAGONAL, newValues);
-    return OK;
+    return LaunchChecked(
+        d, general ? SpsmPhase::COMMIT_GENERAL : SpsmPhase::COMMIT_DIAGONAL,
+        newValues, nullptr, 0, 0);
 }
