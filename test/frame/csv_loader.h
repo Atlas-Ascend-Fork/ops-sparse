@@ -16,11 +16,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <iostream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sparse_test {
@@ -85,58 +85,177 @@ inline std::string parseString(const csv_map& row, const std::string& key) {
     return it->second;
 }
 
-// ReadMap: load CSV file into vector of csv_map rows
+inline std::string TrimCsvField(const std::string& text) {
+    const size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return "";
+    const size_t end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+
+// Split one record on commas. A field wrapped in double quotes may contain
+// commas, and "" inside it is an escaped quote. Same rule as the dedicated
+// loader in test/sparse2dense/arch22, whose table quotes descriptions that
+// contain commas. RFC 4180 allows nothing but a comma or the end of the record
+// after a closing quote, so a tail such as `"a"x` is rejected instead of
+// silently spliced into `ax`.
+inline std::vector<std::string> SplitCsvRecord(const std::string& line) {
+    std::vector<std::string> fields;
+    std::string field;
+    bool quoted = false;
+    bool atFieldStart = true;
+    bool afterClosingQuote = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char ch = line[i];
+        if (quoted) {
+            if (ch != '"') {
+                field.push_back(ch);
+            } else if (i + 1 < line.size() && line[i + 1] == '"') {
+                field.push_back('"');
+                ++i;
+            } else {
+                quoted = false;
+                afterClosingQuote = true;
+            }
+            continue;
+        }
+        if (ch == ',') {
+            fields.push_back(field);
+            field.clear();
+            atFieldStart = true;
+            afterClosingQuote = false;
+        } else if (afterClosingQuote && ch != ' ' && ch != '\t' && ch != '\r') {
+            // git stores the tables with LF, but a core.autocrlf checkout presents
+            // them with CRLF and std::getline leaves that \r on the record, so a
+            // trailing \r after the closing quote must not be a rejection.
+            throw std::runtime_error("unexpected character after the closing quote of a quoted field");
+        } else if (ch == '"' && atFieldStart) {
+            field.clear();
+            quoted = true;
+        } else {
+            field.push_back(ch);
+            if (ch != ' ' && ch != '\t') atFieldStart = false;
+        }
+    }
+    if (quoted) {
+        throw std::runtime_error("unterminated quoted field");
+    }
+    fields.push_back(field);
+    return fields;
+}
+
+inline std::string CsvLocation(const std::string& csvPath, size_t lineNo) {
+    return csvPath + ":" + std::to_string(lineNo) + ": ";
+}
+
+inline std::vector<std::string> ParseCsvHeader(const std::string& header, const std::string& csvPath,
+                                               size_t lineNo) {
+    std::vector<std::string> fields;
+    try {
+        fields = SplitCsvRecord(header);
+    } catch (const std::runtime_error& err) {
+        throw std::runtime_error(CsvLocation(csvPath, lineNo) + err.what());
+    }
+    std::vector<std::string> columns;
+    columns.reserve(fields.size());
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const std::string name = TrimCsvField(fields[i]);
+        if (name.empty()) {
+            // Dropping the hole would shift every later value onto the wrong key.
+            throw std::runtime_error(CsvLocation(csvPath, lineNo) + "empty column name at index " +
+                                     std::to_string(i));
+        }
+        if (std::find(columns.begin(), columns.end(), name) != columns.end()) {
+            throw std::runtime_error(CsvLocation(csvPath, lineNo) + "duplicate column name '" + name + "'");
+        }
+        columns.push_back(name);
+    }
+    return columns;
+}
+
+// These existing tables deliberately omit optional trailing parameters. Match
+// both the file name and the complete optional suffix so a changed schema or a
+// truncated required prefix cannot silently receive empty/default values.
+inline bool CsvAllowsOmittedTrailingColumns(const std::string& csvPath,
+                                           const std::vector<std::string>& columns, size_t fieldCount) {
+    static const std::map<std::string, std::pair<size_t, std::vector<std::string>>> optionalSuffixes = {
+        {"ltmatmul_test.csv", {23, {"bias_enabled", "bias_stride", "activation_type", "relu_upper_bound",
+                                  "relu_threshold", "gelu_scaling", "num_batches", "batch_stride", "ld_sparse",
+                                  "ld_dense", "dense_order", "cd_order", "ld_cd", "direct_feed"}}},
+        {"prune_test.csv", {13, {"num_batches", "batch_stride", "ld", "in_place"}}},
+        {"matmulSearch_test.csv", {39, {"ld_sparse", "ld_dense", "dense_order", "cd_order", "ld_cd"}}},
+        {"spsv_test.csv", {22, {"rowptr_type", "colind_type", "force_permtype64"}}},
+    };
+    const size_t separator = csvPath.find_last_of("/\\");
+    const std::string fileName = csvPath.substr(separator == std::string::npos ? 0 : separator + 1);
+    const auto it = optionalSuffixes.find(fileName);
+    if (it == optionalSuffixes.end()) return false;
+    const size_t requiredCount = it->second.first;
+    const auto& suffix = it->second.second;
+    return columns.size() == requiredCount + suffix.size() && fieldCount >= requiredCount &&
+           fieldCount <= columns.size() && std::equal(suffix.begin(), suffix.end(), columns.begin() + requiredCount);
+}
+
+// ReadMap: load CSV file into vector of csv_map rows. Reject malformed row
+// widths; only the explicitly listed legacy optional suffixes may be omitted.
 inline std::vector<csv_map> ReadMap(const std::string& csvPath) {
     std::ifstream ifs(csvPath);
     if (!ifs.is_open()) {
-        std::cerr << "ReadMap: cannot open " << csvPath << std::endl;
-        return {};
+        // Returning an empty vector would register zero GTest cases and exit 0.
+        throw std::runtime_error("csv_loader: cannot open " + csvPath);
+    }
+
+    std::vector<std::string> columns;
+    std::string line;
+    size_t lineNo = 0;
+    bool headerParsed = false;
+    while (std::getline(ifs, line)) {
+        ++lineNo;
+        if (lineNo == 1U && line.size() >= 3U && static_cast<unsigned char>(line[0]) == 0xEFU &&
+            static_cast<unsigned char>(line[1]) == 0xBBU && static_cast<unsigned char>(line[2]) == 0xBFU) {
+            line.erase(0, 3);  // UTF-8 BOM would otherwise pollute the first column name
+        }
+        const std::string trimmed = TrimCsvField(line);
+        if (trimmed.empty() || trimmed[0] == '#') continue;  // preamble before the header
+        columns = ParseCsvHeader(line, csvPath, lineNo);
+        headerParsed = true;
+        break;
+    }
+    if (!headerParsed) {
+        throw std::runtime_error("csv_loader: missing header row in " + csvPath);
     }
 
     std::vector<csv_map> rows;
-    std::string header;
-    std::getline(ifs, header);
-
-    // Parse header columns
-    std::vector<std::string> columns;
-    {
-        std::stringstream ss(header);
-        std::string col;
-        while (std::getline(ss, col, ',')) {
-            // Strip whitespace
-            col.erase(0, col.find_first_not_of(" \t\r\n"));
-            col.erase(col.find_last_not_of(" \t\r\n") + 1);
-            if (!col.empty()) columns.push_back(col);
-        }
-    }
-
-    // Parse data rows
-    std::string line;
     while (std::getline(ifs, line)) {
-        // Skip empty lines and comments
-        if (line.empty() || line[0] == '#') continue;
-        // Trim trailing whitespace
-        line.erase(line.find_last_not_of(" \t\r\n") + 1);
-        if (line.empty()) continue;
+        ++lineNo;
+        const std::string trimmed = TrimCsvField(line);
+        if (trimmed.empty() || trimmed[0] == '#') continue;
+
+        std::vector<std::string> fields;
+        try {
+            fields = SplitCsvRecord(line);
+        } catch (const std::runtime_error& err) {
+            throw std::runtime_error(CsvLocation(csvPath, lineNo) + err.what());
+        }
+        if (fields.size() > columns.size() ||
+            (fields.size() < columns.size() && !CsvAllowsOmittedTrailingColumns(csvPath, columns, fields.size()))) {
+            throw std::runtime_error(CsvLocation(csvPath, lineNo) + "row has " + std::to_string(fields.size()) +
+                                     " fields but the header has " + std::to_string(columns.size()));
+        }
 
         csv_map row;
-        std::stringstream ss(line);
-        std::string val;
-        size_t colIdx = 0;
-        while (std::getline(ss, val, ',') && colIdx < columns.size()) {
-            val.erase(0, val.find_first_not_of(" \t"));
-            val.erase(val.find_last_not_of(" \t") + 1);
-            row[columns[colIdx]] = val;
-            colIdx++;
+        for (size_t i = 0; i < fields.size(); ++i) {
+            row[columns[i]] = TrimCsvField(fields[i]);
         }
-        // Pad remaining columns with empty string
-        while (colIdx < columns.size()) {
-            row[columns[colIdx]] = "";
-            colIdx++;
+        for (size_t i = fields.size(); i < columns.size(); ++i) {
+            row[columns[i]] = "";
         }
-        rows.push_back(row);
+        rows.push_back(std::move(row));
     }
 
+    if (rows.empty()) {
+        // A header without cases would otherwise register zero tests and pass.
+        throw std::runtime_error(CsvLocation(csvPath, lineNo) + "missing data rows");
+    }
     return rows;
 }
 

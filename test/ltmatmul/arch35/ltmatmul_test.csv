@@ -187,8 +187,8 @@ case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config
 # cube 全量写」不变量（memset 已去除——旧实现在佐证轮失败）。
 620,64,64,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L1,B4-emptysg-k64-sk2,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0,0
 621,64,96,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,3,1,STRIP,0,0,-1,1,L1,B4-emptysg-k96-sk3,row,A,0,0,0,3.402823466e38,0.0,1.0,1,0,0,0,0,0,0,0
-622,64,128,64,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,4,1,STRIP,0,0,-5,5,L1,B4-emptysg-int8-k128-sk4-batch2,row,A,0,0,0,3.402823466e38,0.0,1.0,2,16384,0,0,0,0,0,0,0
-623,64,96,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,3,1,STRIP,0,0,-1,1,L1,B4-emptysg-k96-sk3-batch3,row,A,0,0,0,3.402823466e38,0.0,1.0,3,9216,0,0,0,0,0,0,0
+622,64,128,64,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,4,1,STRIP,0,0,-5,5,L1,B4-emptysg-int8-k128-sk4-batch2,row,A,0,0,0,3.402823466e38,0.0,1.0,2,16384,0,0,0,0,0,0
+623,64,96,64,FP16,-,sparse×dense,1.0,0.0,false,false,0,3,1,STRIP,0,0,-1,1,L1,B4-emptysg-k96-sk3-batch3,row,A,0,0,0,3.402823466e38,0.0,1.0,3,9216,0,0,0,0,0,0
 # ---- D6 op×order 并集口径 INT8 精度用例（B-sparse 官方合法集 S_c ×4 +
 # (Col,Col)+TN 补例 + A-sparse 反转 ×4 + S_c×D=INT32 变体）----
 # 并集表：每个 order 对允许基准 op 对或其反转对（cuSPARSELt "the opposite
