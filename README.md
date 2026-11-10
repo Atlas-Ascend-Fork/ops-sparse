@@ -31,7 +31,49 @@ git clone -b ${tag_version} https://gitcode.com/cann/ops-sparse.git
 ## 📖学习教程
 
 - [快速入门](docs/QUICKSTART.md)：从零开始快速体验项目核心基础能力，涵盖源码编译、算子调用、开发与调试等操作。
+- [算子支持情况](#算子支持情况)
 - [接口列表](docs/zh/api_list.md)：提供全量API信息，方便您查看aclsparse接口的分类和功能。
+
+## 算子支持情况
+
+下表汇总 **已实现的计算/转换类算子** 在 Atlas A2/A3、Ascend 950PR/950DT 上的支持情况（按源码 `arch22` / `arch35` 与各算子 README 产品说明整理）。**不包含** handle / 描述符创建销毁等通用 API。已写入接口文档的条目见 [接口列表](docs/zh/api_list.md)（按通用 API / 算子 API 分类；本表中部分算子的详细接口说明仍以各算子目录 `README.md` 为准，接口列表将持续补齐）。
+
+图例：`√` 已支持，`×` 当前未支持。A2/A3 对应 `arch22`，950PR/950DT 对应 `arch35`（同架构实现共享，合并为一列展示）。
+
+| 算子 | 代表接口 | A2/A3 | 950PR/950DT |
+|------|----------|:-----:|:----------:|
+| [SpMV](sparse/spmv/README.md) | `aclsparseSpMV` | √ | √ |
+| [SpMVOp](sparse/spmv_op/README.md) | `aclsparseSpMVOp` | × | √ |
+| [SpMM](sparse/spmm/README.md) | `aclsparseSpMM` | √ | √ |
+| [SpMMOp](sparse/spmm_op/README.md) | `aclsparseSpMMOp` | × | √ |
+| [CubeSpMM](sparse/cube_spmm/README.md) | `aclsparseCubeSpmm` | √ | × |
+| [SDDMM](sparse/sddmm/README.md) | `aclsparseSDDMM` | √ | √ |
+| [SpGEMM](sparse/spgemm/README.md) | `aclsparseSpGEMM` | √ | √ |
+| [SpSM](sparse/spsm/README.md) | `aclsparseSpSM` | √ | √ |
+| [SpSV](sparse/spsv/README.md) | `aclsparseSpSV_solve` | √ | √ |
+| [SpVV](sparse/spvv/) | `aclsparseSpvv` | √ | × |
+| [Gather](sparse/gather/README.md) | `aclsparseGather` | √ | √ |
+| [Scatter](sparse/scatter/README.md) | `aclsparseScatter` | √ | √ |
+| [DenseToSparse](sparse/densetosparse/README.md) | `aclsparseDenseToSparseConvert` | √ | √ |
+| [SparseToDense](sparse/sparse2dense/README.md) | `aclsparseSparseToDense` | √ | √ |
+| [gtsv2](sparse/gtsv2/README.md) | `aclsparseSgtsv2` | √ | √ |
+| [Cgtsv2](sparse/cgtsv2/README.md) | `aclsparseCgtsv2` | √ | × |
+| [gtsv2_nopivot](sparse/gtsv2_nopivot/README.md) | `aclsparseSgtsv2Nopivot` | × | √ |
+| [gtsv2_strided_batch](sparse/gtsv2_strided_batch/README.md) | `aclsparseSgtsv2StridedBatch` | × | √ |
+| [gtsv_interleaved_batch](sparse/gtsv_interleaved_batch/README.md) | `aclsparseSgtsvInterleavedBatch` | × | √ |
+| [gpsv_interleaved_batch](sparse/gpsv_interleaved_batch/README.md) | `aclsparseSgpsvInterleavedBatch` | × | √ |
+| [CSR 排序](sparse/csrsort/README.md) | `aclsparseXcsrsort` | × | √ |
+| [CSC 排序](sparse/cscsort/README.md) | `aclsparseXcscsort` | √ | √ |
+| [COO 排序](sparse/coosort/README.md) | `aclsparseXcoosortByRow` | × | √ |
+| [COO→CSR](sparse/coo2csr/README.md) | `aclsparseXcoo2csr` | × | √ |
+| [CSR→COO](sparse/csr2coo/README.md) | `aclsparseXcsr2coo` | × | √ |
+| [CSR→CSC](sparse/csr2csc_ex2/README.md) | `aclsparseCsr2cscEx2` | × | √ |
+| [CSR→GEBSR](sparse/csr2gebsr/README.md) | `aclsparseScsr2gebsr` | × | √ |
+| [GEBSR→GEBSC](sparse/gebsr2gebsc/README.md) | `aclsparseGebsr2gebsc` | × | √ |
+| [CSRGEAM2](sparse/csrgeam2/README.md) | `aclsparseScsrgeam2` | × | √ |
+| [NNZ](sparse/nnz/README.md) | `aclsparseSnnz` | × | √ |
+
+> 更细的 dtype / 算法组合以各算子目录下 `README.md` 为准；已文档化的接口说明见 `docs/zh/api_list.md`。结构化稀疏（`aclsparseLt*`）见 [api_list_sparseLt.md](docs/zh/api_list_sparseLt.md)。
 
 ## 🔍目录结构
 
@@ -41,6 +83,7 @@ ops-sparse仓关键目录结构请参见[目录结构](docs/zh/install/dir_struc
 
 ## 💬相关信息
 
+- [算子支持情况](#算子支持情况)
 - [目录结构](docs/zh/install/dir_structure.md)
 - [接口列表](docs/zh/api_list.md)
 - [贡献指南](CONTRIBUTING.md)

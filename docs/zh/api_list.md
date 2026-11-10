@@ -11,6 +11,15 @@
 
 ## 接口列表
 
+接口按用途分为两类：
+
+- **通用 API**：handle / stream / 版本，以及稠密向量、稀疏向量、稀疏矩阵、稠密矩阵等描述符的创建、查询与销毁。
+- **算子 API**：稀疏计算、格式转换/排序、三对角求解，以及 SpMVOp / SpMMOp 等算子专用接口。
+
+平台级算子覆盖总表见仓库根目录 [README · 算子支持情况](../../README.md#算子支持情况)。
+
+### 通用 API
+
 | 接口名 | 说明 |
 |--------|------|
 | [aclsparseCreate](#aclsparsecreate) | 创建稀疏矩阵处理器 |
@@ -29,7 +38,6 @@
 | [aclsparseSpVecGetIndexBase](#aclsparsespvecgetindexbase) | 获取稀疏向量的索引基值 |
 | [aclsparseSpVecGetValues](#aclsparsespvecgetvalues) | 获取稀疏向量描述符的 values 指针 |
 | [aclsparseSpVecSetValues](#aclsparsespvecsetvalues) | 设置稀疏向量描述符的 values 指针 |
-| [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCsrSetStridedBatch](#aclsparsecsrsetstridedbatch) | 设置CSR描述符的batch数与batch步长 |
 | [aclsparseCsrGet](#aclsparsecsrget) | 获取CSR稀疏矩阵描述符的全部字段 |
@@ -56,9 +64,6 @@
 | [aclsparseSpMatSetValues](#aclsparsespmatsetvalues) | 设置稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatGetSize](#aclsparsespmatgetsize) | 获取稀疏矩阵的行数、列数和非零元素个数 |
 | [aclsparseSpMatGetStridedBatch](#aclsparsespmatgetstridedbatch) | 获取稀疏矩阵描述符的batch数 |
-| [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小 |
-| [aclsparseSpMVPreprocess](#aclsparsespmvpreprocess) | SpMV预处理（**暂未支持**） |
-| [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
 | [aclsparseCreateDnMat](#aclsparsecreatednmat) | 创建稠密矩阵 |
 | [aclsparseDestroyDnMat](#aclsparsedestroydnmat) | 销毁稠密矩阵描述符 |
 | [aclsparseDnMatGet](#aclsparsednmatget) | 获取稠密矩阵描述符的全部字段 |
@@ -66,6 +71,15 @@
 | [aclsparseDnMatSetValues](#aclsparsednmatsetvalues) | 设置稠密矩阵描述符的 values 指针 |
 | [aclsparseDnMatGetStridedBatch](#aclsparsednmatgetstridedbatch) | 获取稠密矩阵的strided-batch属性 |
 | [aclsparseDnMatSetStridedBatch](#aclsparsednmatsetstridedbatch) | 设置稠密矩阵的strided-batch属性 |
+
+### 算子 API
+
+| 接口名 | 说明 |
+|--------|------|
+| [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
+| [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小 |
+| [aclsparseSpMVPreprocess](#aclsparsespmvpreprocess) | SpMV预处理 |
+| [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
@@ -100,6 +114,7 @@
 | [aclsparseXcscsort](#aclsparsexcscsort) | CSC格式按列稳定排序 |
 | [aclsparseLtMatmulAlgSetAttribute](#aclsparseltmatmulalgsetattribute) | 设置结构化稀疏矩阵乘法的算法属性 |
 | [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
+| [aclsparseXcoo2csr](../../sparse/coo2csr/README.md#aclsparsexcoo2csr) | 将 COO 行索引转换为 CSR 行指针 |
 
 ## 接口详情
 
@@ -1570,8 +1585,6 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 
 ### aclsparseSpMVPreprocess
 
-> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
-
 ```c
 aclsparseStatus_t aclsparseSpMVPreprocess(
     aclsparseHandle_t handle,
@@ -2978,7 +2991,7 @@ SpMMOp算法枚举：
 | 枚举值 | 说明 |
 |--------|------|
 | `ACL_SPARSE_INDEX_32I` | 32位有符号整数 [0, 2^31 - 1]；**当前 SpMV / SpMM 已实现** |
-| `ACL_SPARSE_INDEX_64I` | 64位有符号整数 [0, 2^63 - 1]；**暂未支持**（`aclsparseCreateCsr` 传入时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`） |
+| `ACL_SPARSE_INDEX_64I` | 64位有符号整数 [0, 2^63 - 1]；`aclsparseCreateCsr` 可创建，但 SpMV/SpMM 等计算路径当前仅支持 `ACL_SPARSE_INDEX_32I` |
 
 ### aclsparseIndexBase_t
 
