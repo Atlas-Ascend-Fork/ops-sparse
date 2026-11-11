@@ -1558,13 +1558,16 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSDDMMPreprocess(
+// Preprocess/SDDMM 入口共用的三步编排（#371：消 9 行重复块）：
+// 参数校验 → workspace 计划 → buffer 校验。isPreprocess 区分两入口
+// 对 ValidateWorkspace 的既有语义差异。
+static aclsparseStatus_t PrepareSddmmExecution(
     aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
     const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
     const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSDDMMAlg_t algorithm, void *buffer)
+    aclsparseSDDMMAlg_t algorithm, void *buffer, bool isPreprocess,
+    SddmmCallContext &context)
 {
-    SddmmCallContext context{};
     aclsparseStatus_t status = ValidateSddmmCall(
         handle, opX, opY, alpha, matX, matY, beta, matC, computeType, algorithm, context);
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
@@ -1574,7 +1577,19 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
         return status;
     }
-    status = ValidateWorkspace(context, buffer, true);
+    return ValidateWorkspace(context, buffer, isPreprocess);
+}
+
+aclsparseStatus_t aclsparseSDDMMPreprocess(
+    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
+    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t algorithm, void *buffer)
+{
+    SddmmCallContext context{};
+    aclsparseStatus_t status = PrepareSddmmExecution(
+        handle, opX, opY, alpha, matX, matY, beta, matC, computeType, algorithm, buffer, true,
+        context);
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
         return status;
     }
@@ -1588,16 +1603,9 @@ aclsparseStatus_t aclsparseSDDMM(
     aclsparseSDDMMAlg_t algorithm, void *buffer)
 {
     SddmmCallContext context{};
-    aclsparseStatus_t status = ValidateSddmmCall(
-        handle, opX, opY, alpha, matX, matY, beta, matC, computeType, algorithm, context);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-    status = ApplyWorkspacePlan(context, opX, opY, computeType, algorithm);
-    if (status != ACL_SPARSE_STATUS_SUCCESS) {
-        return status;
-    }
-    status = ValidateWorkspace(context, buffer, false);
+    aclsparseStatus_t status = PrepareSddmmExecution(
+        handle, opX, opY, alpha, matX, matY, beta, matC, computeType, algorithm, buffer, false,
+        context);
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
         return status;
     }
