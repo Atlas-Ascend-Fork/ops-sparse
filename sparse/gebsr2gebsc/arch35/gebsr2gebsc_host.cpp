@@ -104,8 +104,7 @@ static size_t ComputeWorkspaceBytes(int32_t nb, uint32_t stripeCount)
 static aclsparseStatus_t ValidateGebsr2GebscEnumParams(
     const char *apiName,
     aclDataType valType,
-    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
-    aclsparseDirection_t dirA)
+    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase)
 {
     uint32_t valSize = GetValSize(valType);
     if (valSize == 0) {
@@ -120,11 +119,6 @@ static aclsparseStatus_t ValidateGebsr2GebscEnumParams(
     if (idxBase != ACL_SPARSE_INDEX_BASE_ZERO &&
         idxBase != ACL_SPARSE_INDEX_BASE_ONE) {
         OP_LOGE(apiName, "invalid idxBase: %d", static_cast<int>(idxBase));
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    if (dirA != ACL_SPARSE_DIRECTION_ROW &&
-        dirA != ACL_SPARSE_DIRECTION_COLUMN) {
-        OP_LOGE(apiName, "invalid dirA: %d", static_cast<int>(dirA));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -186,7 +180,7 @@ static aclsparseStatus_t ValidateBufferSizeParams(
         return st;
     }
     st = ValidateGebsr2GebscEnumParams(apiName, valType,
-        ACL_SPARSE_ACTION_SYMBOLIC, ACL_SPARSE_INDEX_BASE_ZERO, dirA);
+        ACL_SPARSE_ACTION_SYMBOLIC, ACL_SPARSE_INDEX_BASE_ZERO);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -268,7 +262,7 @@ static aclsparseStatus_t ValidateGebsr2GebscParams(
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
 
-    st = ValidateGebsr2GebscEnumParams(apiName, valType, copyValues, idxBase, dirA);
+    st = ValidateGebsr2GebscEnumParams(apiName, valType, copyValues, idxBase);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
