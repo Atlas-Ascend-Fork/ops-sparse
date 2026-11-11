@@ -32,6 +32,21 @@ inline aclsparseContext *ToInternal(aclsparseHandle_t handle)
     return reinterpret_cast<aclsparseContext *>(handle);
 }
 
+// handle 型 API 共用前置检查（#376：消 7 处重复块）：null 返回
+// HANDLE_IS_NULLPTR，签名不符返回 INVALID_VALUE，成功回写内部句柄。
+static aclsparseStatus_t ToInternalChecked(aclsparseHandle_t handle, aclsparseContext **h)
+{
+    if (handle == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    auto *ctx = ToInternal(handle);
+    if (ctx->signature != kAclSparseHandleSignature) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *h = ctx;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 /**
  * @brief 释放默认 workspace 设备内存
  */
@@ -117,14 +132,10 @@ aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle)
 
 aclsparseStatus_t aclsparseDestroy(aclsparseHandle_t handle)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-
-    auto *h = ToInternal(handle);
-
-    if (h->signature != kAclSparseHandleSignature) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
 
     // 同步 stream，等待设备完成所有操作
@@ -150,13 +161,10 @@ aclsparseStatus_t aclsparseDestroy(aclsparseHandle_t handle)
 
 aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-
-    auto *h = ToInternal(handle);
-    if (h->signature != kAclSparseHandleSignature) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
     if (h->stream != stream) {
         ++h->stream_epoch;
@@ -172,15 +180,12 @@ aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream strea
 
 aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
     if (stream == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    auto *h = ToInternal(handle);
-    if (h->signature != kAclSparseHandleSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *stream = h->stream;
@@ -189,13 +194,10 @@ aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stre
 
 aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void *workspace, size_t workspaceSize)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-
-    auto *h = ToInternal(handle);
-    if (h->signature != kAclSparseHandleSignature) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
 
     // workspace == nullptr: 切回默认 workspace
@@ -221,15 +223,12 @@ aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void *workspac
 
 aclsparseStatus_t aclsparseGetWorkspace(aclsparseHandle_t handle, void **workspace, size_t *workspaceSize)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
     if (workspace == nullptr || workspaceSize == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    auto *h = ToInternal(handle);
-    if (h->signature != kAclSparseHandleSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *workspace = aclsparseGetEffectiveWorkspace(h);
@@ -304,15 +303,12 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr
 
 aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t mode)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
     if (mode != ACL_SPARSE_POINTER_MODE_HOST && mode != ACL_SPARSE_POINTER_MODE_DEVICE) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    auto *h = ToInternal(handle);
-    if (h->signature != kAclSparseHandleSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     h->pointerMode = mode;
@@ -321,15 +317,12 @@ aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePoi
 
 aclsparseStatus_t aclsparseGetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t *mode)
 {
-    if (handle == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    aclsparseContext *h = nullptr;
+    aclsparseStatus_t st = ToInternalChecked(handle, &h);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
     }
     if (mode == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    auto *h = ToInternal(handle);
-    if (h->signature != kAclSparseHandleSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *mode = h->pointerMode;
