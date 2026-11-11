@@ -1288,12 +1288,14 @@ extern "C" aclsparseStatus_t aclsparseSpGEMMGetBufferSize(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-extern "C" aclsparseStatus_t aclsparseSpGEMMPreprocess(
+// 旧三阶段入口（Preprocess/SpGEMM）共用预检（#370：消 13 行重复块）：
+// buffer 非空、GetBufferSize 查询、legacy layout 与查询值一致性校验。
+static aclsparseStatus_t PrepareLegacyLayout(
     aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void *alpha, aclsparseConstSpMatDescr_t matA,
     aclsparseConstSpMatDescr_t matB, const void *beta,
     aclsparseSpMatDescr_t matC, aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg, void *buffer)
+    aclsparseSpGEMMAlg_t alg, void *buffer, SpGemmLegacyLayout &layout)
 {
     if (buffer == nullptr) {
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
@@ -1304,9 +1306,24 @@ extern "C" aclsparseStatus_t aclsparseSpGEMMPreprocess(
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
         return status;
     }
-    SpGemmLegacyLayout layout{};
     if (!BuildLegacyLayout(matA, matB, computeType, layout) || layout.bytes != legacyBytes) {
         return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseSpGEMMPreprocess(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, void *buffer)
+{
+    SpGemmLegacyLayout layout{};
+    aclsparseStatus_t status = PrepareLegacyLayout(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, buffer, layout);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
     }
 
     ReleaseLegacyDescriptor(matC);
@@ -1341,12 +1358,9 @@ extern "C" aclsparseStatus_t aclsparseSpGEMM(
     aclsparseSpMatDescr_t matC, aclDataType computeType,
     aclsparseSpGEMMAlg_t alg, void *buffer)
 {
-    if (buffer == nullptr) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
-    }
-    size_t legacyBytes = 0;
-    aclsparseStatus_t status = aclsparseSpGEMMGetBufferSize(
-        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, &legacyBytes);
+    SpGemmLegacyLayout layout{};
+    aclsparseStatus_t status = PrepareLegacyLayout(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, buffer, layout);
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
         return status;
     }
@@ -1357,10 +1371,6 @@ extern "C" aclsparseStatus_t aclsparseSpGEMM(
         if (status != ACL_SPARSE_STATUS_SUCCESS) {
             return status;
         }
-    }
-    SpGemmLegacyLayout layout{};
-    if (!BuildLegacyLayout(matA, matB, computeType, layout) || layout.bytes != legacyBytes) {
-        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     aclsparseSpGEMMDescr_t descr = matC->legacySpGemmDescr.get();
     size_t size2 = descr->requiredBuffer2;
