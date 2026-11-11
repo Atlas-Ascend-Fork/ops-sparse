@@ -22,6 +22,7 @@
 #include "aclsparselt_mat_descriptor_internal.h"
 
 #include <cstdint>
+#include <limits>
 #include <new>
 
 namespace
@@ -139,7 +140,8 @@ inline aclsparseStatus_t ValidateMatDescCommonParams(const aclsparseLtHandle_t* 
     {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (rows <= 0 || cols <= 0 || ld <= 0)
+    if (rows <= 0 || cols <= 0 || ld <= 0 || rows > std::numeric_limits<int32_t>::max() ||
+        cols > std::numeric_limits<int32_t>::max() || ld > std::numeric_limits<int32_t>::max())
     {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }

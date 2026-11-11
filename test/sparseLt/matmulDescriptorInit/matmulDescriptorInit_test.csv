@@ -62,6 +62,10 @@ L1-38,L1,matmul,INVALID_VALUE,0,16,16,16,16,FP32,COL,50_PERCENT,16,16,16,16,FP32
 L1-39,L1,dense,INVALID_VALUE,0,16,16,16,16,FP32,INVALID,,,,,,,,,,,,,,,,,,,,,,,
 L1-40,L1,matmul,INVALID_VALUE,0,32,32,32,32,INT8,COL,50_PERCENT,32,32,32,32,INT8,COL,,32,32,32,32,INT8,COL,32,32,32,32,INT8,COL,CONJ,N,32I
 # ---- 补充用例（覆盖 Dense/Structured 独立函数校验分支 + Matmul 短路/枚举分支）----
+WB-D-rows-over-int32,L1,dense,INVALID_VALUE,0,2147483648,16,2147483648,16,FP32,COL,,,,,,,,,,,,,,,,,,,,,,,
+WB-D-cols-over-int32,L1,dense,INVALID_VALUE,0,16,2147483648,2147483648,16,FP32,ROW,,,,,,,,,,,,,,,,,,,,,,,
+WB-D-ld-over-int32,L1,dense,INVALID_VALUE,0,16,16,2147483648,16,FP32,COL,,,,,,,,,,,,,,,,,,,,,,,
+WB-S-rows-over-int32,L1,structured,INVALID_VALUE,0,2147483648,32,2147483648,16,FP16,COL,50_PERCENT,,,,,,,,,,,,,,,,,,,,,,
 WB-D-ld0,L1,dense,INVALID_VALUE,0,16,16,0,16,FP32,COL,,,,,,,,,,,,,,,,,,,,,,,
 # WB-D/S-ldInt32Overflow：ld > INT32_MAX 显式拒绝——
 # 下游消费点（tiling ldA/ldB/ldC/ldD、prune td.ld）均为 int32 字段，
