@@ -85,33 +85,11 @@ protected:
     }
 };
 
-// 带构成校验的装载：装载后断言 CSV 数据行数严格等于 expectedCount（空表
-// 也判失败），不符抛 std::runtime_error，使构成漂移（拷贝失败/CRLF 行尾
-// 异常/review 误删行等导致的截断或丢行）在装载期即失败、套件不静默缩水
-// 变绿（对齐 ops-blas #735 CsvCaseCount / #866 VerifyCsvComposition、
-// test/symv/csymv LoadCsymvCases 的装载期 runtime_error 口径）。
-// INSTANTIATE_TEST_SUITE_P 在静态初始化期求值，未捕获异常使测试进程启动
-// 即终止并打印 what()，构成错误在 CI 中确定性暴露。
-// 既有 GetCasesFromCsv 签名不变，其它测试不受影响。
-template <typename ParamType>
-std::vector<ParamType> GetCasesFromCsvChecked(const std::string& csvPath,
-                                              size_t expectedCount) {
-    auto rawRows = ReadMap(csvPath);
-    if (rawRows.size() != expectedCount) {
-        throw std::runtime_error("GetCasesFromCsvChecked: " + csvPath + " expects " +
-                                 std::to_string(expectedCount) + " data rows but got " +
-                                 std::to_string(rawRows.size()) +
-                                 " (CSV truncated/lost lines/composition drifted?)");
-    }
-    std::vector<ParamType> cases;
-    cases.reserve(rawRows.size());
-    for (const auto& row : rawRows) {
-        ParamType p;
-        p.fillCustom(row);
-        cases.push_back(std::move(p));
-    }
-    return cases;
-}
+// 带构成校验的装载（GetCasesFromCsvChecked）由 test/frame/csv_loader.h
+// 提供同签名同语义版本（读取后断言数据行数严格等于 expectedCount，不符抛
+// runtime_error，装载期暴露构成漂移）。本文件曾重复定义该模板，与帧版本
+// 同时进入编译单元即重定义冲突、7 个描述符测试目录编译失败（#380）；
+// 已删除重复定义，调用点统一走帧版本。
 
 }  // namespace sparse_test
 
