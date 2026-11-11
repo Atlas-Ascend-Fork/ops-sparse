@@ -448,6 +448,23 @@ static aclsparseStatus_t LaunchPrefixSumAndCopyback(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+/// 双基址与块维度换算（LaunchNnzKernel/LaunchConvertKernel 共用，#379：消启动
+/// 前奏重复——baseA/baseC/mb/nb 的换算口径单点定义）。
+struct Csr2gebsrBases {
+    int32_t baseA;
+    int32_t baseC;
+    int32_t mb;
+    int32_t nb;
+};
+
+static Csr2gebsrBases Csr2gebsrBasesOf(
+    const aclsparseMatDescr_t descrA, const aclsparseMatDescr_t descrC,
+    int m, int n, int rowBlockDim, int colBlockDim)
+{
+    return {Csr2gebsrGetBase(descrA), Csr2gebsrGetBase(descrC),
+            SafeCeilDiv(m, rowBlockDim), SafeCeilDiv(n, colBlockDim)};
+}
+
 /// Nnz Kernel launch（编排：PrepareNnzWorkspace → Kernel1 → LaunchPrefixSumAndCopyback）
 static aclsparseStatus_t LaunchNnzKernel(
     aclsparseHandle_t handle,
@@ -462,10 +479,8 @@ static aclsparseStatus_t LaunchNnzKernel(
     auto *h = Csr2gebsrToInternalHandle(handle);
     aclrtStream stream = h->stream;
 
-    int32_t baseA = Csr2gebsrGetBase(descrA);
-    int32_t baseC = Csr2gebsrGetBase(descrC);
-    int32_t mb = SafeCeilDiv(m, rowBlockDim);
-    int32_t nb = SafeCeilDiv(n, colBlockDim);
+    const auto [baseA, baseC, mb, nb] = Csr2gebsrBasesOf(
+        descrA, descrC, m, n, rowBlockDim, colBlockDim);
 
     // workspace 布局: [nnzBlocksPerRow(mb) | nnzbDev(1) | marker(mb×nb) | segSum(aivCoreNum)]
     auto *wsBase = reinterpret_cast<int32_t *>(pBuffer);
@@ -630,10 +645,8 @@ static aclsparseStatus_t LaunchConvertKernel(
     auto *h = Csr2gebsrToInternalHandle(handle);
     aclrtStream stream = h->stream;
 
-    int32_t baseA = Csr2gebsrGetBase(descrA);
-    int32_t baseC = Csr2gebsrGetBase(descrC);
-    int32_t mb = SafeCeilDiv(m, rowBlockDim);
-    int32_t nb = SafeCeilDiv(n, colBlockDim);
+    const auto [baseA, baseC, mb, nb] = Csr2gebsrBasesOf(
+        descrA, descrC, m, n, rowBlockDim, colBlockDim);
 
     auto *wsBase = reinterpret_cast<int32_t *>(pBuffer);
 
