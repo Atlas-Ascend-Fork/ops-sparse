@@ -1,0 +1,23 @@
+case_name,entry,block_rows,block_cols,block_nnz,block_size,idx_base,dtype,order,null_ptrs,expect_result
+# L0/L1: CreateBsr / CreateConstBsr 创建 roundtrip（Create -> GetFormat/GetSize 块展开/GetIndexBase/GetStridedBatch + 白盒块几何）
+# 覆盖维度：四 dtype 全覆盖（float32/float16/bfloat16/complex64）/ ROW+COL / bs 2~128（含最大 128）/
+#           0 维 (0,0,0) / nnzb=0+非零几何（col+val 可 null）/ tall / wide / 1×1 块网格 / rect / const 变体
+# GetSize 期望值按块展开公式：rows=block_rows×bs、cols=block_cols×bs、nnz=block_nnz（非零块数）
+# null_ptrs=1 时 colInd/values 传 null（仅 block_nnz=0 行）；offsets 恒传有效指针
+# 失败/异常路径（OUT null、负维、非正/非方/不支持块大小、64I、非法 base/order、DOUBLE/INT32、
+# INT32 几何越界、零维非零块、null 指针、地址回绕）在 create_bsr_test.cpp 的 ExceptionTest 中以非 CSV 方式覆盖；
+# INT32 边界内极大值与 BsrSetStridedBatch roundtrip 在 SemanticsTest 中覆盖
+bsr_basic_bs2_row,bsr,2,2,2,2,0,float32,ROW,0,SUCCESS
+bsr_const_basic_idx1,const_bsr,2,2,2,2,1,float32,ROW,0,SUCCESS
+bsr_idx1_bs4,bsr,4,4,4,4,1,float32,ROW,0,SUCCESS
+bsr_fp16_bs8_col,bsr,4,4,4,8,0,float16,COL,0,SUCCESS
+bsr_bf16_bs16,bsr,4,2,4,16,0,bfloat16,ROW,0,SUCCESS
+bsr_cplx64_bs2,bsr,3,3,3,2,0,complex64,ROW,0,SUCCESS
+bsr_bs128_max,bsr,2,2,2,128,0,float32,ROW,0,SUCCESS
+bsr_empty_geometry,bsr,0,0,0,2,0,float32,ROW,1,SUCCESS
+bsr_nnzb0_nonzero_geom,bsr,2,3,0,4,0,float32,ROW,1,SUCCESS
+bsr_tall_bs8,bsr,8,2,8,8,0,float32,ROW,0,SUCCESS
+bsr_wide_bs16_col,bsr,2,8,8,16,1,float32,COL,0,SUCCESS
+bsr_1x1_grid_bs32,bsr,1,1,1,32,0,float32,ROW,0,SUCCESS
+bsr_rect_3x5_bs64,bsr,3,5,6,64,0,float16,ROW,0,SUCCESS
+bsr_const_fp16_col,const_bsr,4,4,6,8,1,float16,COL,0,SUCCESS

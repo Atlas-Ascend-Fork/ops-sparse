@@ -1,0 +1,16 @@
+case_name,rows,cols,nnz,idx_type,idx_base,dtype,null_ptrs,expect_result
+# L0/L1: CooSetPointers roundtrip（CreateCoo(P0) -> SetPointers(P1) -> CooGet 九字段回读 + 白盒 ptrs/idxs 复用同步 + generation 不变）
+# 覆盖因子：基础 4x4 / idxBase 1 / I64 索引 / fp16 / nnz=0 全 null（合法补集，nnz>0 null 拒绝见 E04）/ nnz=0 全有效 / tall / wide / large
+# idx_type：0=32I，1=64I；null_ptrs=1 时 SetPointers 三指针全传 null（仅 nnz=0 行合法）
+# 失败/异常路径（null descr / DnMat 错型 / 非 COO 格式 / nnz>0 任一 null）在 coo_set_pointers_test.cpp 的
+# ExceptionTest 中以非 CSV 方式覆盖；Reset 双态（变/全同）白盒语义在 SemanticsTest（COP-S01/S02）中覆盖
+# 去重说明：CooGet 自身守卫路径由 test/coo_get 专测覆盖，本表仅作 SetPointers 的回读载体
+coo_sp_basic_4x4,4,4,5,0,0,float32,0,SUCCESS
+coo_sp_basic_idx1,4,4,5,0,1,float32,0,SUCCESS
+coo_sp_i64,8,8,8,1,0,float32,0,SUCCESS
+coo_sp_fp16,16,8,12,0,0,float16,0,SUCCESS
+coo_sp_nnz0_null_ptrs,4,4,0,0,0,float32,1,SUCCESS
+coo_sp_nnz0_valid_ptrs,4,4,0,0,0,float32,0,SUCCESS
+coo_sp_tall,32,4,32,0,0,float32,0,SUCCESS
+coo_sp_wide,4,64,32,0,1,float32,0,SUCCESS
+coo_sp_large,256,256,1024,0,0,float32,0,SUCCESS

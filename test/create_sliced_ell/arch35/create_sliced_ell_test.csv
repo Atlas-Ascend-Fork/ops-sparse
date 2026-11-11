@@ -1,0 +1,19 @@
+case_name,entry,rows,cols,nnz,slice_nnz,num_slices,idx_type,idx_base,dtype,null_ptrs,expect_result
+# L0/L1: CreateSlicedEll / CreateConstSlicedEll 创建 roundtrip（Create -> GetFormat/GetSize/GetIndexBase/GetStridedBatch + 白盒 sliceNnz/numSlices）
+# 覆盖维度：基础 4x4 / tall 32x4 / wide 4x64 / 大 shape 1024 / 0 维 (0,0,0,0,0) / nnz=0+null 指针 / 单 slice
+#           / sliceNnz>nnz（8>4，无交叉校验行为锁定）/ I64 索引 / fp16 值类型 / const 变体
+# idx_type：0=32I，1=64I；dtype：float32/float16（元数据借用，实现不校验）；null_ptrs=1 时三数组指针全传 nullptr（延迟绑定）
+# 失败/异常路径（OUT null、rows/cols/nnz/sliceNnz/numSlices 负值、非法 idxType）在 create_sliced_ell_test.cpp 的
+# ExceptionTest 中以非 CSV 方式覆盖；nnz>0 全 null 指针延迟绑定语义在 SemanticsTest 中覆盖
+sell_basic_4x4_i32,sliced_ell,4,4,4,2,2,0,0,float32,0,SUCCESS
+sell_const_basic_idx1,const_sliced_ell,4,4,4,2,2,0,1,float32,0,SUCCESS
+sell_i64,sliced_ell,8,8,8,4,2,1,0,float32,0,SUCCESS
+sell_fp16_idx1,sliced_ell,16,8,12,4,4,0,1,float16,0,SUCCESS
+sell_single_slice,sliced_ell,8,8,8,8,1,0,0,float32,0,SUCCESS
+sell_empty_nnz0_nullptrs,sliced_ell,4,4,0,0,2,0,0,float32,1,SUCCESS
+sell_zero_dim,sliced_ell,0,0,0,0,0,0,0,float32,1,SUCCESS
+sell_tall,sliced_ell,32,4,32,8,8,0,0,float32,0,SUCCESS
+sell_wide,sliced_ell,4,64,32,32,1,0,0,float32,0,SUCCESS
+sell_large_1024,sliced_ell,1024,1024,4096,128,32,0,0,float32,0,SUCCESS
+sell_slicennz_gt_nnz,sliced_ell,4,4,4,8,2,0,0,float32,0,SUCCESS
+sell_const_i64_fp16,const_sliced_ell,8,4,6,3,2,1,1,float16,0,SUCCESS

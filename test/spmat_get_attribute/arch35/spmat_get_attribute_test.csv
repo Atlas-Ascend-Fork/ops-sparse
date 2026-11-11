@@ -1,0 +1,21 @@
+case_name,entry,fill_mode,diag_type,idx_base,expect_result
+# L0/L1: SpMatGetAttribute + SpMatSetAttribute roundtrip（Set(fill,diag) -> Get 回读一致 + 二次 Get 幂等）
+# 覆盖维度：3 个 mutable 创建入口（csr / bsr / sliced_ell，构造参数沿用 spmat_get_indexbase kEntries 缺省）
+#           × fill{0=LOWER,1=UPPER} × diag{0=NON_UNIT,1=UNIT} = 12 用例（属性与格式无关）
+# idx_base 仅为入口构造参数（回读验证归 test/spmat_get_indexbase，去重，不断言）
+# 每例 TEST_P 内含默认值断言（Set 前 Get：LOWER / NON_UNIT）
+# 失败/异常路径（null descr / null data / 非法 dataSize / 错位指针 / 非法 attribute / Set 侧共享守卫）
+# 在 spmat_get_attribute_test.cpp 的 ExceptionTest 中以非 CSV 方式覆盖；
+# 默认值 / const 签名路径 / 属性隔离与覆盖写 / 失败 Set 状态保持在 SemanticsTest 中覆盖
+csr_fill0_diag0,csr,0,0,0,SUCCESS
+csr_fill0_diag1,csr,0,1,0,SUCCESS
+csr_fill1_diag0,csr,1,0,0,SUCCESS
+csr_fill1_diag1,csr,1,1,0,SUCCESS
+bsr_fill0_diag0,bsr,0,0,1,SUCCESS
+bsr_fill0_diag1,bsr,0,1,1,SUCCESS
+bsr_fill1_diag0,bsr,1,0,1,SUCCESS
+bsr_fill1_diag1,bsr,1,1,1,SUCCESS
+sell_fill0_diag0,sliced_ell,0,0,0,SUCCESS
+sell_fill0_diag1,sliced_ell,0,1,0,SUCCESS
+sell_fill1_diag0,sliced_ell,1,0,0,SUCCESS
+sell_fill1_diag1,sliced_ell,1,1,0,SUCCESS

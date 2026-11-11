@@ -1,0 +1,21 @@
+case_name,block_rows,block_cols,block_nnz,block_size,dtype,batch_count,offsets_stride,columns_stride,values_stride,expect_result
+# L0/L1: BsrSetStridedBatch roundtrip（CreateBsr 几何 -> Get 默认 1 -> Set(bc, 三 stride) -> Get 回读 + 白盒 batch 四字段）
+# 三 stride 单位为元素个数；span 语义：offsetsSpan=block_rows+1、columnsSpan=block_nnz、valuesSpan=block_nnz×block_size^2
+# 几何因子：A=2x2/bs2/nnzb2（span 3/2/8）、B=3x4/bs4/nnzb5（span 4/5/80）、C=2x2/bs2/nnzb0（span 3/0/0，空值）、
+#           D=8x8/bs8/nnzb8（span 9/8/512）、E=2x2/bs128/nnzb2（span 3/2/32768）
+# 覆盖因子：bc=1 非零步长 / 最小非广播（stride==span）/ 间隔排布（stride>span）/ offsets+columns 广播+values 非广播 /
+#           nnzb=0 空值全 0 广播（bc>1）/ 空值矩阵 offsets 非广播 / fp16 大 bc / bc=65535 上边界（extent 约 786KB 不回绕）/
+#           bf16 大 valuesSpan / bs=128 极大 valuesSpan 最小步长
+# 去重说明：bc=1+全 0（create_bsr BSR-S04）、非广播 (4,3,2,8)（create_bsr BSR-S02）、广播 (3,0,0,8)（spmat_get_strided_batch E8）
+#           参数均已错开；覆盖写/缓存失效语义在 SemanticsTest（BSRB-S01/S02）中覆盖；
+#           失败/异常路径（null/错型/异构格式/bc 越界/负 stride/重叠/values 广播禁令/三类溢出/高位注入）在 ExceptionTest 中覆盖
+bc1_nonzero_strides,2,2,2,2,float32,1,3,2,8,SUCCESS
+bc2_min_strides,2,2,2,2,float32,2,3,2,8,SUCCESS
+bc4_spaced,2,2,2,2,float32,4,7,5,16,SUCCESS
+bc2_struct_broadcast,2,2,2,2,float32,2,0,0,8,SUCCESS
+nnzb0_bc2_all_broadcast,2,2,0,2,float32,2,0,0,0,SUCCESS
+nnzb0_bc3_offsets_stride,2,2,0,2,float32,3,4,0,0,SUCCESS
+fp16_b_geometry_batch8,3,4,5,4,float16,8,9,10,96,SUCCESS
+bc65535_boundary,2,2,2,2,float32,65535,3,2,8,SUCCESS
+large_bs8_bf16,8,8,8,8,bfloat16,2,9,8,512,SUCCESS
+bs128_values,2,2,2,128,float32,2,3,2,32768,SUCCESS

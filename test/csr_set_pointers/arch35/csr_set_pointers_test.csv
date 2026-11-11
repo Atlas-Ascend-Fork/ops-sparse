@@ -1,0 +1,20 @@
+case_name,rows,cols,nnz,idx_type,idx_base,dtype,null_ptrs,expect_result
+# L0/L1: CsrSetPointers roundtrip（CreateCsr(P0) -> SetPointers(P1) -> CsrGet 十字段回读 + 白盒 generation+1）
+# 覆盖因子：基础 4x4 / idxBase 1 / I64 索引 / fp16 / nnz=0 idx+val null（合法补集）/ rows=0·cols=0 offsets null
+#           （零维合法补集）/ tall / wide / large
+# idx_type：0=32I，1=64I；null_ptrs：0=三指针全有效；1=indices+values 传 null（仅 nnz=0 行合法，offsets 恒有效）；
+#           2=offsets 传 null（仅零维行合法，indices/values 有效）
+# 拒绝侧（非零维 offsets=null、nnz>0 idx/val=null）在 csr_set_pointers_test.cpp 的 ExceptionTest（CSP-E04/E05）覆盖；
+# 变化五值分态白盒（offsets-only / idxs-only / values-only / 全同）在 SemanticsTest（CSP-S01~S04）覆盖
+# 去重说明：CsrGet 自身守卫路径由 test/csr_get 专测覆盖，本表仅作 SetPointers 的回读载体；
+#           idxBase 活性断言归 test/spmat_get_indexbase（去重）
+csr_sp_basic_4x4,4,4,5,0,0,float32,0,SUCCESS
+csr_sp_basic_idx1,4,4,5,0,1,float32,0,SUCCESS
+csr_sp_i64,8,8,8,1,0,float32,0,SUCCESS
+csr_sp_fp16,16,8,12,0,0,float16,0,SUCCESS
+csr_sp_nnz0_null_idx_val,4,4,0,0,0,float32,1,SUCCESS
+csr_sp_rows0_offsets_null,0,4,0,0,0,float32,2,SUCCESS
+csr_sp_cols0_offsets_null,4,0,0,0,0,float32,2,SUCCESS
+csr_sp_tall,32,4,32,0,0,float32,0,SUCCESS
+csr_sp_wide,4,64,32,0,1,float32,0,SUCCESS
+csr_sp_large,256,256,1024,0,0,float32,0,SUCCESS

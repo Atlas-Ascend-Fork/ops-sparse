@@ -1,0 +1,17 @@
+case_name,entry,expect_result
+# L0/L1: DestroySpMat 成功路径（11 个创建入口：6 mutable + 5 const 变体，blocked_ell 无 const 变体）
+# TEST_P 流程：Create(entry) -> 手动 Destroy（guard release 语义）-> SUCCESS
+# entry 构造参数沿用 spmat_get_indexbase kEntries 缺省（csr/csc/coo=4x4x5、bsr=2,2,2,2,2、blocked_ell=4,4,2,2、sliced_ell=4,4,4,2,2）
+# 异常路径（null 容忍 SUCCESS / SpVec+DnMat 错型拒绝 / 白盒损坏签名 save->corrupt->assert->restore）
+# 在 destroy_spmat_test.cpp 的 ExceptionTest 中以非 CSV 方式覆盖
+coo,coo,SUCCESS
+const_csr,const_csr,SUCCESS
+csr,csr,SUCCESS
+const_coo,const_coo,SUCCESS
+csc,csc,SUCCESS
+const_csc,const_csc,SUCCESS
+bsr,bsr,SUCCESS
+const_bsr,const_bsr,SUCCESS
+blocked_ell,blocked_ell,SUCCESS
+sliced_ell,sliced_ell,SUCCESS
+const_sliced_ell,const_sliced_ell,SUCCESS
