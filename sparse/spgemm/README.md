@@ -232,6 +232,59 @@ Compute 后应调用 `aclsparseSpMatGetSize` 获取 `nnz(C)`，为 colIndices �
 内存，再通过 `aclsparseCsrSetPointers` 更新 `matC`。Copy 异步写出最终 CSR，读取结果或释放
 workspace 前必须同步 handle 所绑定的 stream。
 
+### 旧三阶段兼容接口
+
+以下三个接口在内部复用上述多阶段实现，供旧调用方以"查询大小 → 分配 → 一次执行"的方式
+使用；兼容 workspace 同时容纳工作量统计与数值计算区域。
+
+#### 函数原型
+
+```cpp
+aclsparseStatus_t aclsparseSpGEMMGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                               aclsparseOperation_t opB, const void* alpha,
+                                               aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                               const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                               aclsparseSpGEMMAlg_t alg, size_t* size);
+
+aclsparseStatus_t aclsparseSpGEMMPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA,
+                                            aclsparseOperation_t opB, const void* alpha,
+                                            aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                            const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                            aclsparseSpGEMMAlg_t alg, void* buffer);
+
+aclsparseStatus_t aclsparseSpGEMM(aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+                                  const void* alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+                                  const void* beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+                                  aclsparseSpGEMMAlg_t alg, void* buffer);
+```
+
+#### 参数说明
+
+| 参数名 | 输入/输出 | 参数类型 | 说明 |
+| --- | --- | --- | --- |
+| `size` | 输出 | `size_t*` | GetBufferSize 写回兼容 workspace 所需字节数，不可为 `nullptr` |
+| `buffer` | 输入 | `void*` | Device workspace；GetBufferSize 时不使用，Preprocess/SpGEMM 执行时必须非空且不少于查询结果 |
+| 其余参数 | 输入 | — | 与 WorkEstimation/Compute/Copy 的公共参数一致 |
+
+#### 约束说明
+
+- `buffer` 为 `nullptr` 时 Preprocess/SpGEMM 返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`；
+  执行时内部布局与 GetBufferSize 查询值不一致返回 `ACL_SPARSE_STATUS_INTERNAL_ERROR`。
+- 调用 Preprocess/SpGEMM 前，`matC` 必须已绑定长度为 `A 行数 + 1` 的 Device rowOffsets；由于
+  旧接口内部会完成 Copy，colIndices 与 values 也必须在调用前绑定且容量不小于 `nnz(C)`。实现
+  只校验输出指针非空，不做容量校验；容量不足会越界写设备内存。
+- Preprocess 成功后，legacy 描述符与传入 `buffer` 挂接在 `matC` 上（含 `activeBuffer`）；
+  后续以同一 `buffer`、同一问题（A/B/C/computeType/alg）调用 SpGEMM 直接命中缓存，不再预处理。
+- 缓存命中判定（ProblemMatches）只比较 matA/matB/matC 描述符对象、shape、nnz、computeType 与
+  alg，不比较 CSR 内容；原地改写输入 CSR 结构（即使 nnz 不变）后，必须重新调用
+  `aclsparseSpGEMMPreprocess`（或换用不同 `buffer` 强制重预处理），否则会复用陈旧的行乘积
+  统计导致结果错误。
+- `matC` 未缓存 legacy 描述符、传入 `buffer` 与缓存不一致、或问题（A/B/C/computeType/alg）
+  不匹配时，SpGEMM 会自动执行一次完整预处理（含 ProblemMatches 判定）；即 SpGEMM 可独立于
+  显式 Preprocess 调用，但该冷路径会同步执行全部预处理阶段。
+- 换用不同 `buffer` 或更换问题会触发上述隐式重预处理；调用方不应假设 SpGEMM 不做预处理。
+- 兼容 workspace 的生命周期要求与旧接口一致：读取结果或释放前须同步 stream。
+
 ## 支持规格
 
 | 规格项 | 支持值 | 说明 |
