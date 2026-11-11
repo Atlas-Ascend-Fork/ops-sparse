@@ -295,9 +295,10 @@ aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t* dnVecDes
                                             aclDataType valueType);
 
 /**
- * @brief 销毁稀疏向量描述符。
+ * @brief 销毁稠密向量描述符。
  *
- * @param dnVecDescr IN, HOST, 要销毁的稀疏向量描述符。
+ * @param dnVecDescr IN, HOST, 要销毁的稠密向量描述符；传 nullptr 时无操作并返回
+ * ACL_SPARSE_STATUS_SUCCESS（null 容忍契约，对齐 cuSPARSE）。
  * @return aclsparseStatus_t 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
 aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
@@ -314,20 +315,58 @@ aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t* spVecDes
                                             const void* indices, const void* values, aclsparseIndexType_t idxType,
                                             aclsparseIndexBase_t idxBase, aclDataType valueType);
 
+/**
+ * @brief 销毁稀疏向量描述符。
+ *
+ * @param spVecDescr IN, HOST, 要销毁的稀疏向量描述符；传 nullptr 时无操作并返回
+ * ACL_SPARSE_STATUS_SUCCESS（null 容忍契约，对齐 cuSPARSE）。
+ * @return aclsparseStatus_t 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
+ */
 aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr);
 
+/**
+ * @brief 获取稀疏向量描述符的全部字段。
+ *
+ * @param spVecDescr IN, HOST, 稀疏向量描述符。
+ * @param size      OUT, HOST, 向量的大小。
+ * @param nnz       OUT, HOST, 非零元素个数。
+ * @param indices   OUT, DEVICE, 索引数组指针。
+ * @param values    OUT, DEVICE, 值数组指针。
+ * @param idxType   OUT, HOST, 索引的数据类型。
+ * @param idxBase   OUT, HOST, 索引基址。
+ * @param valueType OUT, HOST, 值的数据类型。
+ * @return aclsparseStatus_t
+ *
+ * 输出参数均可选：任一 OUT 指针传 nullptr 表示不查询该字段，仅非空参数被写出。
+ */
 aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz, void** indices,
                                     void** values, aclsparseIndexType_t* idxType, aclsparseIndexBase_t* idxBase,
                                     aclDataType* valueType);
 
+/**
+ * @brief 获取只读(const)稀疏向量描述符的全部字段。
+ *
+ * 参数与语义同 aclsparseSpVecGet，输出指针为 const 变体；输出参数均可选
+ * （任一 OUT 指针传 nullptr 表示不查询该字段，仅非空参数被写出）。
+ */
 aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz,
                                          const void** indices, const void** values, aclsparseIndexType_t* idxType,
                                          aclsparseIndexBase_t* idxBase, aclDataType* valueType);
 
 aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr, aclsparseIndexBase_t* idxBase);
 
+/**
+ * @brief 获取稀疏向量描述符的 values 指针。
+ *
+ * @param spVecDescr IN, HOST, 稀疏向量描述符。
+ * @param values     OUT, DEVICE, 值数组指针。
+ * @return aclsparseStatus_t
+ */
 aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void** values);
 
+/**
+ * @brief 获取只读(const)稀疏向量描述符的 values 指针。
+ */
 aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr, const void** values);
 
 aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void* values);
@@ -377,12 +416,17 @@ aclsparseStatus_t aclsparseGatherRaw(aclsparseHandle_t handle, const void* y_ptr
  * @param values OUT, DEVICE, 向量的值指针。
  * @param valueType OUT, HOST, 值的数据类型。
  * @return aclsparseStatus_t
+ *
+ * 输出参数均可选：任一 OUT 指针传 nullptr 表示不查询该字段，仅非空参数被写出。
  */
 aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t* size, void** values,
                                     aclDataType* valueType);
 
 /**
  * @brief 获取只读(const)稠密向量描述符的全部字段。
+ *
+ * 参数与语义同 aclsparseDnVecGet；输出参数均可选（任一 OUT 指针传 nullptr
+ * 表示不查询该字段，仅非空参数被写出）。
  */
 aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t* size, const void** values,
                                          aclDataType* valueType);
@@ -729,7 +773,8 @@ aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr, void* row
 /**
  * @brief 销毁稀疏矩阵对象。
  *
- * @param spMatDescr IN, HOST, 稀疏矩阵描述符，用于标识要销毁的稀疏矩阵对象。
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符，用于标识要销毁的稀疏矩阵对象；
+ * 传 nullptr 时无操作并返回 ACL_SPARSE_STATUS_SUCCESS（null 容忍契约，对齐 cuSPARSE）。
  * @return aclsparseStatus_t 返回执行状态，若成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
 aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
@@ -749,8 +794,18 @@ aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr,
 aclsparseStatus_t aclsparseSpMatGetIndexBase(aclsparseConstSpMatDescr_t spMatDescr,
                                              aclsparseIndexBase_t* idxBase);
 
+/**
+ * @brief 获取稀疏矩阵描述符的 values 指针。
+ *
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符。
+ * @param values     OUT, DEVICE, 值数组指针。
+ * @return aclsparseStatus_t
+ */
 aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void** values);
 
+/**
+ * @brief 获取只读(const)稀疏矩阵描述符的 values 指针。
+ */
 aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr, const void** values);
 
 aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void* values);
@@ -875,6 +930,8 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t* dnMatDes
 
 /**
  * @brief 销毁稠密矩阵描述符。
+ *
+ * 传 nullptr 时无操作并返回 ACL_SPARSE_STATUS_SUCCESS（null 容忍契约，对齐 cuSPARSE）。
  */
 aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
 
@@ -889,12 +946,17 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
  * @param valueType   OUT, HOST, 元素数据类型。
  * @param order       OUT, HOST, 内存布局。
  * @return aclsparseStatus_t
+ *
+ * 输出参数均可选：任一 OUT 指针传 nullptr 表示不查询该字段，仅非空参数被写出。
  */
 aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols, int64_t* ld,
                                     void** values, aclDataType* valueType, aclsparseOrder_t* order);
 
 /**
  * @brief 获取只读(const)稠密矩阵描述符的全部字段。
+ *
+ * 参数与语义同 aclsparseDnMatGet；输出参数均可选（任一 OUT 指针传 nullptr
+ * 表示不查询该字段，仅非空参数被写出）。
  */
 aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols,
                                          int64_t* ld, const void** values, aclDataType* valueType,
