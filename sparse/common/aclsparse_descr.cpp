@@ -452,8 +452,9 @@ aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDes
 
 aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr)
 {
+    // null 容忍（对齐 DestroySpMat/SpGEMMDestroyDescr 与 cuSPARSE，#377）
     if (dnVecDescr == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+        return ACL_SPARSE_STATUS_SUCCESS;
     }
     auto *inner = const_cast<aclsparseDnVecDescr *>(dnVecDescr);
     if (inner->signature != kDnVecSignature) {
@@ -522,8 +523,9 @@ aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t *spVecDes
 
 aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr)
 {
+    // null 容忍（对齐 DestroySpMat/SpGEMMDestroyDescr 与 cuSPARSE，#377）
     if (spVecDescr == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+        return ACL_SPARSE_STATUS_SUCCESS;
     }
     auto *inner = const_cast<aclsparseSpVecDescr *>(spVecDescr);
     if (inner->signature != kSpVecSignature) {
@@ -1186,8 +1188,9 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
 
 aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr)
 {
+    // null 容忍（对齐 DestroySpMat/SpGEMMDestroyDescr 与 cuSPARSE，#377）
     if (dnMatDescr == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+        return ACL_SPARSE_STATUS_SUCCESS;
     }
     auto *inner = const_cast<aclsparseDnMatDescr *>(dnMatDescr);
     if (inner->signature != kDnMatSignature) {
