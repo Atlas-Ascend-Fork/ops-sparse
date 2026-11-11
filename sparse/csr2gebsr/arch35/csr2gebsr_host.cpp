@@ -315,6 +315,29 @@ static aclsparseStatus_t ValidateNnzParams(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+/// marker 区初始化(-1) + 多核切分（PrepareNnzWorkspace 的 n>0 分支与
+/// PrepareConvertWorkspace 共用，#372：消 13 行重复块）。
+static aclsparseStatus_t InitMarkerAndSplits(
+    const char *apiName,
+    aclrtStream stream,
+    int32_t *wsBase, int32_t mb, int32_t nb,
+    uint32_t &useBlocks, uint32_t &blockRowsPerCore)
+{
+    // memset marker 区域为 -1
+    // aclrtMemsetAsync 第 3 参数取低字节按字节填充，
+    //   0xFF → 每字节 0xFF → int32_t = 0xFFFFFFFF = -1，与 marker 初值 -1 语义一致
+    // marker 大小 = mb × nb（per-block-row）
+    size_t markerBytes = static_cast<size_t>(mb) * static_cast<size_t>(nb) * sizeof(int32_t);
+    aclError aclRet = aclrtMemsetAsync(
+        wsBase + mb + 1, markerBytes,
+        static_cast<int32_t>(0xFF), markerBytes,
+        stream);
+    CHECK_RET(aclRet == ACL_ERROR_NONE,
+              OP_LOGE(apiName, "memset marker failed, ret=%d", aclRet);
+              return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+    return ComputeBlockSplits(apiName, mb, useBlocks, blockRowsPerCore);
+}
+
 /// Nnz workspace 准备 - memset marker(或 nnzBlocksPerRow) + 多核切分
 static aclsparseStatus_t PrepareNnzWorkspace(
     aclrtStream stream,
@@ -322,21 +345,9 @@ static aclsparseStatus_t PrepareNnzWorkspace(
     uint32_t &useBlocks, uint32_t &blockRowsPerCore)
 {
     if (n > 0) {
-        // memset marker 区域为 -1
-        // aclrtMemsetAsync 第 3 参数取低字节按字节填充，
-        //   0xFF → 每字节 0xFF → int32_t = 0xFFFFFFFF = -1，与 marker 初值 -1 语义一致
-        // marker 大小 = mb × nb（per-block-row）
-        size_t markerBytes = static_cast<size_t>(mb) * static_cast<size_t>(nb) * sizeof(int32_t);
-        aclError aclRet = aclrtMemsetAsync(
-            wsBase + mb + 1, markerBytes,
-            static_cast<int32_t>(0xFF), markerBytes,
-            stream);
-        CHECK_RET(aclRet == ACL_ERROR_NONE,
-                  OP_LOGE("aclsparseXcsr2gebsrNnz",
-                          "memset marker failed, ret=%d", aclRet);
-                  return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-        return ComputeBlockSplits(
-            "aclsparseXcsr2gebsrNnz", mb, useBlocks, blockRowsPerCore);
+        return InitMarkerAndSplits(
+            "aclsparseXcsr2gebsrNnz", stream, wsBase, mb, nb,
+            useBlocks, blockRowsPerCore);
     }
     // n=0: 无列块，nnzBlocksPerRow 全零
     aclError aclRet = aclrtMemsetAsync(
@@ -574,20 +585,8 @@ static aclsparseStatus_t PrepareConvertWorkspace(
     int32_t *wsBase, int32_t mb, int32_t nb,
     uint32_t &useBlocks, uint32_t &blockRowsPerCore)
 {
-    // memset marker 区域为 -1
-    // aclrtMemsetAsync 第 3 参数取低字节按字节填充，
-    //   0xFF → 每字节 0xFF → int32_t = 0xFFFFFFFF = -1，与 marker 初值 -1 语义一致
-    // marker 大小 = mb × nb（per-block-row）
-    size_t markerBytes = static_cast<size_t>(mb) * static_cast<size_t>(nb) * sizeof(int32_t);
-    aclError aclRet = aclrtMemsetAsync(
-        wsBase + mb + 1, markerBytes,
-        static_cast<int32_t>(0xFF), markerBytes,
-        stream);
-    CHECK_RET(aclRet == ACL_ERROR_NONE,
-              OP_LOGE(apiName, "memset marker failed, ret=%d", aclRet);
-              return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-
-    return ComputeBlockSplits(apiName, mb, useBlocks, blockRowsPerCore);
+    return InitMarkerAndSplits(
+        apiName, stream, wsBase, mb, nb, useBlocks, blockRowsPerCore);
 }
 
 /// Convert TilingData 填充（11 字段）
