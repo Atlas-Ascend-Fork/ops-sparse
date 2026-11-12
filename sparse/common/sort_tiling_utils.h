@@ -1,17 +1,26 @@
 /**
  * ----------------------------------------------------------------------------------------------------------
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef CSCSORT_TILING_UTILS_H_
-#define CSCSORT_TILING_UTILS_H_
+// Sort 家族（csrsort / cscsort / coosort，arch35）共用 tiling 工具：
+// - CalcSortTmpSize：查询 AscendC Sort 共享临时缓冲大小（RADIX_SORT，
+//   int32 键 / uint32 索引，hasDstIndex 配置须与 kernel 侧使用一致）；
+// - FindMaxRunSize：按 UB 容量与 DataCopyPad 上限（2^21-1 字节）二分
+//   最大的单趟 run 段长（5 个 run 尺寸缓冲 + Sort tmp 预算）。
+// 此前 csrsort/cscsort/coosort 三处各自维护同口径实现，UB 预算常量
+// （kDataCopyPadMaxBytes / kRunSizedBufferCount / kReservedBytes /
+// kSimtDcacheBytes）需跨算子双写，收敛为本头文件单点定义。
+
+#ifndef ACLSPARSE_SORT_TILING_UTILS_H_
+#define ACLSPARSE_SORT_TILING_UTILS_H_
 
 #include <algorithm>
 #include <cstdint>
@@ -19,7 +28,7 @@
 
 #include "sort/sort_tiling_intf.h"
 
-namespace CscsortTiling {
+namespace sort_tiling {
 
 inline uint32_t CalcSortTmpSize(uint32_t count)
 {
@@ -32,8 +41,8 @@ inline uint32_t CalcSortTmpSize(uint32_t count)
     config.hasDstIndex = true;
     uint32_t maxValue = 0U;
     uint32_t minValue = 0U;
-    AscendC::GetSortMaxMinTmpSize(
-        srcShape, ge::DT_INT32, ge::DT_UINT32, false, config, maxValue, minValue);
+    AscendC::GetSortMaxMinTmpSize(srcShape, ge::DT_INT32, ge::DT_UINT32, false,
+                                  config, maxValue, minValue);
     return maxValue;
 }
 
@@ -43,13 +52,14 @@ inline bool FindMaxRunSize(uint64_t ubSize, uint32_t &runSize, uint32_t &sortTmp
     // blockLen to 2^21 - 1 bytes.
     constexpr uint32_t kDataCopyPadMaxBytes = (1U << 21U) - 1U;
     constexpr uint32_t kDataCopyPadMaxElems = kDataCopyPadMaxBytes / sizeof(int32_t);
-    // Five run-sized buffers: rowIndIn, pIn, dstKey, dstIdx and outP. The Sort
-    // shared temporary buffer is sized by CalcSortTmpSize and counted separately.
+    // Five run-sized buffers (col/row indices, pIn, dstKey, dstIdx and outP).
+    // The Sort shared temporary buffer is sized by CalcSortTmpSize and counted
+    // separately.
     constexpr uint32_t kRunSizedBufferCount = 5U;
     constexpr uint32_t kUbAlignBytes = 32U;
     constexpr uint64_t kReservedBytes = 8192U;
-    // Reserve 32 KiB for SIMT DCache so that the short-col Vector Sort path and
-    // the long-col SIMT merge path can coexist on the same AIV without UB
+    // Reserve 32 KiB for SIMT DCache so that the short-run Vector Sort path
+    // and the long-run SIMT merge path can coexist on the same AIV without UB
     // pressure contention.
     constexpr uint64_t kSimtDcacheBytes = 32U * 1024U;
     constexpr uint64_t kUnavailableBytes = kReservedBytes + kSimtDcacheBytes;
@@ -86,6 +96,6 @@ inline bool FindMaxRunSize(uint64_t ubSize, uint32_t &runSize, uint32_t &sortTmp
     return true;
 }
 
-}  // namespace CscsortTiling
+}  // namespace sort_tiling
 
-#endif  // CSCSORT_TILING_UTILS_H_
+#endif  // ACLSPARSE_SORT_TILING_UTILS_H_

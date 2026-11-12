@@ -22,7 +22,7 @@
  */
 
 #include "csrsort_golden.h"
-#include "csrsort_tiling_utils.h"
+#include "sort_tiling_utils.h"
 #include "descriptor_manager.h"
 #include "fill.h"
 #include "sparse_test.h"
@@ -502,7 +502,7 @@ TEST_F(CsrsortTest, RunSizeBoundaries) {
   uint32_t runSize = 0U;
   uint32_t sortTmpSize = 0U;
   ASSERT_TRUE(
-      CsrsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+      sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
   ASSERT_GT(runSize, 1U);
   const int m = 3;
   const int n = 4096;
@@ -545,7 +545,7 @@ TEST_F(CsrsortTest, AlternatingTinyAndLargeShortRows) {
   uint32_t runSize = 0U;
   uint32_t sortTmpSize = 0U;
   ASSERT_TRUE(
-      CsrsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+      sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
   ASSERT_GT(runSize, 128U);
 
   constexpr int m = 512;
@@ -577,7 +577,7 @@ TEST_F(CsrsortTest, LargeAlignmentBoundaryMatrix) {
   uint32_t runSize = 0U;
   uint32_t sortTmpSize = 0U;
   ASSERT_TRUE(
-      CsrsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+      sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
   ASSERT_GT(runSize, 1025U);
 
   constexpr int m = 640;
@@ -605,7 +605,7 @@ TEST_F(CsrsortTest, MixedShortAndMultiRunStress) {
   uint32_t runSize = 0U;
   uint32_t sortTmpSize = 0U;
   ASSERT_TRUE(
-      CsrsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+      sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
   ASSERT_GT(runSize, 64U);
 
   constexpr int m = 193;

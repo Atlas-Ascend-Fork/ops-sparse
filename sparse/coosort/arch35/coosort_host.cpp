@@ -34,6 +34,7 @@
 #include "aclsparse_handle_internal.h"
 #include "aclsparse_host_utils.h"
 #include "sort/sort_tiling_intf.h"  // GetSortMaxMinTmpSize / SortConfig / SortType
+#include "sort_tiling_utils.h"     // sort_tiling::CalcSortTmpSize（Sort 家族共用）
 
 namespace {
 
@@ -77,21 +78,6 @@ static aclsparseStatus_t ValidateCommonCoosortArgs(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static uint32_t CalcSortTmpSize(uint32_t nnz)
-{
-    std::vector<int64_t> shapeVec = {static_cast<int64_t>(nnz)};
-    ge::Shape srcShape(shapeVec);
-    AscendC::SortConfig config;
-    config.type = AscendC::SortType::RADIX_SORT;
-    config.isDescend = false;
-    config.hasSrcIndex = false;
-    config.hasDstIndex = true;
-    uint32_t maxValue = 0;
-    uint32_t minValue = 0;
-    AscendC::GetSortMaxMinTmpSize(srcShape, ge::DT_INT32, ge::DT_UINT32, false, config, maxValue, minValue);
-    return maxValue;
-}
-
 static bool FindMaxPhaseOneRunSize(uint64_t ubSize, uint32_t &runSize, uint32_t &sortTmpSize)
 {
     constexpr uint32_t kAlignElems = 8;
@@ -111,7 +97,7 @@ static bool FindMaxPhaseOneRunSize(uint64_t ubSize, uint32_t &runSize, uint32_t 
     while (low <= high) {
         uint32_t mid = low + (high - low) / 2;
         uint32_t candidate = mid * kAlignElems;
-        uint32_t candidateTmpSize = CalcSortTmpSize(candidate);
+        uint32_t candidateTmpSize = sort_tiling::CalcSortTmpSize(candidate);
         if (candidateTmpSize == 0) {
             high = mid - 1;
             continue;
@@ -217,7 +203,7 @@ static aclsparseStatus_t LaunchCoosortKernel(
     CoosortTilingData tiling{};
     tiling.nnz = static_cast<uint32_t>(nnz);
     tiling.sortByRow = sortByRow ? 1U : 0U;
-    tiling.sortTmpSize = CalcSortTmpSize(static_cast<uint32_t>(nnz));
+    tiling.sortTmpSize = sort_tiling::CalcSortTmpSize(static_cast<uint32_t>(nnz));
 
     auto *gmRow = reinterpret_cast<GM_ADDR>(cooRowsA);
     auto *gmCol = reinterpret_cast<GM_ADDR>(cooColsA);

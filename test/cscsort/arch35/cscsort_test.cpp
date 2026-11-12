@@ -25,7 +25,7 @@
 #include "descriptor_manager.h"
 #include "cscsort_golden.h"
 #include "cscsort_tiling_data.h"
-#include "cscsort_tiling_utils.h"
+#include "sort_tiling_utils.h"
 #include "tiling/platform/platform_ascendc.h"
 
 #include "acl/acl.h"
@@ -422,7 +422,7 @@ TEST_F(CscsortTest, RunSizeBoundaries)
 {
     uint32_t runSize = 0U;
     uint32_t sortTmpSize = 0U;
-    ASSERT_TRUE(CscsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+    ASSERT_TRUE(sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
     ASSERT_GT(runSize, 1U);
     const int m = 4096;
     const int n = 3;
@@ -560,7 +560,7 @@ TEST_F(CscsortTest, WbMergeTwoRunsNoCopyBack)
 {
     uint32_t runSize = 0U;
     uint32_t sortTmpSize = 0U;
-    ASSERT_TRUE(CscsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+    ASSERT_TRUE(sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
     ASSERT_GT(runSize, 1U);
     const int nnz = static_cast<int>(runSize + 1U);
     const int m = nnz / 2 + 1;
@@ -586,7 +586,7 @@ TEST_F(CscsortTest, WbMergeThreeRunsCopyBack)
 {
     uint32_t runSize = 0U;
     uint32_t sortTmpSize = 0U;
-    ASSERT_TRUE(CscsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+    ASSERT_TRUE(sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
     ASSERT_GT(runSize, 1U);
     const int nnz = static_cast<int>(2U * runSize + 1U);
     const int m = nnz / 3 + 1;
@@ -612,7 +612,7 @@ TEST_F(CscsortTest, WbMergeFiveRunsNoCopyBack)
 {
     uint32_t runSize = 0U;
     uint32_t sortTmpSize = 0U;
-    ASSERT_TRUE(CscsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+    ASSERT_TRUE(sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
     ASSERT_GT(runSize, 1U);
     const int nnz = static_cast<int>(4U * runSize + 1U);
     const int m = nnz / 4 + 1;
@@ -636,7 +636,7 @@ TEST_F(CscsortTest, WbRunSizeExactMultiple)
 {
     uint32_t runSize = 0U;
     uint32_t sortTmpSize = 0U;
-    ASSERT_TRUE(CscsortTiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
+    ASSERT_TRUE(sort_tiling::FindMaxRunSize(GetDeviceUbSize(), runSize, sortTmpSize));
     ASSERT_GT(runSize, 1U);
     const int nnz = static_cast<int>(2U * runSize);
     const int m = nnz / 2 + 1;
@@ -984,7 +984,7 @@ static CscsortPerfResult RunPerfCase(CscsortTest *t, const std::string &name, in
     uint64_t ubSize = GetDeviceUbSize();
     uint32_t runSize = 0U;
     uint32_t sortTmp = 0U;
-    CscsortTiling::FindMaxRunSize(ubSize, runSize, sortTmp);
+    sort_tiling::FindMaxRunSize(ubSize, runSize, sortTmp);
     uint32_t aivTotal = GetDeviceAivCoreCount();
     uint32_t taskUpper = std::min(static_cast<uint32_t>(n), static_cast<uint32_t>(nnz));
     uint32_t coreNum = std::min(aivTotal, taskUpper);

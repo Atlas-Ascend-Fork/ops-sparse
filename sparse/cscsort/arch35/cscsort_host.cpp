@@ -26,7 +26,7 @@
 #include "log/log.h"
 #include "cann_ops_sparse.h"
 #include "cscsort_kernel.h"
-#include "cscsort_tiling_utils.h"
+#include "sort_tiling_utils.h"
 #include "aclsparse_handle_internal.h"
 #include "aclsparse_host_utils.h"
 
@@ -87,7 +87,7 @@ static aclsparseStatus_t ComputeCscsortTiling(
 
     uint32_t runSize = 0U;
     uint32_t sortTmpBytes = 0U;
-    if (!CscsortTiling::FindMaxRunSize(ubSize, runSize, sortTmpBytes)) {
+    if (!sort_tiling::FindMaxRunSize(ubSize, runSize, sortTmpBytes)) {
         OP_LOGE("aclsparseXcscsort", "UB capacity %llu insufficient for minimum run",
                 static_cast<unsigned long long>(ubSize));
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
