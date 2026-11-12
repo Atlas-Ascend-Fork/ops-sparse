@@ -407,6 +407,15 @@ public:
 
     aclsparseSpSVDescr_t get() { return descr_; }
 
+    // 放弃所有权：显式 destroyDescr 用例须先 release 取走句柄，避免析构
+    // 对已销毁句柄二次销毁（UAF/double free）——对齐 SpSMDescrManager 的
+    // 同款守卫语义（spsm_extended_test 的显式销毁用例即依赖该形态）。
+    aclsparseSpSVDescr_t release() {
+        aclsparseSpSVDescr_t d = descr_;
+        descr_ = nullptr;
+        return d;
+    }
+
     ~SpSVDescrManager() {
         if (descr_) aclsparseSpSV_destroyDescr(descr_);
     }
