@@ -449,8 +449,11 @@ TEST_F(SpSVExceptionTest, L2_m_zero) {
 }
 
 TEST_F(SpSVExceptionTest, L2_destroy_null) {
+    // null 幂等契约：spsv_host.cpp destroyDescr 对 nullptr 无操作返回 SUCCESS，
+    // 算子 README 约束说明同款口径；此前断言为恒真式（== SUCCESS || != SUCCESS
+    // 恒成立），对任意返回值均通过，未起到回归防护作用，收紧为精确断言。
     auto ret = aclsparseSpSV_destroyDescr(nullptr);
-    EXPECT_TRUE(ret == ACL_SPARSE_STATUS_SUCCESS || ret != ACL_SPARSE_STATUS_SUCCESS);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_SUCCESS);
 }
 
 TEST_F(SpSVExceptionTest, L2_solve_before_analysis) {
