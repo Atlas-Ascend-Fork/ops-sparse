@@ -71,6 +71,34 @@
 | [aclsparseDnMatSetValues](#aclsparsednmatsetvalues) | 设置稠密矩阵描述符的 values 指针 |
 | [aclsparseDnMatGetStridedBatch](#aclsparsednmatgetstridedbatch) | 获取稠密矩阵的strided-batch属性 |
 | [aclsparseDnMatSetStridedBatch](#aclsparsednmatsetstridedbatch) | 设置稠密矩阵的strided-batch属性 |
+| [aclsparseSetPointerMode](../../include/cann_ops_sparse.h) | 设置 alpha/beta 标量指针的 Host/Device 模式 |
+| [aclsparseGetPointerMode](../../include/cann_ops_sparse.h) | 获取 alpha/beta 标量指针的 Host/Device 模式 |
+| [aclsparseSetWorkspace](../../include/cann_ops_sparse.h) | 设置 handle 复用的用户 workspace |
+| [aclsparseGetWorkspace](../../include/cann_ops_sparse.h) | 获取 handle 当前生效的 workspace 及大小 |
+| [aclsparseCreateConstDnVec](../../include/cann_ops_sparse.h) | 创建只读(const)稠密向量描述符 |
+| [aclsparseConstDnVecGet](../../include/cann_ops_sparse.h) | 获取只读(const)稠密向量描述符的全部字段 |
+| [aclsparseConstDnVecGetValues](../../include/cann_ops_sparse.h) | 获取只读(const)稠密向量描述符的 values 指针 |
+| [aclsparseDnVecSetStride](../../include/cann_ops_sparse.h) | 设置稠密向量描述符的元素 stride |
+| [aclsparseDnVecGetStride](../../include/cann_ops_sparse.h) | 获取稠密向量描述符的元素 stride |
+| [aclsparseCreateConstSpVec](../../include/cann_ops_sparse.h) | 创建只读(const)稀疏向量描述符 |
+| [aclsparseConstSpVecGet](../../include/cann_ops_sparse.h) | 获取只读(const)稀疏向量描述符的全部字段 |
+| [aclsparseConstSpVecGetValues](../../include/cann_ops_sparse.h) | 获取只读(const)稀疏向量描述符的 values 指针 |
+| [aclsparseCreateConstCsr](../../include/cann_ops_sparse.h) | 创建只读(const)CSR格式稀疏矩阵 |
+| [aclsparseCsrSetPointers](../../include/cann_ops_sparse.h) | 绑定/更新 CSR 描述符的行偏移、列索引与值指针 |
+| [aclsparseCsrSetStrides](../../include/cann_ops_sparse.h) | 设置 CSR 描述符的三数组元素 stride |
+| [aclsparseCsrGetStrides](../../include/cann_ops_sparse.h) | 获取 CSR 描述符的三数组元素 stride |
+| [aclsparseCscSetPointers](../../include/cann_ops_sparse.h) | 绑定/更新 CSC 描述符的列偏移、行索引与值指针 |
+| [aclsparseCooSetPointers](../../include/cann_ops_sparse.h) | 绑定/更新 COO 描述符的行索引、列索引与值指针 |
+| [aclsparseConstSpMatGetValues](../../include/cann_ops_sparse.h) | 获取只读(const)稀疏矩阵描述符的 values 指针 |
+| [aclsparseCreateSlicedEll](../../include/cann_ops_sparse.h) | 创建 Sliced-ELL 格式稀疏矩阵 |
+| [aclsparseCreateConstSlicedEll](../../include/cann_ops_sparse.h) | 创建只读(const)Sliced-ELL 格式稀疏矩阵 |
+| [aclsparseCreateConstDnMat](../../include/cann_ops_sparse.h) | 创建只读(const)稠密矩阵描述符 |
+| [aclsparseConstDnMatGet](../../include/cann_ops_sparse.h) | 获取只读(const)稠密矩阵描述符的全部字段 |
+| [aclsparseConstDnMatGetValues](../../include/cann_ops_sparse.h) | 获取只读(const)稠密矩阵描述符的 values 指针 |
+| [aclsparseCreateMatDescr](../../include/cann_ops_sparse.h) | 创建 Legacy MatDescr（旧版矩阵属性描述符） |
+| [aclsparseDestroyMatDescr](../../include/cann_ops_sparse.h) | 销毁 Legacy MatDescr |
+| [aclsparseSpMatGetAttribute](../../include/cann_ops_sparse.h) | 获取稀疏矩阵描述符的 fill mode / diag type 属性 |
+| [aclsparseSpMatSetAttribute](../../include/cann_ops_sparse.h) | 设置稀疏矩阵描述符的 fill mode / diag type 属性 |
 
 ### 算子 API
 
@@ -112,9 +140,69 @@
 | [aclsparseCgtsv2_bufferSizeExt](#aclsparsecgtsv2_buffersizeext) | 查询 aclsparseCgtsv2 所需工作区大小 |
 | [aclsparseXcscsort_bufferSizeExt](#aclsparsexcscsort_buffersizeext) | 获取CSC排序缓冲区大小 |
 | [aclsparseXcscsort](#aclsparsexcscsort) | CSC格式按列稳定排序 |
-| [aclsparseLtMatmulAlgSetAttribute](#aclsparseltmatmulalgsetattribute) | 设置结构化稀疏矩阵乘法的算法属性 |
-| [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
 | [aclsparseXcoo2csr](../../sparse/coo2csr/README.md#aclsparsexcoo2csr) | 将 COO 行索引转换为 CSR 行指针 |
+| [aclsparseSpGEMMCreateDescr](../../sparse/spgemm/README.md) | 创建跨阶段复用的 SpGEMM 描述符 |
+| [aclsparseSpGEMMWorkEstimation](../../sparse/spgemm/README.md#aclsparsespgemmworkestimation) | 查询/执行 SpGEMM 工作量统计（逐行及总中间乘积数） |
+| [aclsparseSpGEMMGetNumProducts](../../sparse/spgemm/README.md#aclsparsespgemmgetnumproducts) | 查询 WorkEstimation 得到的中间乘积总数 |
+| [aclsparseSpGEMMEstimateMemory](../../sparse/spgemm/README.md#aclsparsespgemmestimatememory) | 查询 ALG2/ALG3 内存规划及 Compute workspace 大小 |
+| [aclsparseSpGEMMCompute](../../sparse/spgemm/README.md#aclsparsespgemmcompute) | 查询/执行 SpGEMM 结构与数值计算并更新 nnz(C) |
+| [aclsparseSpGEMMCopy](../../sparse/spgemm/README.md#aclsparsespgemmcopy) | 将 SpGEMM 结果列索引与值写入调用方 C 指针 |
+| [aclsparseSpGEMMDestroyDescr](../../sparse/spgemm/README.md) | 销毁 SpGEMM Host 描述符（不释放调用方 workspace） |
+| [aclsparseSpGEMMSetCInValid](../../sparse/spgemm/README.md) | 兼容旧版 C 输入有效标记调用 |
+| [aclsparseSpGEMMGetBufferSize](../../sparse/spgemm/README.md) | 查询旧三阶段兼容接口的共用 workspace 大小 |
+| [aclsparseSpGEMMPreprocess](../../sparse/spgemm/README.md) | 执行旧三阶段兼容接口的结构预处理 |
+| [aclsparseSpGEMM](../../sparse/spgemm/README.md) | 执行旧三阶段兼容接口的数值计算（未命中缓存时自动预处理） |
+| [aclsparseSpSMCreateDescr](../../sparse/spsm/README.md#aclsparsespsmcreatedescr) | 创建 SpSM 描述符 |
+| [aclsparseSpSMDestroyDescr](../../sparse/spsm/README.md#aclsparsespsmdestroydescr) | 销毁 SpSM 描述符 |
+| [aclsparseSpSMBufferSize](../../sparse/spsm/README.md#aclsparsespsmbuffersize) | 查询 SpSM 设备工作区大小 |
+| [aclsparseSpSMAnalysis](../../sparse/spsm/README.md#aclsparsespsmanalysis) | SpSM 稀疏三角矩阵预处理 |
+| [aclsparseSpSM](../../sparse/spsm/README.md#aclsparsespsm) | 求解稀疏三角线性方程组（多右端项） |
+| [aclsparseSpSMUpdateMatrix](../../sparse/spsm/README.md#aclsparsespsmupdatematrix) | 更新 SpSM 矩阵数值（结构不变） |
+| [aclsparseSgtsv2Nopivot](../../sparse/gtsv2_nopivot/README.md#aclsparsesgtsv2nopivot) | 无选主元（Thomas 消元）三对角求解，FP32，要求良态输入 |
+| [aclsparseSgtsv2Nopivot_bufferSizeExt](../../sparse/gtsv2_nopivot/README.md#aclsparsesgtsv2nopivot_buffersizeext) | 查询 aclsparseSgtsv2Nopivot 所需工作区大小 |
+| [aclsparseSgtsv2StridedBatch](../../sparse/gtsv2_strided_batch/README.md#aclsparsesgtsv2stridedbatch) | 按 stride 分批的三对角求解，FP32，多右端项 |
+| [aclsparseSgtsv2StridedBatch_bufferSizeExt](../../sparse/gtsv2_strided_batch/README.md#aclsparsesgtsv2stridedbatch_buffersizeext) | 查询 aclsparseSgtsv2StridedBatch 所需工作区大小 |
+| [aclsparseSgtsvInterleavedBatch](../../sparse/gtsv_interleaved_batch/README.md#aclsparsesgtsvinterleavedbatch) | 交错布局（interleaved）批处理三对角求解，FP32 |
+| [aclsparseSgtsvInterleavedBatch_bufferSizeExt](../../sparse/gtsv_interleaved_batch/README.md#aclsparsesgtsvinterleavedbatch_buffersizeext) | 查询 aclsparseSgtsvInterleavedBatch 所需工作区大小 |
+| [aclsparseSgpsvInterleavedBatch](../../sparse/gpsv_interleaved_batch/README.md#aclsparsesgpsvinterleavedbatch) | 交错布局批处理五对角（pentadiagonal）求解，FP32 |
+| [aclsparseSgpsvInterleavedBatch_bufferSizeExt](../../sparse/gpsv_interleaved_batch/README.md#aclsparsesgpsvinterleavedbatch_buffersizeext) | 查询 aclsparseSgpsvInterleavedBatch 所需工作区大小 |
+| [aclsparseScsrgeam2](../../sparse/csrgeam2/README.md#aclsparsescsrgeam2) | 两稀疏矩阵加权求和 C=alpha*A+beta*B（CSR，FP32） |
+| [aclsparseScsrgeam2_bufferSizeExt](../../sparse/csrgeam2/README.md#aclsparsescsrgeam2_buffersizeext) | 查询 aclsparseScsrgeam2 所需工作区大小 |
+| [aclsparseXcsrgeam2Nnz](../../sparse/csrgeam2/README.md#aclsparsexcsrgeam2nnz) | 计算 csrgeam2 输出 nnz 并写回 csrRowPtrC/nnzTotal |
+| [aclsparseScsr2gebsr](../../sparse/csr2gebsr/README.md#aclsparsescsr2gebsr) | CSR 转 GEBSR（FP32） |
+| [aclsparseScsr2gebsr_bufferSize](../../sparse/csr2gebsr/README.md#aclsparsescsr2gebsr_buffersize) | 查询 aclsparseScsr2gebsr 所需工作区大小 |
+| [aclsparseXcsr2gebsrNnz](../../sparse/csr2gebsr/README.md#aclsparsexcsr2gebsrnnz) | 计算 csr2gebsr 输出块级 nnz 并写回 bsrRowPtrC/nnzTotal |
+| [aclsparseHcsr2gebsr](../../sparse/csr2gebsr/README.md) | CSR 转 GEBSR（FP16） |
+| [aclsparseHcsr2gebsr_bufferSize](../../sparse/csr2gebsr/README.md) | 查询 aclsparseHcsr2gebsr 所需工作区大小 |
+| [aclsparseIcsr2gebsr](../../sparse/csr2gebsr/README.md) | CSR 转 GEBSR（INT32） |
+| [aclsparseIcsr2gebsr_bufferSize](../../sparse/csr2gebsr/README.md) | 查询 aclsparseIcsr2gebsr 所需工作区大小 |
+| [aclsparseBhcsr2gebsr](../../sparse/csr2gebsr/README.md) | CSR 转 GEBSR（BF16） |
+| [aclsparseBhcsr2gebsr_bufferSize](../../sparse/csr2gebsr/README.md) | 查询 aclsparseBhcsr2gebsr 所需工作区大小 |
+| [aclsparseGebsr2gebsc](../../sparse/gebsr2gebsc/README.md#aclsparsegebsr2gebsc) | GEBSR 转 GEBSC（块级转置重排） |
+| [aclsparseGebsr2gebsc_bufferSize](../../sparse/gebsr2gebsc/README.md#aclsparsegebsr2gebsc_buffersize) | 查询 aclsparseGebsr2gebsc 所需工作区大小 |
+| [aclsparseCsr2cscEx2](../../sparse/csr2csc_ex2/README.md#aclsparsecsr2cscex2) | CSR 转 CSC（type-generic：INT8/FP16/BF16/FP32） |
+| [aclsparseCsr2cscEx2_bufferSize](../../sparse/csr2csc_ex2/README.md#aclsparsecsr2cscex2_buffersize) | 查询 aclsparseCsr2cscEx2 所需工作区大小 |
+| [aclsparseDenseToSparseGetBufferSize](../../sparse/densetosparse/README.md) | 查询 DenseToSparse Analysis/Convert 所需 workspace 大小 |
+| [aclsparseDenseToSparseAnalysis](../../sparse/densetosparse/README.md) | DenseToSparse 结构分析（统计非零并写 offsets） |
+| [aclsparseDenseToSparseConvert](../../sparse/densetosparse/README.md) | DenseToSparse 执行转换（写 indices/values） |
+| [aclsparseSparseToDense](../../sparse/sparse2dense/README.md) | 稀疏转稠密（CSR/COO → 稠密矩阵） |
+| [aclsparseSparseToDense_bufferSize](../../sparse/sparse2dense/README.md) | 查询 aclsparseSparseToDense 所需工作区大小 |
+| [aclsparseCreateCubeSpmmMat](../../sparse/cube_spmm/README.md#aclsparsecreatecubespmmmat) | 创建 CubeSpMM 专用稀疏矩阵描述符 |
+| [aclsparseDestroyCubeSpmmMat](../../sparse/cube_spmm/README.md#aclsparsedestroycubespmmmat) | 销毁 CubeSpMM 稀疏矩阵描述符 |
+| [aclsparseCubeSpmmPreprocess](../../sparse/cube_spmm/README.md) | CubeSpMM 预处理（结构分析与重排） |
+| [aclsparseCubeSpmmGetBufferSize](../../sparse/cube_spmm/README.md#aclsparsecubespmmgetbuffersize) | 查询 CubeSpMM 所需工作区大小 |
+| [aclsparseCubeSpmm](../../sparse/cube_spmm/README.md#aclsparsecubespmm) | 执行 CubeSpMM（Cube 加速稀疏-稠密矩阵乘） |
+| [aclsparseCubeSpmmPadDenseMatrixB](../../sparse/cube_spmm/README.md#aclsparsecubespmmpaddensematrixb) | 按 CubeSpMM 布局要求补齐稠密 B 矩阵 |
+| [aclsparseXcoosort_bufferSizeExt](../../sparse/coosort/README.md#aclsparsexcoosort_buffersizeext) | 查询 COO 排序所需工作区大小 |
+| [aclsparseXcoosortByRow](../../sparse/coosort/README.md#aclsparsexcoosortbyrow) | COO 坐标按行稳定排序 |
+| [aclsparseXcoosortByColumn](../../sparse/coosort/README.md#aclsparsexcoosortbycolumn) | COO 坐标按列稳定排序 |
+| [aclsparseXcsrsort](../../sparse/csrsort/README.md#aclsparsexcsrsort) | CSR 按行内列索引稳定排序 |
+| [aclsparseXcsrsort_bufferSizeExt](../../sparse/csrsort/README.md#aclsparsexcsrsort_buffersizeext) | 查询 CSR 排序所需工作区大小 |
+| [aclsparseXcsr2coo](../../sparse/csr2coo/README.md#aclsparsexcsr2coo) | CSR 行指针展开为 COO 行索引 |
+| [aclsparseSnnz](../../sparse/nnz/README.md#aclsparsesnnz) | 统计稠密矩阵每行/列及总非零元素个数（FP32） |
+| [aclsparseGatherRaw](../../sparse/gather/README.md) | Gather 原始形式：按索引与基址收集元素（无描述符） |
+| [aclsparseScatter](../../sparse/scatter/README.md#aclsparsescatter) | 按稀疏索引将向量散射写入稠密向量 |
+| [aclsparseSpvv](../../sparse/spvv/) | 稀疏向量点积（SpVV） |
 
 ## 接口详情
 
@@ -2772,141 +2860,6 @@ aclsparseStatus_t aclsparseXcscsort(
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
-- 其他值：失败
-
----
-
-### aclsparseLtMatmulAlgSetAttribute
-
-```cpp
-aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
-    aclsparseLtConstHandle_t handle,
-    aclsparseLtMatmulAlgSelection_t* algSelection,
-    aclsparseLtMatmulAlgAttribute_t attr,
-    const void* attrValue,
-    size_t attrValueSize);
-```
-
-**功能**：设置结构化稀疏矩阵乘法的算法选择属性。在 `aclsparseLtMatmulPlanInit` 之前调用，覆盖 `aclsparseLtMatmulAlgSelectionInit` 的默认值（algConfigId=0、splitK=1、searchIterations=5），影响后续 PlanInit 计算的 cube tiling 策略与 workspace 布局。纯 Host 端元数据操作，不启动任何 kernel、不消耗 NPU 计算资源。配套接口 `aclsparseLtMatmulAlgGetAttribute` 用于查询属性当前值。对标 cuSPARSELt 的 `cusparseLtMatmulAlgSetAttribute`。
-
-**产品支持情况**：
-
-| 产品 | 是否支持 |
-| :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-
-> 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
-
-**参数说明**：
-
-- `handle`（IN）：HOST，aclsparseLt 库句柄的 const 指针。
-- `algSelection`（IN/OUT）：HOST，算法选择描述符，由 `aclsparseLtMatmulAlgSelectionInit` 创建。AlgSetAttribute 写入 algSelection 结构体的属性字段。
-- `attr`（IN）：HOST，要设置的属性枚举（`aclsparseLtMatmulAlgAttribute_t`）。
-- `attrValue`（IN）：HOST，属性值指针，指向 `int32_t` 类型值。
-- `attrValueSize`（IN）：HOST，`attrValue` 缓冲区大小（字节），须为 `sizeof(int32_t)`。
-
-**可设置的属性**：
-
-| 属性枚举 | 值类型 | 取值范围 | 说明 |
-|----------|--------|---------|------|
-| `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` | int32_t | 0 / 1 | 算法配置 ID，影响 cube tiling（baseM/baseN/baseK）。需在 PlanInit 前设置 |
-| `ACLSPARSELT_MATMUL_SPLIT_K` | int32_t | [1, K] | splitK 切分因子。需在 PlanInit 前设置 |
-| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | int32_t | > 0 | 搜索迭代次数（默认 5），当前仅存储不参与执行 |
-| `ACLSPARSELT_MATMUL_SPLIT_K_MODE` | int32_t | 0 / 1 | splitK 模式（ONE_KERNEL / TWO_KERNELS），参与 effectiveSplitK 计算：ONE_KERNEL 时 effectiveSplitK=1（融合路径），TWO_KERNELS 时 effectiveSplitK=splitK（两段式路径） |
-| `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` | int32_t | [0, splitK-1] | splitK 缓冲区数，当前仅存储不参与执行 |
-| `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` | — | 只读 | 不可设置，返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED` |
-
-**约束说明**：
-
-- handle 不可为 nullptr 且 *handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
-- algSelection 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- attrValue 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- attrValueSize 须与属性值类型大小匹配（int32_t 为 4 字节），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` 取值仅 0 或 1，其他值返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- `ACLSPARSELT_MATMUL_SPLIT_K` 须 ≥ 1；若 algSelection 已绑定 matmulDesc 且 K > 0，splitK 须 ≤ K，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` 须 > 0，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` 须在 [0, splitK-1] 范围内，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` 为只读属性，设置时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **属性设置时机**：须在 `aclsparseLtMatmulPlanInit` 之前调用，PlanInit 读取 algConfigId 与 splitK 计算 tiling 并冻结到计划中。PlanInit 之后修改属性不会生效，需重新初始化计划。
-
-**返回值**：
-
-- `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr 或 *handle 为 nullptr
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：algSelection/attrValue 为 nullptr、attrValueSize 不匹配、algConfigId/splitK/searchIterations/splitKBuffers 取值非法
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：设置只读属性（ALG_CONFIG_MAX_ID）、attr 枚举值不被支持
-- 其他值：失败
-
----
-
-### aclsparseLtSpMMAPrune
-
-```cpp
-aclsparseStatus_t aclsparseLtSpMMAPrune(
-    aclsparseLtConstHandle_t handle,
-    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
-    const void* d_in,
-    void* d_out,
-    aclsparseLtPruneAlg_t pruneAlg,
-    aclrtStream stream);
-```
-
-**功能**：对稠密矩阵 A 执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与 A 同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。剪枝后的 A_pruned 作为 `aclsparseLtMatmul` 的稀疏侧输入。直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。对标 cuSPARSELt 的 `cusparseLtSpMMAPrune`。
-
-**剪枝规则**：
-
-| 数据类型 | 分组大小 | 每组保留元素数 | 稀疏度 |
-|----------|---------|---------------|--------|
-| FP16（ACL_FLOAT16） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
-| BF16（ACL_BF16） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
-| INT8（ACL_INT8） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
-| FP32（ACL_FLOAT） | 2 | 1（保留绝对值最大的 1 个） | 50%（1:2，等价 2:4 密度） |
-
-> 说明：FP32 统一采用 1:2 模式（分组为 2、保留 1）以简化实现，与 NVIDIA cuSPARSELt 规范的 1:2 一致；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
-
-**产品支持情况**：
-
-| 产品 | 是否支持 |
-| :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-
-> 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
-
-**参数说明**：
-
-- `handle`（IN）：HOST，aclsparseLt 库句柄的 const 指针。
-- `matmulDescr`（IN）：HOST，Matmul 操作描述符，算子从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA。
-- `d_in`（IN）：DEVICE，待剪枝的稠密矩阵 A 的指针，须 16 字节对齐，不可为 nullptr。
-- `d_out`（OUT）：DEVICE，剪枝结果 A_pruned 的指针，须 16 字节对齐，不可为 nullptr。支持 in-place（d_in == d_out）。
-- `pruneAlg`（IN）：HOST，剪枝算法，支持 `ACLSPARSELT_PRUNE_SPMMA_STRIP` 与 `ACLSPARSELT_PRUNE_SPMMA_TILE`。
-- `stream`（IN）：HOST，ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流）。
-
-**约束说明**：
-
-- handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
-- matmulDescr 不可为 nullptr，且其绑定的矩阵 A 描述符（matA）不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- stream 可为 nullptr（表示使用默认流）。
-- pruneAlg 支持 `ACLSPARSELT_PRUNE_SPMMA_STRIP` 与 `ACLSPARSELT_PRUNE_SPMMA_TILE`，其他值返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- 矩阵 A 的数据类型支持 `ACL_FLOAT`（FP32）/ `ACL_FLOAT16`（FP16）/ `ACL_BF16`（BF16）/ `ACL_INT8`（INT8），其他类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- d_in 与 d_out 须 16 字节对齐，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- d_in 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- d_out 不可为 nullptr（无 workspace 回退路径），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- 支持 in-place 操作：d_in 与 d_out 可指向同一 Device 内存。
-- **K 维度无对齐约束**：kernel 通过 DataCopyPad 和 tail-clearing 处理非对齐 K，无需 K 为分组大小的倍数。
-- **UB 容量约束**：沿行剪枝时单行数据（k × elemSize）须不超过单核 UB 容量；沿列剪枝时行块数据（k × elemSize × 16）须不超过单核 UB 容量。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **异步执行**：算子异步启动，内部不执行 `aclrtSynchronizeStream`；调用方如需读取 d_out 结果，须自行同步 stream。
-- **内存布局**：矩阵 A 须以行主序存储（当前实现中 order 仅影响剪枝方向，不改变内存访问模式；不支持真实列主序存储的矩阵）。
-
-**返回值**：
-
-- `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/d_in/d_out 为 nullptr、数据指针未 16 字节对齐
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量
 - 其他值：失败
 
 ---
