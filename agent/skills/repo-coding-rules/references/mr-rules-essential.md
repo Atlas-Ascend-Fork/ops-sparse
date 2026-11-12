@@ -168,7 +168,10 @@ return;
 char password[32];
 ReadPassword(password);
 Authenticate(password);
-memset_s(password, sizeof(password), 0, sizeof(password));   // ← 安全清除
+errno_t ret = memset_s(password, sizeof(password), 0, sizeof(password));   // ← 安全清除
+if (ret != EOK) {
+    return;   // 清除失败：不能假定密码已擦除，走失败路径
+}
 return;
 ```
 

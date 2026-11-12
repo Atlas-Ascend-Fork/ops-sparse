@@ -105,5 +105,9 @@ if (ret != 0) {
 char password[32];
 ReadPassword(password, sizeof(password));
 Authenticate(password);
-memset_s(password, sizeof(password), 0, sizeof(password));   // ← 强制清零
+errno_t ret = memset_s(password, sizeof(password), 0, sizeof(password));   // ← 强制清零
+if (ret != EOK) {
+    OP_LOGE("ClearPassword", "memset_s failed with %d", ret);
+    return;
+}
 ```
