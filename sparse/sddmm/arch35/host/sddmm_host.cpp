@@ -1052,7 +1052,7 @@ aclsparseStatus_t ReadPatternValidation(
     pending = false;
     const uint32_t coreCount = GetAivCoreCount();
     if (coreCount == 0U) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     uint32_t numBlocks = 0U;
     if (!sddmm_arch35::PlanPatternValidation(context.tiling, coreCount, numBlocks) || numBlocks == 0U) {
@@ -1135,7 +1135,7 @@ aclsparseStatus_t QueryCsrCubeWorkspace(SddmmCallContext &context)
     }
     const uint32_t coreCount = GetAivCoreCount();
     if (coreCount == 0U) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     const uint32_t numBlocks = static_cast<uint32_t>(std::min<uint64_t>(
         coreCount, static_cast<uint64_t>(context.tiling.m)));
@@ -1353,7 +1353,7 @@ aclsparseStatus_t LaunchCsrCube(const SddmmCallContext &context,
 {
     const uint32_t aicCoreCount = GetAicCoreCount();
     if (aicCoreCount == 0U) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     auto plan = context.csrCubePlan;
     plan.logicalFirstColumn = context.matC->sddmmPrepared.patternLogicalFirstColumn;
@@ -1380,7 +1380,7 @@ aclsparseStatus_t LaunchComplexBsrCube(const SddmmCallContext &context,
 {
     const uint32_t aicCoreCount = GetAicCoreCount();
     if (aicCoreCount == 0U) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     const uint64_t cubeWorkItems =
         static_cast<uint64_t>(tiling.nnzUnits);
@@ -1404,7 +1404,7 @@ aclsparseStatus_t LaunchBsrCube(const SddmmCallContext &context,
 {
     const uint32_t aicCoreCount = GetAicCoreCount();
     if (aicCoreCount == 0U) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     const uint64_t cubeWorkItems = static_cast<uint64_t>(tiling.batchCount) *
         static_cast<uint64_t>(tiling.nnzUnits);
@@ -1514,7 +1514,7 @@ aclsparseStatus_t LaunchSddmm(
     }
     const uint32_t coreCount = GetAivCoreCount();
     if (coreCount == 0U) {
-        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     const uint64_t blocksNeeded =
         (static_cast<uint64_t>(context.totalOutputs) + kSddmmThreadsPerBlock - 1U) /
