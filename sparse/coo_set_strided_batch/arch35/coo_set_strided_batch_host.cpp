@@ -26,49 +26,6 @@
 #include "cann_ops_sparse.h"
 #include "aclsparse_descr_internal.h"
 
-#include <limits>
-
-// 本文件私有副本（sparse/common/aclsparse_descr.cpp 存在同名文件内定义但未导出；
-// 为控制本 PR 对 sparse/common 的侵入面，不将共享常量与受检运算提升到公共头，
-// 数值语义与 descr.cpp 版本保持一致，若后续 common 统一导出可届时删除副本）。
-namespace {
-
-constexpr int kMaxStridedBatchCount = 65535;
-
-bool CheckedNonnegativeMul(int64_t lhs, int64_t rhs, int64_t* result)
-{
-    if (result == nullptr || lhs < 0 || rhs < 0) {
-        return false;
-    }
-    if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs) {
-        return false;
-    }
-    *result = lhs * rhs;
-    return true;
-}
-
-bool CheckedNonnegativeAdd(int64_t lhs, int64_t rhs, int64_t* result)
-{
-    if (result == nullptr || lhs < 0 || rhs < 0 || rhs > std::numeric_limits<int64_t>::max() - lhs) {
-        return false;
-    }
-    *result = lhs + rhs;
-    return true;
-}
-
-bool CheckedStridedExtent(int batchCount, int64_t stride, int64_t span, int64_t* extent)
-{
-    if (batchCount < 1 || stride < 0 || span < 0 || extent == nullptr) {
-        return false;
-    }
-    int64_t lastBatchOffset = 0;
-    if (!CheckedNonnegativeMul(static_cast<int64_t>(batchCount - 1), stride, &lastBatchOffset)) {
-        return false;
-    }
-    return CheckedNonnegativeAdd(lastBatchOffset, span, extent);
-}
-
-} // namespace
 
 extern "C" {
 

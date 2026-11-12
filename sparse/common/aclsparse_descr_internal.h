@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
@@ -36,6 +37,50 @@
 #ifndef ACL_SPARSE_SPGEMM_DEFAULT
 #define ACL_SPARSE_SPGEMM_DEFAULT ACL_SPARSE_SPGEMM_ALG_DEFAULT
 #endif
+
+// strided-batch 描述符的 batchCount 上界（全格式共享不变量：
+// CooSetStridedBatch / CsrSetStridedBatch / BsrSetStridedBatch /
+// DnMatSetStridedBatch / SpMatGetStridedBatch 校验同源）。
+// 此前 aclsparse_descr.cpp 与 coo/csr_set_strided_batch 两算子 host
+// 三处独立定义同一常量，收敛为本头文件单点定义。
+constexpr int kMaxStridedBatchCount = 65535;
+
+// strided-batch 跨度受检算术（溢出安全）。原为 aclsparse_descr.cpp 与
+// coo/csr_set_strided_batch 两算子 host 的三处逐字副本（算子侧注释
+// "若后续 common 统一导出可届时删除副本"），收敛为本头文件单点定义。
+inline bool CheckedNonnegativeMul(int64_t lhs, int64_t rhs, int64_t *result)
+{
+    if (result == nullptr || lhs < 0 || rhs < 0) {
+        return false;
+    }
+    if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs) {
+        return false;
+    }
+    *result = lhs * rhs;
+    return true;
+}
+
+inline bool CheckedNonnegativeAdd(int64_t lhs, int64_t rhs, int64_t *result)
+{
+    if (result == nullptr || lhs < 0 || rhs < 0 ||
+        rhs > std::numeric_limits<int64_t>::max() - lhs) {
+        return false;
+    }
+    *result = lhs + rhs;
+    return true;
+}
+
+inline bool CheckedStridedExtent(int batchCount, int64_t stride, int64_t span, int64_t *extent)
+{
+    if (batchCount < 1 || stride < 0 || span < 0 || extent == nullptr) {
+        return false;
+    }
+    int64_t lastBatchOffset = 0;
+    if (!CheckedNonnegativeMul(static_cast<int64_t>(batchCount - 1), stride, &lastBatchOffset)) {
+        return false;
+    }
+    return CheckedNonnegativeAdd(lastBatchOffset, span, extent);
+}
 
 // 描述符签名常量，用于在 Destroy/Get/Set/Execute 前识别不透明句柄的描述符类型，
 // 并拒绝错误类型的句柄。

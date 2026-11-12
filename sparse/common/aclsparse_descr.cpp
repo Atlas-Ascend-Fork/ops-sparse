@@ -83,41 +83,6 @@ static bool IsValidSparseValueType(aclDataType valueType)
     }
 }
 
-constexpr int kMaxStridedBatchCount = 65535;
-
-static bool CheckedNonnegativeMul(int64_t lhs, int64_t rhs, int64_t *result)
-{
-    if (result == nullptr || lhs < 0 || rhs < 0) {
-        return false;
-    }
-    if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs) {
-        return false;
-    }
-    *result = lhs * rhs;
-    return true;
-}
-
-static bool CheckedNonnegativeAdd(int64_t lhs, int64_t rhs, int64_t *result)
-{
-    if (result == nullptr || lhs < 0 || rhs < 0 ||
-        rhs > std::numeric_limits<int64_t>::max() - lhs) {
-        return false;
-    }
-    *result = lhs + rhs;
-    return true;
-}
-
-static bool CheckedStridedExtent(int batchCount, int64_t stride, int64_t span, int64_t *extent)
-{
-    if (batchCount < 1 || stride < 0 || span < 0 || extent == nullptr) {
-        return false;
-    }
-    int64_t lastBatchOffset = 0;
-    if (!CheckedNonnegativeMul(static_cast<int64_t>(batchCount - 1), stride, &lastBatchOffset)) {
-        return false;
-    }
-    return CheckedNonnegativeAdd(lastBatchOffset, span, extent);
-}
 
 static bool IsSupportedBsrBlockSize(int64_t blockSize)
 {

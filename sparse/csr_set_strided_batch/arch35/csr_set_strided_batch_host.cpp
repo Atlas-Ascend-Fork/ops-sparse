@@ -31,57 +31,14 @@
 #include "cann_ops_sparse.h"
 #include "aclsparse_descr_internal.h"
 
-#include <limits>
-
-// 本文件私有副本（sparse/common/aclsparse_descr.cpp 存在同名文件内定义但未导出；
-// 为控制本 PR 对 sparse/common 的侵入面，不将共享常量与受检运算提升到公共头，
-// 数值语义与 descr.cpp 版本保持一致，与 coo_set_strided_batch_host.cpp 相同，
-// 若后续 common 统一导出可届时删除副本）。
-namespace {
-
-constexpr int kMaxStridedBatchCount = 65535;
-
-bool CheckedNonnegativeMul(int64_t lhs, int64_t rhs, int64_t* result)
-{
-    if (result == nullptr || lhs < 0 || rhs < 0) {
-        return false;
-    }
-    if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs) {
-        return false;
-    }
-    *result = lhs * rhs;
-    return true;
-}
-
-bool CheckedNonnegativeAdd(int64_t lhs, int64_t rhs, int64_t* result)
-{
-    if (result == nullptr || lhs < 0 || rhs < 0 || rhs > std::numeric_limits<int64_t>::max() - lhs) {
-        return false;
-    }
-    *result = lhs + rhs;
-    return true;
-}
-
-bool CheckedStridedExtent(int batchCount, int64_t stride, int64_t span, int64_t* extent)
-{
-    if (batchCount < 1 || stride < 0 || span < 0 || extent == nullptr) {
-        return false;
-    }
-    int64_t lastBatchOffset = 0;
-    if (!CheckedNonnegativeMul(static_cast<int64_t>(batchCount - 1), stride, &lastBatchOffset)) {
-        return false;
-    }
-    return CheckedNonnegativeAdd(lastBatchOffset, span, extent);
-}
-
-} // namespace
 
 // 校验单个 batch 步长（对齐 cuSPARSE 官方样例与本仓 BSR / COO / DnMat 的 0=广播约定）：
 // 0 表示广播——所有 batch 共享对应数组，单一物理副本按数组长度布局，无跨 batch
 // 地址递进，不存在溢出；正值必须不小于对应数组跨度 span（相邻 batch 数据区间
-// 不重叠），且 (batchCount-1)*stride+span 不溢出 int64（受检乘加，CheckedStridedExtent
-// 为本文件私有副本，语义同 descr.cpp，与 aclsparseBsrSetStridedBatch /
-// aclsparseDnMatSetStridedBatch / aclsparseCooSetStridedBatch 的溢出防护一致）；
+// 不重叠），且 (batchCount-1)*stride+span 不溢出 int64（受检乘加，
+// CheckedStridedExtent 由 aclsparse_descr_internal.h 统一导出，与
+// aclsparseBsrSetStridedBatch / aclsparseDnMatSetStridedBatch /
+// aclsparseCooSetStridedBatch 的溢出防护一致）；
 // 负值非法。spanName / strideName 用于日志定位。
 static aclsparseStatus_t ValidateBatchStride(const char *fn, int batchCount, int64_t stride,
                                               int64_t span, const char *strideName, const char *spanName)
