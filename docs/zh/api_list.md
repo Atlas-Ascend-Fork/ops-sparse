@@ -338,11 +338,11 @@ aclsparseStatus_t aclsparseCreateDnVec(
 aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 ```
 
-**功能**：销毁稠密向量描述符。
+**功能**：销毁稠密向量描述符。传 `nullptr` 时无操作并返回 `ACL_SPARSE_STATUS_SUCCESS`（null 容忍契约，对齐 cuSPARSE）。
 
 **参数说明**：
 
-- `dnVecDescr`（IN）：HOST，要销毁的稠密向量描述符。
+- `dnVecDescr`（IN）：HOST，要销毁的稠密向量描述符，可为 `nullptr`。
 
 **返回值**：
 
@@ -362,12 +362,12 @@ aclsparseStatus_t aclsparseDnVecGet(
 );
 ```
 
-**功能**：获取稠密向量描述符的全部字段。
+**功能**：获取稠密向量描述符的全部字段。输出参数允许为 `nullptr`，此时仅返回请求的字段。
 
 **参数说明**：
 
 - `dnVecDescr`（IN）：HOST，稠密向量描述符。
-- `size`（OUT）：HOST，向量的大小。
+- `size`（OUT）：HOST，向量的大小，可选。
 - `values`（OUT）：DEVICE，向量的值指针。
 - `valueType`（OUT）：HOST，值的数据类型。
 
@@ -466,11 +466,11 @@ aclsparseStatus_t aclsparseCreateSpVec(
 aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr);
 ```
 
-**功能**：销毁稀疏向量描述符。接受 const 描述符，非 const 描述符同样支持。
+**功能**：销毁稀疏向量描述符。接受 const 描述符，非 const 描述符同样支持。传 `nullptr` 时无操作并返回 `ACL_SPARSE_STATUS_SUCCESS`（null 容忍契约，对齐 cuSPARSE）。
 
 **参数说明**：
 
-- `spVecDescr`（IN）：HOST，要销毁的稀疏向量描述符。
+- `spVecDescr`（IN）：HOST，要销毁的稀疏向量描述符，可为 `nullptr`。
 
 **返回值**：
 
@@ -1425,11 +1425,11 @@ aclsparseStatus_t aclsparseConstBlockedEllGet(
 aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 ```
 
-**功能**：销毁稀疏矩阵对象。
+**功能**：销毁稀疏矩阵对象。传 `nullptr` 时无操作并返回 `ACL_SPARSE_STATUS_SUCCESS`（null 容忍契约，对齐 cuSPARSE）。
 
 **参数说明**：
 
-- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符，可为 `nullptr`。
 
 **返回值**：
 
@@ -1790,11 +1790,11 @@ aclsparseStatus_t aclsparseCreateDnMat(
 aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
 ```
 
-**功能**：销毁稠密矩阵描述符。
+**功能**：销毁稠密矩阵描述符。传 `nullptr` 时无操作并返回 `ACL_SPARSE_STATUS_SUCCESS`（null 容忍契约，对齐 cuSPARSE）。
 
 **参数说明**：
 
-- `dnMatDescr`（IN）：HOST，要销毁的稠密矩阵描述符。
+- `dnMatDescr`（IN）：HOST，要销毁的稠密矩阵描述符，可为 `nullptr`。
 
 **返回值**：
 
@@ -1817,7 +1817,7 @@ aclsparseStatus_t aclsparseDnMatGet(
 );
 ```
 
-**功能**：获取稠密矩阵描述符的全部字段。
+**功能**：获取稠密矩阵描述符的全部字段。输出参数允许为 `nullptr`，此时仅返回请求的字段。
 
 **参数说明**：
 
