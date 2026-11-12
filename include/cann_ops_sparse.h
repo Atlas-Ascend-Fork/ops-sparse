@@ -2562,24 +2562,61 @@ typedef enum aclsparseSpMatAttribute_t {
     ACL_SPARSE_SPMAT_DIAG_TYPE
 } aclsparseSpMatAttribute_t;
 
+/**
+ * @brief 创建 SpSV 求解描述符（显式生命周期模式的入口）。
+ *
+ * @param spsvDescr IN/OUT, HOST, 输出的描述符指针，不可为 nullptr。
+ * @return aclsparseStatus_t 分配失败返回 ACL_SPARSE_STATUS_ALLOC_FAILED。
+ * @note 完整阶段契约（create -> bufferSize -> analysis -> solve，
+ *       updateMatrix 更新值）见各阶段说明与算子 README。
+ */
 aclsparseStatus_t aclsparseSpSV_createDescr(aclsparseSpSVDescr_t* spsvDescr);
+
+/**
+ * @brief 销毁 SpSV 求解描述符。
+ *
+ * 传 nullptr 时无操作并返回 ACL_SPARSE_STATUS_SUCCESS（幂等语义，
+ * 对齐算子 README 约束说明）。
+ */
 aclsparseStatus_t aclsparseSpSV_destroyDescr(aclsparseSpSVDescr_t spsvDescr);
 
+/**
+ * @brief 查询 SpSV 求解所需 Device workspace 大小（阶段一）。
+ *
+ * 须在 analysis 之前调用；约束见算子 README（opA / 索引类型 /
+ * computeType 支持范围等）。
+ */
 aclsparseStatus_t aclsparseSpSV_bufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
                                            aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
                                            aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpSVAlg_t alg,
                                            aclsparseSpSVDescr_t spsvDescr, size_t* bufferSize);
 
+/**
+ * @brief SpSV 预处理（Level Scheduling），构建求解调度信息（阶段二）。
+ *
+ * 须在 bufferSize 之后、solve 之前调用；matA 的 CSR pattern 在此绑定。
+ */
 aclsparseStatus_t aclsparseSpSV_analysis(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
                                          aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
                                          aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpSVAlg_t alg,
                                          aclsparseSpSVDescr_t spsvDescr, void* externalBuffer);
 
+/**
+ * @brief 执行三角求解（前代/回代）（阶段三）。
+ *
+ * 须在 analysis 之后调用；X/Y 为稠密向量描述符。
+ */
 aclsparseStatus_t aclsparseSpSV_solve(aclsparseHandle_t handle, aclsparseOperation_t opA, const void* alpha,
                                       aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
                                       aclsparseDnVecDescr_t vecY, aclDataType computeType, aclsparseSpSVAlg_t alg,
                                       aclsparseSpSVDescr_t spsvDescr);
 
+/**
+ * @brief 更新 SpSV 矩阵数值（结构不变时无需重新 analysis）。
+ *
+ * 仅替换 values 指针指向的新数值数组；CSR pattern / shape 变化
+ * 须重新走 analysis。
+ */
 aclsparseStatus_t aclsparseSpSV_updateMatrix(aclsparseHandle_t handle, aclsparseSpSVDescr_t spsvDescr, void* newValues,
                                              aclsparseSpSVUpdate_t updatePart);
 
@@ -2603,20 +2640,47 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(aclsparseConstSpMatDescr_t spMatDes
 // Sparse Matrix Creation: COO / SLICED_ELL
 // ============================================================================
 
+/**
+ * @brief 创建 COO 格式稀疏矩阵描述符。
+ *
+ * @param spMatDescr IN/OUT, HOST, 输出的描述符指针，不可为 nullptr。
+ * @param rows/cols/nnz IN, HOST, 须均 >= 0。
+ * @param cooRowInd/cooColInd/cooValues IN, DEVICE, 数据指针允许为
+ *        nullptr（Create 期延迟绑定，使用期校验）。
+ * @param cooIdxType IN, HOST, 索引类型，仅支持 ACL_SPARSE_INDEX_32I /
+ *        ACL_SPARSE_INDEX_64I。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
                                      void* cooRowInd, void* cooColInd, void* cooValues, aclsparseIndexType_t cooIdxType,
                                      aclsparseIndexBase_t idxBase, aclDataType valueType);
 
+/**
+ * @brief 创建只读(const)COO 格式稀疏矩阵描述符。约束同 aclsparseCreateCoo。
+ */
 aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
                                           int64_t nnz, const void* cooRowInd, const void* cooColInd,
                                           const void* cooValues, aclsparseIndexType_t cooIdxType,
                                           aclsparseIndexBase_t idxBase, aclDataType valueType);
 
+/**
+ * @brief 获取 COO 稀疏矩阵描述符的全部字段。
+ *
+ * 输出参数均可选：任一 OUT 指针传 nullptr 表示不查询该字段，仅非空参数
+ * 被写出。spMatDescr 为 nullptr 或签名不符返回
+ * ACL_SPARSE_STATUS_INVALID_VALUE；描述符格式非 COO 返回
+ * ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
+ */
 aclsparseStatus_t aclsparseCooGet(aclsparseSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols, int64_t* nnz,
                                   void** cooRowInd, void** cooColInd, void** cooValues,
                                   aclsparseIndexType_t* cooIdxType, aclsparseIndexBase_t* idxBase,
                                   aclDataType* valueType);
 
+/**
+ * @brief 获取只读(const)COO 稀疏矩阵描述符的全部字段。
+ *
+ * 参数与语义同 aclsparseCooGet；输出参数均可选（部分读取）。
+ */
 aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
                                        int64_t* nnz, const void** cooRowInd, const void** cooColInd,
                                        const void** cooValues, aclsparseIndexType_t* cooIdxType,
@@ -2648,11 +2712,24 @@ aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, in
 aclsparseStatus_t aclsparseCooSetStridedBatch(aclsparseSpMatDescr_t spMatDescr,
     int batchCount, int64_t batchStride);
 
+/**
+ * @brief 获取 CSR 稀疏矩阵描述符的全部字段。
+ *
+ * 输出参数均可选：任一 OUT 指针传 nullptr 表示不查询该字段，仅非空参数
+ * 被写出。csrRowOffsetsType 与 csrColIndType 相互独立（四种组合均合法）。
+ * spMatDescr 为 nullptr 或签名不符返回 ACL_SPARSE_STATUS_INVALID_VALUE；
+ * 描述符格式非 CSR 返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
+ */
 aclsparseStatus_t aclsparseCsrGet(aclsparseSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
     int64_t *nnz, void **csrRowOffsets, void **csrColInd, void **csrValues,
     aclsparseIndexType_t *csrRowOffsetsType, aclsparseIndexType_t *csrColIndType,
     aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 
+/**
+ * @brief 获取只读(const)CSR 稀疏矩阵描述符的全部字段。
+ *
+ * 参数与语义同 aclsparseCsrGet；输出参数均可选（部分读取）。
+ */
 aclsparseStatus_t aclsparseConstCsrGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows,
     int64_t *cols, int64_t *nnz, const void **csrRowOffsets, const void **csrColInd,
     const void **csrValues, aclsparseIndexType_t *csrRowOffsetsType,
