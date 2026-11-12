@@ -307,10 +307,27 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 // Sparse Vector APIs
 // ============================================================================
 
+/**
+ * @brief 创建稀疏向量描述符。
+ *
+ * @param spVecDescr IN/OUT, HOST, 输出的稀疏向量描述符，不可为 nullptr。
+ * @param size IN, HOST, 向量大小，须 >= 0。
+ * @param nnz IN, HOST, 非零元素个数，须满足 0 <= nnz <= size。
+ * @param indices IN, DEVICE, 索引数组指针；nnz > 0 时不可为 nullptr
+ *                   （nnz == 0 时允许 nullptr）。
+ * @param values IN, DEVICE, 值数组指针；nnz > 0 时不可为 nullptr。
+ * @param idxType IN, HOST, 索引类型，仅支持 ACL_SPARSE_INDEX_32I / ACL_SPARSE_INDEX_64I。
+ * @param idxBase IN, HOST, 索引基址。
+ * @param valueType IN, HOST, 值数据类型。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz, void* indices,
                                        void* values, aclsparseIndexType_t idxType, aclsparseIndexBase_t idxBase,
                                        aclDataType valueType);
 
+/**
+ * @brief 创建只读(const)稀疏向量描述符。约束同 aclsparseCreateSpVec。
+ */
 aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz,
                                             const void* indices, const void* values, aclsparseIndexType_t idxType,
                                             aclsparseIndexBase_t idxBase, aclDataType valueType);
@@ -353,6 +370,13 @@ aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, 
                                          const void** indices, const void** values, aclsparseIndexType_t* idxType,
                                          aclsparseIndexBase_t* idxBase, aclDataType* valueType);
 
+/**
+ * @brief 获取稀疏向量的索引基值。
+ *
+ * @param spVecDescr IN, HOST, 稀疏向量描述符，不可为 nullptr。
+ * @param idxBase OUT, HOST, 索引基值，不可为 nullptr。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr, aclsparseIndexBase_t* idxBase);
 
 /**
@@ -369,6 +393,13 @@ aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void
  */
 aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr, const void** values);
 
+/**
+ * @brief 设置稀疏向量描述符的 values 指针。
+ *
+ * @param spVecDescr IN, HOST, 稀疏向量描述符，不可为 nullptr。
+ * @param values IN, DEVICE, 值数组指针。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void* values);
 
 // ============================================================================
@@ -673,6 +704,30 @@ aclsparseStatus_t aclsparseConstCscGet(aclsparseConstSpMatDescr_t spMatDescr, in
                                        aclsparseIndexType_t* cscRowIndType, aclsparseIndexBase_t* idxBase,
                                        aclDataType* valueType);
 
+/**
+ * @brief 创建 Blocked-ELL 格式稀疏矩阵描述符（纯 Host 接口，全平台构建）。
+ *
+ * @param descr IN/OUT, HOST, 输出的稀疏矩阵描述符，不可为 nullptr。
+ * @param rows IN, HOST, 行数，须 >= 0。
+ * @param cols IN, HOST, 列数，须 >= 0。
+ * @param ellBlockSize IN, HOST, 块边长，须 > 0。
+ * @param ellCols IN, HOST, Blocked-ELL 格式的实际列数（按元素计，即
+ *                    ellValue 的列数），须 >= 0；允许取补齐后的列范围
+ *                    （尾块 slot 填零），是否要求整块列由各架构实现决定。
+ * @param ellColInd IN, DEVICE, 列块索引数组，长度为
+ *                    ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize)
+ *                    （每个块行按列块粒度一个 slot）；对应容量为 0 时
+ *                    允许 nullptr，否则不可为 nullptr。
+ * @param ellValue IN, DEVICE, 值数组：按块网格行主序连续存放
+ *                   ellBlockSize x ellBlockSize 块（块内列主序），总容量为
+ *                   ceil(rows/ellBlockSize) * ceil(ellCols/ellBlockSize) *
+ *                   ellBlockSize^2；对应容量为 0 时允许 nullptr，否则
+ *                   不可为 nullptr。
+ * @param indexType IN, HOST, 索引类型，仅支持 ACL_SPARSE_INDEX_32I / ACL_SPARSE_INDEX_64I。
+ * @param indexBase IN, HOST, 索引基址。
+ * @param valueType IN, HOST, 值数据类型。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseCreateBlockedEll(aclsparseSpMatDescr_t* descr, int64_t rows, int64_t cols,
                                             int64_t ellBlockSize, int64_t ellCols, void* ellColInd, void* ellValue,
                                             aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
@@ -721,6 +776,22 @@ aclsparseStatus_t aclsparseConstBlockedEllGet(
     const void **ellValue, aclsparseIndexType_t *ellIdxType,
     aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 
+/**
+ * @brief 绑定/更新 CSR 描述符的行偏移、列索引与值指针。
+ *
+ * @param descr IN, HOST, CSR 稀疏矩阵描述符，不可为 nullptr。
+ * @param rowOffsets IN, DEVICE, 行偏移数组（长 rows+1）；rows 与 cols 均为 0
+ *                    时允许 nullptr（延迟绑定），否则不可为 nullptr。
+ * @param colIndices IN, DEVICE, 列索引数组；nnz > 0 时不可为 nullptr。
+ * @param values IN, DEVICE, 值数组；nnz > 0 时不可为 nullptr。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ * @note 任意指针变化（含仅换 values 分配）都会复位描述符上缓存的 spmv
+ *       执行计划并更新 spmm workspace 归属（与 aclsparseSpMatSetValues
+ *       的 values 重绑语义一致）；仅换 values 不影响结构代数与
+ *       densetosparse 分析态。重绑新的 offsets 分配会使既有 densetosparse
+ *       分析态失效（需重新 Analysis）；结构指针（rowOffsets/colIndices）
+ *       变化会递增结构代数并失效 sddmm 等既有预处理缓存。
+ */
 aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr, void* rowOffsets, void* colIndices,
                                           void* values);
 /**
@@ -730,6 +801,11 @@ aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr, void* row
  */
 aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr, int64_t rowOffsetsStride, int64_t colIndStride,
                                          int64_t valuesStride);
+/**
+ * @brief 获取 CSR 三个一维数组的元素步长。
+ *
+ * 三个 OUT 指针均不可为 nullptr。
+ */
 aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr, int64_t* rowOffsetsStride,
                                          int64_t* colIndStride, int64_t* valuesStride);
 
@@ -765,8 +841,22 @@ aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr, int64
 aclsparseStatus_t aclsparseCsrSetStridedBatch(aclsparseSpMatDescr_t spMatDescr, int batchCount,
                                               int64_t offsetsBatchStride, int64_t columnsValuesBatchStride);
 
+/**
+ * @brief 绑定/更新 CSC 描述符的列偏移、行索引与值指针。
+ *
+ * 空指针约束与失效语义同 aclsparseCsrSetPointers（CSC 以 colOffsets 为
+ * 行偏移对应物）。参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr, void* colOffsets, void* rowIndices,
                                           void* values);
+
+/**
+ * @brief 绑定/更新 COO 描述符的行索引、列索引与值指针。
+ *
+ * @param descr IN, HOST, 须为 COO 格式描述符。nnz > 0 时三个数组指针均
+ *              不可为 nullptr；nnz == 0 时允许 nullptr。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr, void* rowIndices, void* colIndices,
                                           void* values);
 
@@ -783,6 +873,13 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 // Sparse Matrix Accessor APIs
 // ============================================================================
 
+/**
+ * @brief 获取稀疏矩阵的存储格式。
+ *
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符，不可为 nullptr。
+ * @param format OUT, HOST, 存储格式，不可为 nullptr。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr, aclsparseFormat_t* format);
 
 /**
@@ -808,6 +905,16 @@ aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void
  */
 aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr, const void** values);
 
+/**
+ * @brief 设置稀疏矩阵描述符的 values 指针。
+ *
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符，不可为 nullptr。
+ * @param values IN, DEVICE, 值数组指针。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ * @note 重绑 values 指针会复位描述符上缓存的 spmv 执行计划与 spmm
+ *       workspace 归属（后续调用重新规划），不影响结构代数与
+ *       densetosparse/sddmm 的结构缓存。
+ */
 aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void* values);
 
 /**
@@ -1018,14 +1125,28 @@ aclsparseStatus_t aclsparseDnMatSetStridedBatch(
     aclsparseDnMatDescr_t dnMatDescr, int batchCount,
     int64_t batchStride);
 
+/**
+ * @brief 查询 DenseToSparse（稠密转稀疏）Analysis/Convert 所需 Device
+ *        workspace 大小（纯查询，无阶段副作用）。
+ */
 aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(
     aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
     aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
     size_t *bufferSize);
+
+/**
+ * @brief DenseToSparse 结构分析：CSR/CSC 统计非零并写行偏移、更新 nnz；
+ *        COO 发布 nnz；Blocked-ELL 校验几何与 pattern。
+ */
 aclsparseStatus_t aclsparseDenseToSparseAnalysis(
     aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
     aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
     void *buffer);
+
+/**
+ * @brief DenseToSparse 执行转换：CSR/CSC/COO 写入 indices/values
+ *        （信任 Analysis 前缀）；Blocked-ELL 按 pattern 提取块值。
+ */
 aclsparseStatus_t aclsparseDenseToSparseConvert(
     aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
     aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
@@ -1502,14 +1623,43 @@ typedef enum aclsparsePointerMode_t {
     ACL_SPARSE_POINTER_MODE_DEVICE = 1
 } aclsparsePointerMode_t;
 
+/**
+ * @brief 设置 alpha/beta 标量指针的 Host/Device 模式（默认 HOST）。
+ *
+ * @param handle IN, HOST, 处理器句柄，不可为 nullptr（否则返回
+ *              ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR）。
+ * @param mode IN, HOST, 仅支持 ACL_SPARSE_POINTER_MODE_HOST /
+ *             ACL_SPARSE_POINTER_MODE_DEVICE。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t mode);
+
+/**
+ * @brief 获取 alpha/beta 标量指针的 Host/Device 模式。
+ *
+ * @param mode OUT, HOST, 当前模式，不可为 nullptr。
+ * @return aclsparseStatus_t handle 为空返回
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR；mode 为空返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseGetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t* mode);
 
 // ============================================================================
 // Legacy API: MatDescr management
 // ============================================================================
 
+/**
+ * @brief 创建 Legacy MatDescr（旧版矩阵属性描述符）。
+ *
+ * @param descr IN/OUT, HOST, 输出的描述符指针，不可为 nullptr。
+ * @return aclsparseStatus_t 分配失败返回 ACL_SPARSE_STATUS_ALLOC_FAILED。
+ */
 aclsparseStatus_t aclsparseCreateMatDescr(aclsparseMatDescr_t* descr);
+
+/**
+ * @brief 销毁 Legacy MatDescr。传 nullptr 时无操作并返回
+ *        ACL_SPARSE_STATUS_SUCCESS（null 容忍契约）。
+ */
 aclsparseStatus_t aclsparseDestroyMatDescr(aclsparseMatDescr_t descr);
 void aclsparseSetMatType(aclsparseMatDescr_t descr, aclsparseMatrixType_t type);
 void aclsparseSetMatIndexBase(aclsparseMatDescr_t descr, aclsparseIndexBase_t base);
@@ -2433,6 +2583,16 @@ aclsparseStatus_t aclsparseSpSV_solve(aclsparseHandle_t handle, aclsparseOperati
 aclsparseStatus_t aclsparseSpSV_updateMatrix(aclsparseHandle_t handle, aclsparseSpSVDescr_t spsvDescr, void* newValues,
                                              aclsparseSpSVUpdate_t updatePart);
 
+/**
+ * @brief 设置稀疏矩阵描述符的 fill mode / diag type 属性。
+ *
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符，不可为 nullptr。
+ * @param attribute IN, HOST, 目标属性（FILL_MODE / DIAG_TYPE）。
+ * @param data IN, HOST, 属性值缓冲；不可为 nullptr，dataSize 须等于对应
+ *              枚举的 sizeof 且地址满足其对齐要求。
+ * @param dataSize IN, HOST, data 的大小（字节）。
+ * @return aclsparseStatus_t 参数或枚举值非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseSpMatSetAttribute(aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
                                              const void* data, size_t dataSize);
 
@@ -2746,6 +2906,10 @@ aclsparseStatus_t aclsparseIcsr2gebsr(aclsparseHandle_t handle, aclsparseDirecti
  * @brief Create/destroy a reusable descriptor for multi-stage CSR SpGEMM.
  */
 aclsparseStatus_t aclsparseSpGEMMCreateDescr(aclsparseSpGEMMDescr_t* descr);
+/**
+ * @brief 销毁 SpGEMM Host 描述符，不释放调用方 workspace。传 nullptr 时
+ *        无操作并返回 ACL_SPARSE_STATUS_SUCCESS（null 容忍契约）。
+ */
 aclsparseStatus_t aclsparseSpGEMMDestroyDescr(aclsparseSpGEMMDescr_t descr);
 
 /**
