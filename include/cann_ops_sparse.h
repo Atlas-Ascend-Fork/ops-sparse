@@ -2633,6 +2633,17 @@ aclsparseStatus_t aclsparseSpSV_updateMatrix(aclsparseHandle_t handle, aclsparse
 aclsparseStatus_t aclsparseSpMatSetAttribute(aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
                                              const void* data, size_t dataSize);
 
+/**
+ * @brief 获取稀疏矩阵描述符的 fill mode / diag type 属性。
+ *
+ * @param spMatDescr IN, HOST, 稀疏矩阵描述符，不可为 nullptr。
+ * @param attribute IN, HOST, 目标属性（FILL_MODE / DIAG_TYPE）。
+ * @param data OUT, HOST, 属性值缓冲；不可为 nullptr，dataSize 须等于对应
+ *             枚举的 sizeof 且地址满足其对齐要求。
+ * @param dataSize IN, HOST, data 的大小（字节）。
+ * @return aclsparseStatus_t 参数或属性枚举非法返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseSpMatGetAttribute(aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
                                              void* data, size_t dataSize);
 
@@ -2735,11 +2746,28 @@ aclsparseStatus_t aclsparseConstCsrGet(aclsparseConstSpMatDescr_t spMatDescr, in
     const void **csrValues, aclsparseIndexType_t *csrRowOffsetsType,
     aclsparseIndexType_t *csrColIndType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 
+/**
+ * @brief 创建 Sliced-ELL 格式稀疏矩阵描述符。
+ *
+ * @param spMatDescr IN/OUT, HOST, 输出的描述符指针，不可为 nullptr。
+ * @param rows/cols/nnz IN, HOST, 须均 >= 0。
+ * @param sliceNnz IN, HOST, 每个 slice 的非零元素数，须 >= 0。
+ * @param numSlices IN, HOST, slice 数，须 >= 0。
+ * @param sellSlicePtr/sellColInd/sellValues IN, DEVICE, 数据指针允许为
+ *        nullptr（Create 期延迟绑定，使用期校验——与 CreateCoo 同款口径）。
+ * @param sellIdxType IN, HOST, 索引类型，仅支持 ACL_SPARSE_INDEX_32I /
+ *        ACL_SPARSE_INDEX_64I。
+ * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ */
 aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
                                            int64_t sliceNnz, int64_t numSlices, void* sellSlicePtr, void* sellColInd,
                                            void* sellValues, aclsparseIndexType_t sellIdxType,
                                            aclsparseIndexBase_t idxBase, aclDataType valueType);
 
+/**
+ * @brief 创建只读(const)Sliced-ELL 格式稀疏矩阵描述符。
+ *        约束同 aclsparseCreateSlicedEll。
+ */
 aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols,
                                                 int64_t nnz, int64_t sliceNnz, int64_t numSlices,
                                                 const void* sellSlicePtr, const void* sellColInd,
