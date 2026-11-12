@@ -1025,11 +1025,18 @@ void SavePreparedState(
 }
 
 aclsparseStatus_t AllocatePatternPartials(
-    const SddmmCallContext &context, uint32_t numBlocks,
+    const SddmmCallContext &context, uint32_t coreCount, uint32_t numBlocks,
     std::unique_ptr<SddmmQueryPartial[]> &partials, size_t &scratchBytes)
 {
-    if (numBlocks > std::numeric_limits<size_t>::max() / sizeof(SddmmQueryPartial)) {
-        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    // G.RES.02-CPP：分配前校验申请大小的合法域。
+    // numBlocks 为 pattern 校验的生效核数，语义域为 [1, coreCount]——两处
+    // 调用方均以 min(coreCount, blocksNeeded) 构造（PlanPatternValidation /
+    // QueryCsrCubeWorkspace），coreCount 为 GetAivCoreCount() 实测核数。
+    // 越界值意味着调用方构造错误，在分配点拒绝，避免按越界核数分配
+    // Host/Device 缓冲；域内 numBlocks * sizeof(SddmmQueryPartial)
+    // （元素固定 64B）远小于设备内存与 size_t 上限，无回绕风险。
+    if (numBlocks == 0U || numBlocks > coreCount) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     scratchBytes = static_cast<size_t>(numBlocks) * sizeof(SddmmQueryPartial);
     partials.reset(new (std::nothrow) SddmmQueryPartial[numBlocks]);
@@ -1060,7 +1067,8 @@ aclsparseStatus_t ReadPatternValidation(
     }
     size_t scratchBytes = 0;
     std::unique_ptr<SddmmQueryPartial[]> partials;
-    const auto allocationStatus = AllocatePatternPartials(context, numBlocks, partials, scratchBytes);
+    const auto allocationStatus = AllocatePatternPartials(
+        context, coreCount, numBlocks, partials, scratchBytes);
     if (allocationStatus != ACL_SPARSE_STATUS_SUCCESS) {
         return allocationStatus;
     }
@@ -1143,7 +1151,8 @@ aclsparseStatus_t QueryCsrCubeWorkspace(SddmmCallContext &context)
     // workspace could overwrite another operator's persistent preprocessing.
     size_t scratchBytes = 0;
     std::unique_ptr<SddmmQueryPartial[]> partials;
-    const auto allocationStatus = AllocatePatternPartials(context, numBlocks, partials, scratchBytes);
+    const auto allocationStatus = AllocatePatternPartials(
+        context, coreCount, numBlocks, partials, scratchBytes);
     if (allocationStatus != ACL_SPARSE_STATUS_SUCCESS) {
         return allocationStatus;
     }

@@ -200,7 +200,7 @@ aclsparseStatus_t SpgemmValidateCsrSorted(
             if (colInd[p] < colInd[p - 1]) {
                 OP_LOGE("spgemm", "%s: colInd not sorted at row %lld, "
                         "colInd[%d]=%d < colInd[%d]=%d",
-                        label, i, p, colInd[p], p - 1, colInd[p - 1]);
+                        label, static_cast<long long>(i), p, colInd[p], p - 1, colInd[p - 1]);
                 return ACL_SPARSE_STATUS_NOT_SUPPORTED;
             }
         }
