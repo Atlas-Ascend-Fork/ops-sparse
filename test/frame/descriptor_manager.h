@@ -142,6 +142,14 @@ public:
     }
 
     aclsparseSpMatDescr_t get() { return descr_; }
+
+    // 放弃所有权：显式 Destroy 前取走句柄，避免析构对已销毁句柄二次销毁
+    // （UAF/double free）——对齐 SpSV/SpSMDescrManager 的守卫语义。
+    aclsparseSpMatDescr_t release() {
+        aclsparseSpMatDescr_t d = descr_;
+        descr_ = nullptr;
+        return d;
+    }
     aclsparseConstSpMatDescr_t cget() const { return descr_; }
 
     ~SpMatManager() {
@@ -187,6 +195,13 @@ public:
     }
 
     aclsparseDnVecDescr_t get() { return descr_; }
+
+    // 放弃所有权（对齐 SpSV/SpSMDescrManager 守卫语义，防显式销毁后二次释放）
+    aclsparseDnVecDescr_t release() {
+        aclsparseDnVecDescr_t d = descr_;
+        descr_ = nullptr;
+        return d;
+    }
     aclsparseConstDnVecDescr_t cget() const { return descr_; }
 
     ~DnVecManager() {
@@ -245,6 +260,13 @@ public:
     }
 
     aclsparseSpVecDescr_t get() { return descr_; }
+
+    // 放弃所有权（对齐 SpSV/SpSMDescrManager 守卫语义，防显式销毁后二次释放）
+    aclsparseSpVecDescr_t release() {
+        aclsparseSpVecDescr_t d = descr_;
+        descr_ = nullptr;
+        return d;
+    }
     aclsparseConstSpVecDescr_t cget() const { return descr_; }
 
     ~SpVecManager() {
@@ -292,6 +314,13 @@ public:
     }
 
     aclsparseDnMatDescr_t get() { return descr_; }
+
+    // 放弃所有权（对齐 SpSV/SpSMDescrManager 守卫语义，防显式销毁后二次释放）
+    aclsparseDnMatDescr_t release() {
+        aclsparseDnMatDescr_t d = descr_;
+        descr_ = nullptr;
+        return d;
+    }
     aclsparseConstDnMatDescr_t cget() const { return descr_; }
 
     ~DnMatManager() {
