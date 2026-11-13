@@ -43,6 +43,12 @@
 │       └── install
 │           ├── quick_install.md                       # 环境部署
 │           └── dir_structure.md                       # 目录结构
+├── cmake                                              # 构建函数库（test.cmake 测试目标注册、package.cmake 打包、makeself.cmake 自解压 run 包、version.cmake 版本信息、third_party 依赖）
+├── torch_extension                                    # PyTorch 集成框架（算子的 torch.ops 注册与 Python 绑定，详见 torch_extension/README.md）
+│   ├── cann_ops_sparse                                # Python 包源与各算子扩展（csrc 绑定源由 PyTorch JIT 单独编译，不进 libops_sparse）
+│   ├── setup.py                                       # pip 安装入口（依赖 torch>=2.6.0 与 torch_npu）
+│   └── MANIFEST.in / requirements.txt                # 打包清单与 Python 依赖
+├── torch_npu                                          # PyTorch/torch_npu SpMV 桥接（可选目标 BUILD_TORCH_ADAPTER，默认 OFF）
 ├── examples                                           # 算子调用示例代码（预留目录，当前样例位于 test/ 下）
 ├── scripts                                            # 辅助脚本（打包安装说明、版本信息生成等）
 │   ├── package
