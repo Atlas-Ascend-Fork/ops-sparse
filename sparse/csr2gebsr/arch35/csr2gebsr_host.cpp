@@ -200,7 +200,7 @@ static aclsparseStatus_t ValidateCommonParams(
         return st;
     }
 
-    return Csr2gebsrValidateMatDescr(apiName, "descrA", descrA);
+    return AclsparseValidateMatDescr(apiName, "descrA", descrA);
 }
 
 /// bufferSize 参数校验
@@ -282,7 +282,7 @@ static aclsparseStatus_t ValidateNnzParams(
         return st;
     }
 
-    st = Csr2gebsrValidateMatDescr(apiName, "descrC", descrC);
+    st = AclsparseValidateMatDescr(apiName, "descrC", descrC);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
@@ -552,7 +552,7 @@ static aclsparseStatus_t ValidateConvertParams(
         return st;
     }
 
-    st = Csr2gebsrValidateMatDescr(apiName, "descrC", descrC);
+    st = AclsparseValidateMatDescr(apiName, "descrC", descrC);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }

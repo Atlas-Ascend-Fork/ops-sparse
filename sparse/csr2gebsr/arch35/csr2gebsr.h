@@ -21,39 +21,12 @@
 #include <cstdint>
 
 #include "cann_ops_sparse.h"
+#include "aclsparse_host_utils.h"
 
 /// 将 opaque handle 转为内部结构体指针
 inline struct aclsparseContext *Csr2gebsrToInternalHandle(aclsparseHandle_t handle)
 {
     return reinterpret_cast<struct aclsparseContext *>(handle);
-}
-
-/// 校验 MatDescr：type 必须为 GENERAL，indexBase 必须为 ZERO 或 ONE
-inline aclsparseStatus_t Csr2gebsrValidateMatDescr(const char *apiTag,
-                                                    const char *paramName,
-                                                    const aclsparseMatDescr_t descr)
-{
-    if (descr == nullptr) {
-        OP_LOGE(apiTag, "%s is nullptr", paramName);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    aclsparseMatrixType_t matType = aclsparseGetMatType(descr);
-    if (matType != ACL_SPARSE_MATRIX_TYPE_GENERAL) {
-        OP_LOGE(apiTag, "%s: unsupported matrix type %d",
-                paramName, static_cast<int>(matType));
-        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
-    }
-
-    aclsparseIndexBase_t indexBase = aclsparseGetMatIndexBase(descr);
-    if (indexBase != ACL_SPARSE_INDEX_BASE_ZERO &&
-        indexBase != ACL_SPARSE_INDEX_BASE_ONE) {
-        OP_LOGE(apiTag, "%s: invalid indexBase %d",
-                paramName, static_cast<int>(indexBase));
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 /// 从 MatDescr 提取 indexBase 的整数值 (0 或 1)

@@ -116,11 +116,11 @@ static aclsparseStatus_t ValidateCommonCsrgeam2Args(
     }
 
     aclsparseStatus_t st;
-    st = Csrgeam2ValidateMatDescr(apiName, "descrA", descrA);
+    st = AclsparseValidateMatDescr(apiName, "descrA", descrA);
     if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
-    st = Csrgeam2ValidateMatDescr(apiName, "descrB", descrB);
+    st = AclsparseValidateMatDescr(apiName, "descrB", descrB);
     if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
-    st = Csrgeam2ValidateMatDescr(apiName, "descrC", descrC);
+    st = AclsparseValidateMatDescr(apiName, "descrC", descrC);
     if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     if (nnzA > 0 && csrSortedColIndA == nullptr) {

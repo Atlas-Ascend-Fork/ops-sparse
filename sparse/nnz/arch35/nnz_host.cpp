@@ -35,31 +35,6 @@ inline struct aclsparseContext *ToInternalHandle(aclsparseHandle_t handle)
 namespace {
 
 /**
- * @brief 校验 MatDescr 参数。
- */
-static aclsparseStatus_t ValidateMatDescr(const aclsparseMatDescr_t descrA)
-{
-    if (descrA == nullptr) {
-        OP_LOGE("aclsparseSnnz", "descrA is nullptr");
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    aclsparseMatrixType_t matType = aclsparseGetMatType(descrA);
-    if (matType != ACL_SPARSE_MATRIX_TYPE_GENERAL) {
-        OP_LOGE("aclsparseSnnz", "unsupported matrix type: %d", static_cast<int>(matType));
-        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
-    }
-
-    aclsparseIndexBase_t indexBase = aclsparseGetMatIndexBase(descrA);
-    if (indexBase != ACL_SPARSE_INDEX_BASE_ZERO && indexBase != ACL_SPARSE_INDEX_BASE_ONE) {
-        OP_LOGE("aclsparseSnnz", "invalid index base: %d", static_cast<int>(indexBase));
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/**
  * @brief 校验 aclsparseSnnz 全部入参。
  */
 static aclsparseStatus_t ValidateNnzParams(
@@ -91,7 +66,7 @@ static aclsparseStatus_t ValidateNnzParams(
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
 
-    aclsparseStatus_t descrStatus = ValidateMatDescr(descrA);
+    aclsparseStatus_t descrStatus = AclsparseValidateMatDescr("aclsparseSnnz", "descrA", descrA);
     if (descrStatus != ACL_SPARSE_STATUS_SUCCESS) {
         return descrStatus;
     }

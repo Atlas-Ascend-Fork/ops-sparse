@@ -22,6 +22,7 @@
 
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
+#include "aclsparse_host_utils.h"
 #include "aclsparse_handle_internal.h"
 #include "aclsparse_descr_internal.h"
 
@@ -31,36 +32,8 @@ inline struct aclsparseContext *Csrgeam2ToInternalHandle(aclsparseHandle_t handl
     return reinterpret_cast<struct aclsparseContext *>(handle);
 }
 
-/// 校验 MatDescr：type 必须为 GENERAL，indexBase 必须为 ZERO 或 ONE
-inline aclsparseStatus_t Csrgeam2ValidateMatDescr(const char *apiTag,
-                                                 const char *paramName,
-                                                 const aclsparseMatDescr_t descr)
-{
-    if (descr == nullptr) {
-        OP_LOGE(apiTag, "%s is nullptr", paramName);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    aclsparseMatrixType_t matType = aclsparseGetMatType(descr);
-    if (matType != ACL_SPARSE_MATRIX_TYPE_GENERAL) {
-        OP_LOGE(apiTag, "%s: unsupported matrix type %d",
-                paramName, static_cast<int>(matType));
-        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
-    }
-
-    aclsparseIndexBase_t indexBase = aclsparseGetMatIndexBase(descr);
-    if (indexBase != ACL_SPARSE_INDEX_BASE_ZERO &&
-        indexBase != ACL_SPARSE_INDEX_BASE_ONE) {
-        OP_LOGE(apiTag, "%s: invalid indexBase %d",
-                paramName, static_cast<int>(indexBase));
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
 /// 从 MatDescr 提取 indexBase 的整数值 (0 或 1)
-/// Precondition: descr must have been validated by Csrgeam2ValidateMatDescr
+/// Precondition: descr must have been validated by AclsparseValidateMatDescr
 /// (legal indexBase). For illegal base values, this function silently maps to 0 (#24).
 inline int32_t Csrgeam2GetBase(const aclsparseMatDescr_t descr)
 {

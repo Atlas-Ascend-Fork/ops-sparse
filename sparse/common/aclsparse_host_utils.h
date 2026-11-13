@@ -25,6 +25,37 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "cann_ops_sparse.h"
 
+/// 校验 Legacy MatDescr（aclsparseMatDescr_t）三连约束：非空、
+/// type 必须为 GENERAL、indexBase 必须为 ZERO 或 ONE。
+/// 此前在 csr2gebsr.h / csrgeam2.h（带 tag 改名副本）与 nnz host
+/// （static 无 tag 副本）三处逐字重复，收敛为本头文件单点定义。
+inline aclsparseStatus_t AclsparseValidateMatDescr(const char *apiTag,
+                                                   const char *paramName,
+                                                   const aclsparseMatDescr_t descr)
+{
+    if (descr == nullptr) {
+        OP_LOGE(apiTag, "%s is nullptr", paramName);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    aclsparseMatrixType_t matType = aclsparseGetMatType(descr);
+    if (matType != ACL_SPARSE_MATRIX_TYPE_GENERAL) {
+        OP_LOGE(apiTag, "%s: unsupported matrix type %d",
+                paramName, static_cast<int>(matType));
+        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+
+    aclsparseIndexBase_t indexBase = aclsparseGetMatIndexBase(descr);
+    if (indexBase != ACL_SPARSE_INDEX_BASE_ZERO &&
+        indexBase != ACL_SPARSE_INDEX_BASE_ONE) {
+        OP_LOGE(apiTag, "%s: invalid indexBase %d",
+                paramName, static_cast<int>(indexBase));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 #ifndef CHECK_RET
 #define CHECK_RET(cond, return_expr) \
     do {                             \
