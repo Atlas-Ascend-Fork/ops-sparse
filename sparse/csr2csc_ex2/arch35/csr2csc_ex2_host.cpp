@@ -414,7 +414,7 @@ static void LaunchScatter(
             "Kernel 4 (Scatter) launched, blocks=%u", numBlocks);
 }
 
-static void LaunchCsr2cscEx2Kernels(
+static aclsparseStatus_t LaunchCsr2cscEx2Kernels(
     int m, int n, int nnz,
     const void *csrVal, const int *csrRowPtr, const int *csrColInd,
     void *cscVal, int *cscColPtr, int *cscRowInd,
@@ -435,6 +435,10 @@ static void LaunchCsr2cscEx2Kernels(
     // SumStripeHist 必须在 CountCols 之后（读 stripeHist 直方图）、PrefixSum 之前
     //（写 colCount 供 PrefixSum 读）、StripeBase 之前（StripeBase 原地修改 stripeHist）。
     // Scatter 单线程按 k 升序顺序写入，列内行号自然升序，无需 Sort kernel。
+    // clear-then-launch-then-peek（issue #357 分族，对齐 #369 gebsr2gebsc 样式）：
+    // Peek 只读不清除，下发前 aclrtGetLastError 清除陈旧线程级错误，只归因本次编排。
+    (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+
     LaunchCountCols(gmColInd, gmStripeHist,
                     nnz, n, baseVal, numBlocks, stripeSize, stream);
     LaunchSumStripeHist(gmStripeHist, gmWorkspace,
@@ -443,6 +447,12 @@ static void LaunchCsr2cscEx2Kernels(
     LaunchStripeBase(gmStripeHist, gmCscColPtr, n, baseVal, numBlocks, stream);
     LaunchScatter(gmRowPtr, gmColInd, gmCsrVal, gmCscRowInd, gmCscVal, gmStripeHist,
                   m, n, nnz, baseVal, copyVal, stripeSize, valSize, numBlocks, stream);
+    if (aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL) != ACL_SUCCESS) {
+        OP_LOGE("aclsparseCsr2cscEx2", "kernel enqueue failed: %d",
+                static_cast<int>(aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)));
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 // ---------------------------------------------------------------------------
@@ -520,13 +530,11 @@ static aclsparseStatus_t LaunchCsr2cscEx2Kernel(
             m, n, nnz, baseVal, lp.copyVal, lp.valSize, lp.numBlocks, lp.stripeSize,
             lp.requiredSize);
 
-    LaunchCsr2cscEx2Kernels(
+    return LaunchCsr2cscEx2Kernels(
         m, n, nnz, csrVal, csrRowPtr, csrColInd,
         cscVal, cscColPtr, cscRowInd,
         workspace, lp.valSize, lp.copyVal, baseVal, lp.numBlocks, lp.stripeSize,
         aivCoreNum, h->stream);
-
-    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 }  // namespace
