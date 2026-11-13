@@ -35,17 +35,6 @@
 
 namespace {
 
-inline uint32_t CalcSimtThreads(uint32_t nnz, uint32_t coreNum) {
-  if (coreNum == 0U) {
-    return kCsrsortSimtWarpSize;
-  }
-  uint32_t elemsPerCore = (nnz + coreNum - 1U) / coreNum;
-  uint32_t aligned = (elemsPerCore + kCsrsortSimtWarpSize - 1U) /
-                     kCsrsortSimtWarpSize * kCsrsortSimtWarpSize;
-  return std::min(std::max(aligned, kCsrsortSimtWarpSize),
-                  kCsrsortSimtMaxThreads);
-}
-
 inline struct aclsparseContext *ToInternalHandle(aclsparseHandle_t handle) {
   return reinterpret_cast<struct aclsparseContext *>(handle);
 }
@@ -108,7 +97,7 @@ static aclsparseStatus_t ComputeCsrsortTiling(int m, int nnz,
   tiling.runSize = runSize;
   tiling.coreNum = coreNum;
   tiling.sortTmpBytes = sortTmpBytes;
-  tiling.simtThreads = CalcSimtThreads(tiling.nnz, coreNum);
+  tiling.simtThreads = sort_tiling::CalcSimtThreads(tiling.nnz, coreNum);
 
   OP_LOGI("aclsparseXcsrsort",
           "tiling: m=%u, nnz=%u, runSize=%u, blockDim=%u, sortTmp=%u, "

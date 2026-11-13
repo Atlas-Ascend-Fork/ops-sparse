@@ -96,6 +96,24 @@ inline bool FindMaxRunSize(uint64_t ubSize, uint32_t &runSize, uint32_t &sortTmp
     return true;
 }
 
+
+// Sort 家族 SIMT 线程数计算：按每核元素量对齐 warp 大小（32）并夹在
+// [32, 2048]。此前 csrsort35 与 cscsort35 各自维护逐字副本（常量
+// 32/2048 完全一致，仅常量前缀命名不同），收敛为本头文件单点定义。
+inline uint32_t CalcSimtThreads(uint32_t nnz, uint32_t coreNum)
+{
+    constexpr uint32_t kSortSimtWarpSize = 32U;
+    constexpr uint32_t kSortSimtMaxThreads = 2048U;
+    if (coreNum == 0U) {
+        return kSortSimtWarpSize;
+    }
+    uint32_t elemsPerCore = (nnz + coreNum - 1U) / coreNum;
+    uint32_t aligned = (elemsPerCore + kSortSimtWarpSize - 1U) /
+                       kSortSimtWarpSize * kSortSimtWarpSize;
+    return std::min(std::max(aligned, kSortSimtWarpSize),
+                    kSortSimtMaxThreads);
+}
+
 }  // namespace sort_tiling
 
 #endif  // ACLSPARSE_SORT_TILING_UTILS_H_
