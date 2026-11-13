@@ -3162,12 +3162,36 @@ SpMMOp算法枚举：
 
 ## 推荐调用流程
 
+### 单阶段接口（以 SpMM 为例）
+
 1. 调用 `aclsparseCreate` 创建句柄，并通过 `aclsparseSetStream` 绑定 stream。
 2. 使用 `aclsparseCreateCsr` 创建 CSR 稀疏矩阵 A，使用 `aclsparseCreateDnMat` 创建稠密矩阵 B、C。
 3. 调用 `aclsparseSpMMGetBufferSize` 获取 workspace 大小并分配设备内存。
 4. 调用 `aclsparseSpMMPreprocess` 对稀疏矩阵进行预处理（同一 sparsity pattern 可复用 workspace）。
 5. 调用 `aclsparseSpMM` 执行稀疏矩阵-稠密矩阵乘法。
 6. 依次销毁矩阵描述符与句柄，释放 workspace 与 ACL 资源。
+
+### 多阶段描述符接口（SpSV / SpSM 为例，显式生命周期）
+
+多阶段求解接口（`aclsparseSpSV_*` / `aclsparseSpSM_*`）与 SpGEMM 多阶段接口
+（`WorkEstimation → EstimateMemory → Compute → Copy`）使用显式描述符托管阶段状态，
+调用顺序有硬性前置约束（跳序返回 `ACL_SPARSE_STATUS_INVALID_VALUE`）：
+
+1. `aclsparseCreate` + `aclsparseSetStream` 创建并绑定句柄；`aclsparseSpSV_createDescr` /
+   `aclsparseSpSMCreateDescr` 创建求解描述符。
+2. 创建 CSR 稀疏矩阵 A（`aclsparseCreateCsr`）与稠密向量 X / Y（`aclsparseCreateDnVec`）。
+3. `aclsparseSpSV_bufferSize` / `aclsparseSpSMBufferSize` 查询 workspace 大小并分配。
+4. `aclsparseSpSV_analysis` / `aclsparseSpSMAnalysis` 预处理（在此绑定 A 的 CSR pattern；
+   同一 pattern 的多次 solve 可复用分析结果）。
+5. `aclsparseSpSV_solve` / `aclsparseSpSM` 执行求解（X/Y 只读/写描述符，同 stream 异步）。
+6. 数值变化但结构不变时经 `aclsparseSpSV_updateMatrix` / `aclsparseSpSMUpdateMatrix`
+   更新值，无需重新 analysis；读取结果前同步 stream。
+7. 依次销毁求解描述符、矩阵描述符与句柄。
+
+SpGEMM 多阶段（`aclsparseSpGEMMWorkEstimation` → `aclsparseSpGEMMEstimateMemory` →
+`aclsparseSpGEMMCompute` → `aclsparseSpGEMMCopy`）同理：描述符跨阶段持有状态，
+结构变化后必须重新执行 WorkEstimation；旧三阶段入口（`aclsparseSpGEMM`）未命中
+缓存时会自动执行一次完整预处理。
 
 ---
 
