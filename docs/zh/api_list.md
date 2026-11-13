@@ -2876,6 +2876,193 @@ aclsparseStatus_t aclsparseXcscsort(
 | `ACL_SPARSE_OP_TRANSPOSE` | 转置操作 |
 | `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE` | 共轭转置操作 |
 
+### aclsparseMatrixType_t
+
+矩阵类型枚举（Legacy MatDescr 属性；当前算子仅支持 GENERAL）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_MATRIX_TYPE_GENERAL` | 一般矩阵（= 0） |
+| `ACL_SPARSE_MATRIX_TYPE_SYMMETRIC` | 对称矩阵 |
+| `ACL_SPARSE_MATRIX_TYPE_HERMITIAN` | Hermitian 矩阵 |
+| `ACL_SPARSE_MATRIX_TYPE_TRIANGULAR` | 三角矩阵 |
+
+---
+
+### aclsparseDiagType_t
+
+三角对角类型枚举（SpMat 属性）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_DIAG_TYPE_NON_UNIT` | 非单位对角（= 0） |
+| `ACL_SPARSE_DIAG_TYPE_UNIT` | 单位对角 |
+
+---
+
+### aclsparseFillMode_t
+
+三角填充模式枚举（SpMat 属性）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_FILL_MODE_LOWER` | 下三角填充（= 0） |
+| `ACL_SPARSE_FILL_MODE_UPPER` | 上三角填充 |
+
+---
+
+### aclsparseDirection_t
+
+存储方向枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_DIRECTION_ROW` | 按行方向（= 0） |
+| `ACL_SPARSE_DIRECTION_COLUMN` | 按列方向 |
+
+---
+
+### aclsparseAction_t
+
+转换操作枚举（CSR→GEBSC 等格式转换接口）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_ACTION_SYMBOLIC` | 仅计算输出结构（colPtr/rowInd）（= 0） |
+| `ACL_SPARSE_ACTION_NUMERIC` | 计算结构并拷贝数值 |
+
+---
+
+### aclsparsePointerMode_t
+
+标量指针模式枚举（alpha/beta 的 Host/Device 位置）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_POINTER_MODE_HOST` | 标量在 Host 内存（= 0，默认） |
+| `ACL_SPARSE_POINTER_MODE_DEVICE` | 标量在 Device 内存 |
+
+---
+
+### aclsparseSpMVOpAlg_t
+
+SpMVOp 算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPMVOP_ALG_DEFAULT` | 路由到 ALG1（= 0，无 workspace） |
+| `ACL_SPARSE_SPMVOP_ALG1` | host 侧静态行切分，无 workspace，支持原地更新 |
+| `ACL_SPARSE_SPMVOP_ALG2` | host 侧 merge sort + bin_edge 负载均衡，需 workspace |
+
+---
+
+### aclsparseSpGEMMAlg_t
+
+SpGEMM 算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPGEMM_ALG_DEFAULT` | 确定性全量候选路径（= 0） |
+| `ACL_SPARSE_SPGEMM_ALG1` | 与 DEFAULT 同路径（兼容占位） |
+| `ACL_SPARSE_SPGEMM_ALG2` | 多阶段内存规划路径 |
+| `ACL_SPARSE_SPGEMM_ALG3` | 多阶段内存规划路径 |
+
+---
+
+### aclsparseSpSVAlg_t
+
+SpSV 算法枚举（当前仅默认值）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPSV_ALG_DEFAULT` | 默认算法（= 0） |
+
+---
+
+### aclsparseSpSMAlg_t
+
+SpSM 算法枚举（当前仅默认值）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPSM_ALG_DEFAULT` | 默认算法（= 0） |
+
+---
+
+### aclsparseSpSVUpdate_t
+
+SpSV 值更新模式枚举（updateMatrix 接口）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPSV_UPDATE_GENERAL` | 一般更新（= 0） |
+| `ACL_SPARSE_SPSV_UPDATE_DIAGONAL` | 对角更新 |
+
+---
+
+### aclsparseSpSMUpdate_t
+
+SpSM 值更新模式枚举（updateMatrix 接口）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPSM_UPDATE_GENERAL` | 一般更新（= 0） |
+| `ACL_SPARSE_SPSM_UPDATE_DIAGONAL` | 对角更新（= 1） |
+
+---
+
+### aclsparseSDDMMAlg_t
+
+SDDMM 算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SDDMM_ALG_DEFAULT` | 默认算法（= 0） |
+
+---
+
+### aclsparseDenseToSparseAlg_t
+
+DenseToSparse 算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT` | 默认算法（= 0） |
+
+---
+
+### aclsparseSparseToDenseAlg_t
+
+SparseToDense 算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT` | 默认算法（= 0） |
+
+---
+
+### aclsparseCsr2CscAlg_t
+
+CSR→CSC（Csr2cscEx2）算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_CSR2CSC_ALG_DEFAULT` | 默认算法（= 0） |
+| `ACL_SPARSE_CSR2CSC_ALG1` | ALG1 |
+
+---
+
+### aclsparseSpMatAttribute_t
+
+SpMat 属性枚举（Get/SetAttribute 接口）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPMAT_FILL_MODE` | 三角填充模式（aclsparseFillMode_t） |
+| `ACL_SPARSE_SPMAT_DIAG_TYPE` | 三角对角类型（aclsparseDiagType_t） |
+
+---
+
 ### aclsparseStatus_t
 
 返回状态枚举：
