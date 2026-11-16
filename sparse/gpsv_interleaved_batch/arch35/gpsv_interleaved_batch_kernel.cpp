@@ -36,6 +36,36 @@
 #include "simt_api/asc_simt.h"
 #include "gpsv_interleaved_batch_kernel.h"
 
+// Avoid intermediate square underflow/overflow when the norm is representable.
+// A zero norm needs no rotation; later rows can still supply a nonzero pivot.
+__simt_callee__ inline void GpsvGivens(float pivot, float target, float& hyp, float& cs, float& sn)
+{
+    const float scale = fmaxf(fabsf(pivot), fabsf(target));
+    hyp = scale;
+    // An ordered comparison preserves tiny positive scales on the device.
+    if (scale <= 0.0f) {
+        cs = 1.0f;
+        sn = 0.0f;
+        return;
+    }
+    // Clamp the FP32 exponent to keep both reciprocal power-of-two factors normal.
+    constexpr uint32_t mantissaBits = 23U;
+    constexpr uint32_t twiceExponentBias = 254U;
+    uint32_t exponent = (__float_as_uint(scale) >> mantissaBits) & 0xFFU;
+    exponent = exponent < 1U ? 1U : exponent;
+    exponent = exponent >= twiceExponentBias ? twiceExponentBias - 1U : exponent;
+    const float scaleUp = __uint_as_float((twiceExponentBias - exponent) << mantissaBits);
+    const float scaleDown = __uint_as_float(exponent << mantissaBits);
+    const float scaledPivot = pivot * scaleUp;
+    const float scaledTarget = target * scaleUp;
+    // For a normal scale, the largest scaled magnitude is in [1, 4), keeping this sum in [1, 32).
+    const float normSquared = scaledPivot * scaledPivot + scaledTarget * scaledTarget;
+    const float inverseNorm = rsqrtf(normSquared);
+    hyp = scaleDown * sqrtf(normSquared);
+    cs = scaledPivot * inverseNorm;
+    sn = scaledTarget * inverseNorm;
+}
+
 // ---------------------------------------------------------------------------
 // Backward substitution for upper-triangular band system (bandwidth 4 above).
 // R diagonals in workspace: d'[i], du'[i], dw'[i], d4'[i], d5'[i].
@@ -115,9 +145,7 @@ GpsvSolveM1(__gm__ const float *dGm, __gm__ float *xGm, uint32_t myBatch)
 
 // ---------------------------------------------------------------------------
 // m == 2: single Givens rotation on rows (0, 1), then back-substitution.
-// No singularity guard on hyp = sqrt(d_r0^2 + dl_r1^2): if it happens to
-// be 0, IEEE-754 division produces NaN/Inf, which propagates and signals
-// "user provided a singular matrix" — matching cuSPARSE behavior.
+// Zero rotations are identities; zero final diagonal division is unchanged.
 // ---------------------------------------------------------------------------
 __simt_callee__ inline void
 GpsvSolveM2(__gm__ const float *dlGm, __gm__ const float *dGm,
@@ -131,8 +159,8 @@ GpsvSolveM2(__gm__ const float *dlGm, __gm__ const float *dGm,
     float du_r1 = duGm[bc + myBatch], dw_r1 = dwGm[bc + myBatch];
     float b_r1  = xGm[bc + myBatch];
 
-    float hyp = sqrt(d_r0 * d_r0 + dl_r1 * dl_r1);
-    float cs = d_r0 / hyp, sn = dl_r1 / hyp;
+    float hyp, cs, sn;
+    GpsvGivens(d_r0, dl_r1, hyp, cs, sn);
     float odu0 = du_r0, odw0 = dw_r0, ob0 = b_r0, odw1 = dw_r1;
 
     d_r0  = hyp;
@@ -177,8 +205,8 @@ GpsvForwardMainLoop(__gm__ const float *dsGm, __gm__ const float *dlGm,
 
         // Step 1: rotate rows (i-2) and i to eliminate ds[i]
         {
-            float hyp = sqrt(r_p2.d * r_p2.d + ds_i * ds_i);
-            float c1 = r_p2.d / hyp, s1 = ds_i / hyp;
+            float hyp, c1, s1;
+            GpsvGivens(r_p2.d, ds_i, hyp, c1, s1);
             float odu = r_p2.du, odw = r_p2.dw, od4 = r_p2.d4, od5 = r_p2.d5, ob = r_p2.b;
             float du_n = c1 * odu + s1 * dl_i;
             float dw_n = c1 * odw + s1 * d_i;
@@ -195,8 +223,8 @@ GpsvForwardMainLoop(__gm__ const float *dsGm, __gm__ const float *dlGm,
         }
         // Step 2: rotate rows (i-1) and i to eliminate dl_i
         {
-            float hyp = sqrt(r_p1.d * r_p1.d + dl_i * dl_i);
-            float c2 = r_p1.d / hyp, s2 = dl_i / hyp;
+            float hyp, c2, s2;
+            GpsvGivens(r_p1.d, dl_i, hyp, c2, s2);
             float odu = r_p1.du, odw = r_p1.dw, od4 = r_p1.d4, od5 = r_p1.d5, ob = r_p1.b;
             r_p2.d  = hyp; r_p2.du  = c2 * odu + s2 * d_i;
             r_p2.dw = c2 * odw + s2 * du_i; r_p2.d4 = c2 * od4 + s2 * dw_i;
@@ -236,8 +264,8 @@ GpsvProcessOneBatch(
     float dw_r1 = dwGm[idx1], b_r1 = xGm[idx1];
     float d4_r1 = 0.0f, d5_r1 = 0.0f;
     {
-        float hyp = sqrt(d_r0 * d_r0 + dl_r1 * dl_r1);
-        float cs = d_r0 / hyp, sn = dl_r1 / hyp;
+        float hyp, cs, sn;
+        GpsvGivens(d_r0, dl_r1, hyp, cs, sn);
         float odu0 = du_r0, odw0 = dw_r0, ob0 = b_r0;
         d_r0 = hyp; du_r0 = cs * odu0 + sn * d_r1;
         dw_r0 = cs * odw0 + sn * du_r1; d4_r0 = sn * dw_r1; b_r0 = cs * ob0 + sn * b_r1;

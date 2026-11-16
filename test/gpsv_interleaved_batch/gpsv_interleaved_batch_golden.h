@@ -50,15 +50,15 @@ inline void BuildPentadiagSingleBatch(int m, int batchCount, int j,
 /**
  * Apply a Givens rotation on rows (r1, r2) of matrix A, affecting columns [colStart, m).
  * Also applies the same rotation to bb entries at rows r1 and r2.
- * If pivot == target == 0 then std::hypot returns 0, so cs = pivot/r and sn = target/r
- * both become NaN (IEEE-754 division by zero). NaN then propagates through every
- * subsequent multiply/add, matching the kernel's unprotected division (no ternary guard)
- * — and cuSPARSE behavior (user must ensure well-conditioned input).
+ * A zero pivot and target require the identity rotation, even for nonsingular systems.
  */
 inline void ApplyGivensRotation(
     std::vector<double>& A, std::vector<double>& bb,
     int m, int r1, int r2, int colStart, double pivot, double target)
 {
+    if (pivot == 0.0 && target == 0.0) {
+        return;
+    }
     double r = std::hypot(pivot, target);
     double cs = pivot / r;
     double sn = target / r;
@@ -77,8 +77,7 @@ inline void ApplyGivensRotation(
  * QR forward sweep: for rows i = 1..m-1, apply:
  *   Step 1 (i >= 2): Givens on rows (i-2, i) to eliminate A[i, i-2]
  *   Step 2 (i >= 1): Givens on rows (i-1, i) to eliminate A[i, i-1]
- * No singularity guards: matches kernel behavior — IEEE-754 NaN/Inf propagates
- * for singular input (cuSPARSE documents user must ensure well-conditioned input).
+ * Zero rotations leave both rows unchanged; singular final diagonals remain unguarded.
  */
 inline void QrPentadiagForward(std::vector<double>& A, std::vector<double>& bb, int m)
 {

@@ -20,6 +20,7 @@
 #include "test_common.h"
 
 #include "../gpsv_interleaved_batch_golden.h"
+#include "../gpsv_zero_rotation_cases.h"
 #include "../gpsv_interleaved_batch_param.h"
 #include "gpsv_interleaved_batch_npu_wrapper.h"
 
@@ -96,6 +97,18 @@ protected:
     inline static std::unique_ptr<HandleManager> spHandle_;
     inline static bool goldenSelfTestOk_ = false;
 
+    static void CheckKnownSolution(const GpsvKnownSolutionCase& test)
+    {
+        const auto& a = test.matrix;
+        const auto actual = GpsvInterleavedBatchNpu(spHandle_->get(), env_->stream(), 0, a.m, a.ds, a.dl, a.d, a.du,
+                                                    a.dw, test.rhs, a.batchCount);
+        ASSERT_EQ(actual.size(), test.expected.size());
+        for (size_t i = 0; i < actual.size(); ++i) {
+            ASSERT_TRUE(std::isfinite(actual[i])) << "index=" << i;
+            EXPECT_FLOAT_EQ(actual[i], test.expected[i]) << "index=" << i;
+        }
+    }
+
     // Verifies QR pentadiagonal FP64 golden matches known solution within fp64 precision
     static bool RunGoldenSelfTests() {
         bool ok = true;
@@ -149,6 +162,25 @@ protected:
         return makeRandomPentadiag(p.m, p.batch_count, p.value_lo, p.value_hi, p.seed);
     }
 };
+
+TEST_F(GpsvInterleavedBatchTest, ZeroRotationsInBandedPermutations)
+{
+    for (int m = 1; m <= 6; ++m) {
+        for (float sign : {1.0F, -1.0F}) {
+            SCOPED_TRACE(::testing::Message() << "m=" << m << " sign=" << sign);
+            const auto test = MakeGpsvPermutationCase(m, sign);
+            ASSERT_NO_FATAL_FAILURE(CheckKnownSolution(test));
+        }
+    }
+}
+
+TEST_F(GpsvInterleavedBatchTest, ScaledWellConditionedSystems)
+{
+    for (const auto& test : MakeGpsvRangeCases()) {
+        SCOPED_TRACE(::testing::Message() << "m=" << test.matrix.m << " rhs0=" << test.rhs.front());
+        ASSERT_NO_FATAL_FAILURE(CheckKnownSolution(test));
+    }
+}
 
 // ============================================================================
 // Parameterized test case: GenericSuccess
