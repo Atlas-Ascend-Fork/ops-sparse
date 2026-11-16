@@ -22,6 +22,7 @@
 #ifndef ACLSPARSE_FP16_UTILS_H
 #define ACLSPARSE_FP16_UTILS_H
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -69,25 +70,38 @@ inline uint16_t Float32ToFloat16Bits(float f)
     converter.f = f;
     uint32_t x = converter.u;
 
-    uint32_t sign = (x >> 31) & 0x1u;
+    uint32_t sign = (x >> 16) & 0x8000u;
     int32_t exp = static_cast<int32_t>((x >> 23) & 0xFFu) - 127;
     uint32_t mant = x & 0x7FFFFFu;
 
-    uint16_t h;
-    if (std::isnan(f) || std::isinf(f) || exp >= 16) {
-        h = static_cast<uint16_t>((sign << 15) | 0x7C00u);
-    } else if (exp >= -14) {
-        uint32_t halfExp = static_cast<uint32_t>(exp + 15);
-        uint32_t halfMant = mant >> 13;
-        uint32_t roundBit = (mant >> 12) & 0x1u;
-        if (roundBit && halfMant < 0x3FFu) {
-            halfMant++;
-        }
-        h = static_cast<uint16_t>((sign << 15) | (halfExp << 10) | halfMant);
-    } else {
-        h = static_cast<uint16_t>(sign << 15);
+    if (exp == 128) {
+        // Keep NaNs distinct from infinity, including payloads lost by narrowing.
+        return static_cast<uint16_t>(sign | 0x7C00u | (mant ? 0x0200u : 0u));
     }
-    return h;
+    if (exp >= 16) {
+        return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+    if (exp < -25) {
+        return static_cast<uint16_t>(sign);
+    }
+
+    uint32_t shift = 13;
+    uint32_t half = 0;
+    if (exp >= -14) {
+        half = static_cast<uint32_t>(exp + 15) << 10;
+    } else {
+        // Restore the implicit bit before shifting into the half subnormal range.
+        mant |= 0x800000u;
+        shift = static_cast<uint32_t>(-exp - 1);
+    }
+    half |= mant >> shift;
+    uint32_t remainder = mant & ((1u << shift) - 1u);
+    uint32_t midpoint = 1u << (shift - 1);
+    if (remainder > midpoint || (remainder == midpoint && (half & 1u))) {
+        // Increment the full magnitude so a mantissa carry advances the exponent.
+        ++half;
+    }
+    return static_cast<uint16_t>(sign | half);
 }
 
 } // namespace aclsparse
