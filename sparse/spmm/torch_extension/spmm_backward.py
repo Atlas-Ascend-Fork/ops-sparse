@@ -1,8 +1,11 @@
 # ----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-# the CANN Open Software License Agreement Version 2.0 (the "License").
-# Please refer to the License for details in the LICENSE file in the root of the software repository.
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
 """First-order VJP for the CSR-dense SpMM route."""
@@ -76,7 +79,7 @@ def _sample_rows(tensor, rows, is_complex):
     return tensor[rows]
 
 
-def _sampled_values(left, right, rows, cols, dtype):
+def _sampled_values(left, right, rows, cols, dtype, scale=1):
     """Evaluate selected entries of ``left @ right`` without dense matmul."""
     count = rows.numel()
     values = torch.empty(count, dtype=dtype, device=left.device)
@@ -99,16 +102,17 @@ def _sampled_values(left, right, rows, cols, dtype):
             lhs = lhs.float()
             rhs = rhs.float()
         product = lhs * rhs
-        values[start:end] = product.sum(dim=1).to(dtype)
+        # Apply the VJP scalar while the promoted accumulator is still available.
+        values[start:end] = (product.sum(dim=1) * scale).to(dtype)
     return values
 
 
-def _sampled_product(left, right, pattern):
+def _sampled_product(left, right, pattern, scale):
     rows, cols = _coordinates(pattern)
-    return _sampled_values(left, right, rows, cols, pattern.dtype)
+    return _sampled_values(left, right, rows, cols, pattern.dtype, scale)
 
 
-def _dense_product(left, right):
+def _dense_product(left, right, scale):
     """Evaluate a dense product with index-select and vector reduction.
 
     The A2/A3 torch_npu runtime used by this adapter does not provide dense
@@ -126,7 +130,7 @@ def _dense_product(left, right):
         rows = torch.arange(start, end, device=left.device, dtype=torch.int64)
         rows = rows.repeat_interleave(cols_count)
         cols = columns.repeat(end - start)
-        values = _sampled_values(left, right, rows, cols, left.dtype)
+        values = _sampled_values(left, right, rows, cols, left.dtype, scale)
         output[start:end] = values.reshape(end - start, cols_count)
     return output
 
@@ -158,9 +162,9 @@ def _sparse_left_gradient(request, gradient, scale):
         sparse = sparse.coalesce()
     dense = request.mat2.detach()
     if request.schema == "aten::_sparse_addmm":
-        values = _sampled_product(gradient, dense.mH, sparse) * scale
+        values = _sampled_product(gradient, dense.mH, sparse, scale)
         return _rebuild_sparse(sparse, values)
-    return _dense_product(gradient, dense.mH) * scale
+    return _dense_product(gradient, dense.mH, scale)
 
 
 def _sparse_right_gradient(request, gradient, scale):
@@ -169,9 +173,9 @@ def _sparse_right_gradient(request, gradient, scale):
     if sparse.layout == torch.sparse_coo and not sparse.is_coalesced():
         sparse = sparse.coalesce()
     if request.schema == "aten::_sparse_addmm":
-        values = _sampled_product(dense.mH, gradient, sparse) * scale
+        values = _sampled_product(dense.mH, gradient, sparse, scale)
         return _rebuild_sparse(sparse, values)
-    return _dense_product(dense.mH, gradient) * scale
+    return _dense_product(dense.mH, gradient, scale)
 
 
 @torch.no_grad()

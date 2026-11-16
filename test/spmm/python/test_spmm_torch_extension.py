@@ -790,3 +790,27 @@ def test_repeated_calls_are_consistent():
     golden = cpu_golden(torch.float32, (2, 2), 1.0, 1.0)
     for _ in range(8):
         assert_close(torch.addmm(bias, mat1, mat2).cpu(), golden, torch.float32)
+
+
+@pytest.mark.parametrize("layout", (torch.sparse_coo, torch.sparse_csr))
+@pytest.mark.parametrize("dense_value,grad_value,alpha", (
+    (400.0, 400.0, 0.125), (400.0, 400.0, -0.125),
+    (2.0 ** -12, 2.0 ** -13, 1024.0), (400.0, 400.0, 0.0)))
+def test_sparse_addmm_fp16_gradient_scales_before_rounding(layout, dense_value, grad_value, alpha):
+    values = torch.ones(1, dtype=torch.float16, device=DEVICE)
+    if layout == torch.sparse_csr:
+        crow = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
+        col = torch.tensor([0], dtype=torch.int32, device=DEVICE)
+        mat1 = torch.sparse_csr_tensor(crow, col, values, size=(1, 1), device=DEVICE)
+    else:
+        indices = torch.tensor([[0], [0]], dtype=torch.int64, device=DEVICE)
+        mat1 = torch.sparse_coo_tensor(indices, values, (1, 1), device=DEVICE).coalesce()
+    mat1.requires_grad_()
+    mat2 = torch.tensor([[dense_value]], dtype=torch.float16, device=DEVICE)
+    gradient = torch.tensor([[grad_value]], dtype=torch.float16, device=DEVICE)
+    result = torch.sparse.addmm(torch.zeros_like(mat2), mat1, mat2, alpha=alpha, beta=0)
+    result.backward(gradient)
+    actual = mat1.grad.to_dense().cpu()
+    expected = (mat2.cpu().double() * gradient.cpu().double() * alpha).half()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch.isfinite(actual).all()
