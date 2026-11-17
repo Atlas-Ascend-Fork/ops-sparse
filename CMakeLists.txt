@@ -77,12 +77,15 @@ set(ARCH_SPECIFIC_DIRS arch35 arch22 arch20 CACHE INTERNAL "Architecture specifi
 # ASCEND_TOOLKIT_HOME. Prefer the former for compatibility with the existing
 # build scripts, but accept the latter so A5 builds do not depend on a shell
 # alias being exported.
-if(DEFINED ENV{ASCEND_HOME_PATH} AND NOT "$ENV{ASCEND_HOME_PATH}" STREQUAL "")
-  set(ASCEND_CANN_PACKAGE_PATH "$ENV{ASCEND_HOME_PATH}")
-elseif(DEFINED ENV{ASCEND_TOOLKIT_HOME} AND NOT "$ENV{ASCEND_TOOLKIT_HOME}" STREQUAL "")
-  set(ASCEND_CANN_PACKAGE_PATH "$ENV{ASCEND_TOOLKIT_HOME}")
-else()
-  set(ASCEND_CANN_PACKAGE_PATH "")
+# An explicit CMake path takes precedence over environment fallbacks.
+if(NOT DEFINED ASCEND_CANN_PACKAGE_PATH OR ASCEND_CANN_PACKAGE_PATH STREQUAL "")
+  if(DEFINED ENV{ASCEND_HOME_PATH} AND NOT "$ENV{ASCEND_HOME_PATH}" STREQUAL "")
+    set(ASCEND_CANN_PACKAGE_PATH "$ENV{ASCEND_HOME_PATH}")
+  elseif(DEFINED ENV{ASCEND_TOOLKIT_HOME} AND NOT "$ENV{ASCEND_TOOLKIT_HOME}" STREQUAL "")
+    set(ASCEND_CANN_PACKAGE_PATH "$ENV{ASCEND_TOOLKIT_HOME}")
+  else()
+    set(ASCEND_CANN_PACKAGE_PATH "")
+  endif()
 endif()
 set(RUN_MODE "npu" CACHE STRING "run mode: npu")
 # Default Release when unspecified; FORCE only here so an empty cache entry is corrected,
