@@ -23,6 +23,8 @@ export BASE_PATH=$(
   cd "$(dirname "$0")"
   pwd
 )
+# All build outputs and cleanup below are relative to the repository root.
+cd "${BASE_PATH}"
 export BUILD_PATH="${BASE_PATH}/build"
 export BUILD_OUT_PATH="${BASE_PATH}/build_out"
 CANN_3RD_LIB_PATH="${BUILD_PATH}/third_party"
