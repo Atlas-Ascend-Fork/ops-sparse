@@ -37,6 +37,7 @@
 #include "gather_golden.h"
 #include "gather_npu_wrapper.h"
 #include "gather_param.h"
+#include "gather_stride_test.h"
 #include "../../frame/presmoke.h"
 
 #include <algorithm>
@@ -398,3 +399,8 @@ TEST_F(GatherHandleOrderTest, RawZeroNnzNeedsNoDataPointers)
 INSTANTIATE_TEST_SUITE_P(
     GatherCases, GatherTest, testing::ValuesIn(GetGatherArch22Cases()),
     [](const testing::TestParamInfo<GatherTestParam>& info) { return info.param.case_name; });
+
+TEST_F(GatherHandleOrderTest, RejectsNonUnitDenseStride)
+{
+    CheckGatherNonUnitDenseStride(env_->stream());
+}

@@ -291,6 +291,10 @@ static aclsparseStatus_t ValidateGatherParams(
         OP_LOGE("aclsparseGather", "vecX is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (vecX->nnz > 0 && vecY->stride != 1) {
+        OP_LOGE("aclsparseGather", "non-unit dense vector stride is not supported");
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
     if (vecY->nums > 0 && vecY->values == nullptr) {
         OP_LOGE("aclsparseGather", "nonempty vecY requires bound values, size=%llu",
                 static_cast<unsigned long long>(vecY->nums));

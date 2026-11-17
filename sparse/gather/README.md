@@ -12,6 +12,10 @@ X.values[i] = Y[X.indices[i] - idxBase]   for i = 0 .. nnz-1
 
 其中 `X` 为稀疏向量（Sparse Vector），包含 `indices`（非零元素在稠密向量中的位置）和 `values`（非零元素的值）；`Y` 为稠密向量（Dense Vector）。调用后 `X.values` 被覆写为从 `Y` 中收集到的值。
 
+当 `X.nnz > 0` 时，`Y` 的元素步长必须为 1。arch22 和 arch35 均不支持非单位步长，
+通过 `aclsparseDnVecSetStride` 设置其他步长后调用 Gather 会返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`，
+不会下发 Kernel。空输出的既有 no-op 行为不受此步长限制。
+
 该算子不需要 workspace，也不需要 preprocess 阶段，单步调用即可完成计算。
 
 ## 算子执行接口

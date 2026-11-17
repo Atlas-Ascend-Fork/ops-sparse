@@ -28,6 +28,7 @@
 #include "gather_golden.h"
 #include "gather_npu_wrapper.h"
 #include "gather_param.h"
+#include "gather_stride_test.h"
 #include "aclsparse_descr_internal.h"
 
 #include <cstring>
@@ -280,4 +281,9 @@ TEST_F(GatherContractTest, RejectsInvalidPointersAndAlias)
     EXPECT_EQ(aclsparseGather(input.handle.get(), input.y.cget(), input.x.get()),
               ACL_SPARSE_STATUS_INVALID_VALUE);
     input.y.get()->values = yValues;
+}
+
+TEST_F(GatherContractTest, RejectsNonUnitDenseStride)
+{
+    CheckGatherNonUnitDenseStride(env_->stream());
 }

@@ -132,6 +132,10 @@ static aclsparseStatus_t ValidateDescriptorObjects(
 static aclsparseStatus_t ValidateTypesAndShape(
     aclsparseConstDnVecDescr_t vecY, aclsparseSpVecDescr_t vecX)
 {
+    if (vecX->nnz > 0 && vecY->stride != 1) {
+        OP_LOGE("aclsparseGather", "non-unit dense vector stride is not supported");
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
     if (vecX->valueType != vecY->valueType) {
         OP_LOGE("aclsparseGather", "value type mismatch: X=%d, Y=%d", vecX->valueType, vecY->valueType);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;

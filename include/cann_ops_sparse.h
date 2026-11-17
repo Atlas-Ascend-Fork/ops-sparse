@@ -410,6 +410,8 @@ aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void
  * @brief Gather elements from dense vector Y into sparse vector X values.
  *
  * X.values[i] = Y[X.indices[i] - idxBase] for i = 0 .. nnz-1.
+ * For nonempty X, Y must have element stride 1; other strides return
+ * ACL_SPARSE_STATUS_NOT_SUPPORTED before kernel launch.
  *
  * @param handle IN, HOST, aclsparse handle.
  * @param vecY   IN, HOST, const dense vector descriptor.
