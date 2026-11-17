@@ -22,6 +22,7 @@
 │   │   ├── aclsparse_logger_manager.h                 # 日志管理器头文件
 │   │   └── aclsparse_logger_manager.cpp               # 日志管理器实现
 │   └── ${operator}                                    # 算子目录（如 spmv、spmm、csrgeam2）
+│       ├── README.md                                  # 算子说明文档与调用样例
 │       └── ${arch_dir}/                               # 面向特定架构的源码（如 arch22、arch35），由 SOC 配置决定是否编译
 │           ├── ${operator}_host.cpp                   # Host 侧：参数检查、任务下发等
 │           ├── ${operator}_kernel.cpp                 # Device 侧：Ascend C 核函数入口（或多个 kernels/*.cpp）
@@ -40,6 +41,11 @@
 │   ├── QUICKSTART.md                                  # 快速入门
 │   └── zh
 │       ├── api_list.md                                # 接口列表
+│       ├── api_list_sparseLt.md                       # aclsparseLt 接口列表
+│       ├── develop                                    # 开发指导
+│       │   ├── compile_and_run_example.md             # 编译与运行样例
+│       │   └── readme_develop_guide.md                # 算子 README 编写模板
+│       ├── figures                                    # 文档配图
 │       └── install
 │           ├── quick_install.md                       # 环境部署
 │           └── dir_structure.md                       # 目录结构
