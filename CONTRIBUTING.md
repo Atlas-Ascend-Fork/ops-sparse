@@ -72,7 +72,7 @@
 | 类型 | 要求 | 参考资料 |
 |------|------|---------|
 | 代码交付件 | 需提供算子 Host 侧实现、Device 侧 Kernel 实现、算子测试文件 | [快速入门](docs/QUICKSTART.md) |
-| 文档交付件 | 算子 README 文档为必选，需放置在 `test/${operator}/README.md`，其余文档可视情况提供 | 参考已有算子 README（如 [test/spmv/README.md](test/spmv/README.md)） |
+| 文档交付件 | 算子说明文档为必选，需放置在 `sparse/${operator}/README.md`；测试与复现说明放置在 `test/${operator}/README.md`，其余文档可视情况提供 | 参考已有算子 README（如 [sparse/spmv/README.md](sparse/spmv/README.md)、[test/spmv/README.md](test/spmv/README.md)） |
 | 精度要求 | 新贡献算子需满足精度标准 | [生态算子开源精度标准](https://gitcode.com/cann/opbase/blob/master/docs/zh/ops_precision_standard/experimental_standard.md) |
 
 **合规检查：**
@@ -129,7 +129,7 @@ Committer 检视通过后，将标注 `/lgtm` 标签。Maintainer 最终审核�
 
 如果您在本项目中发现某些算子文档描述错误，欢迎您新建 Issue 进行反馈和修复。
 
-您可以按照 [提交 Issue/处理 Issue 任务](https://gitcode.com/cann/community#提交Issue处理Issue任务) 指引新建 `Documentation|文档反馈` 类 Issue 指出对应文档的问题。README 文档规范参考已有算子 README（如 [test/spmv/README.md](test/spmv/README.md)）。
+您可以按照 [提交 Issue/处理 Issue 任务](https://gitcode.com/cann/community#提交Issue处理Issue任务) 指引新建 `Documentation|文档反馈` 类 Issue 指出对应文档的问题。README 文档规范参考已有算子 README（如 [sparse/spmv/README.md](sparse/spmv/README.md)）。
 
 ---
 
@@ -147,6 +147,7 @@ Committer 检视通过后，将标注 `/lgtm` 标签。Maintainer 最终审核�
 
 ```text
 sparse/${operator}/                            # 算子源码目录
+├── README.md                               # 必选，算子说明：语义、接口、参数约束、支持的稀疏格式
 └── ${arch_dir}/                            # 面向特定架构的实现（如 arch22、arch35）
     ├── ${operator}_host.cpp                # Host 侧：参数校验、任务下发
     ├── ${operator}_kernel.cpp              # Device 侧：Ascend C 核函数实现
@@ -156,6 +157,7 @@ sparse/${operator}/                            # 算子源码目录
 
 test/${operator}/                           # 算子测试目录
 ├── CMakeLists.txt                          # 测试编译配置，调用 ops_sparse_add_test()
+├── README.md                               # 可选，测试说明：测试入口、运行命令、复现步骤、平台支持情况
 └── ${arch_dir}/                            # 面向特定架构的测试
     └── ${operator}_test.cpp                # 测试主文件
 ```
@@ -167,6 +169,7 @@ test/${operator}/                           # 算子测试目录
 >   - `arch35`：Ascend 950（NPU 架构 `dav-3510`）
 >   - `arch20`：Ascend 310P（NPU 架构 `dav-2002`）
 > - 算子源码目录（`sparse/`）下**无需**提供 `CMakeLists.txt`，由 `sparse/CMakeLists.txt` 自动收集。
+> - 算子说明文档 `README.md` 放置在**算子源码目录**（`sparse/${operator}/README.md`），承载算子语义、接口、参数约束与支持的稀疏格式；测试与复现说明放置在**测试目录**（`test/${operator}/README.md`），承载测试入口、运行命令与复现步骤。两者职责不同，**现有算子 README 无需搬迁**。
 > - 测试目录（`test/`）下**必须**提供 `CMakeLists.txt`，调用 `ops_sparse_add_test()` 注册测试可执行文件。
 > - 目录结构详细说明参考 [目录结构说明](docs/zh/install/dir_structure.md)。
 
