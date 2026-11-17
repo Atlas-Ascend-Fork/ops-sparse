@@ -21,6 +21,7 @@
 #include <memory>
 #include <type_traits>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include "acl/acl.h"
@@ -407,7 +408,7 @@ int32_t CheckMatchedRatioAndAbsError(float matchedRatio, ErrorT maxAbsError,
 
 // ===================== 设备资源创建 =====================
 
-int CreateDeviceTensor(uint8_t *hostData, const size_t size, uint8_t **deviceAddr) {
+int CreateDeviceTensor(const void *hostData, const size_t size, uint8_t **deviceAddr) {
     // nnz=0（全空矩阵）等场景 size 可能为 0：仍分配最小缓冲，保证设备指针非空
     const size_t allocSize = (size == 0) ? 32 : size;
     auto ret = aclrtMalloc((void **)deviceAddr, allocSize, ACL_MEM_MALLOC_HUGE_FIRST);
@@ -488,19 +489,19 @@ int CreateBasicTestTensors(const std::vector<int32_t> &csrRowPtr,
                            const std::vector<OutT> &yVec,
                            uint8_t **rowPtrDev, uint8_t **colIndDev, uint8_t **valsDev,
                            uint8_t **xDev, uint8_t **yDev) {
-    int aclRet = CreateDeviceTensor((uint8_t *)csrRowPtr.data(),
+    int aclRet = CreateDeviceTensor(csrRowPtr.data(),
                                     csrRowPtr.size() * sizeof(int32_t), rowPtrDev);
     if (aclRet == ACL_SUCCESS)
-        aclRet = CreateDeviceTensor((uint8_t *)csrColInd.data(),
+        aclRet = CreateDeviceTensor(csrColInd.data(),
                                     csrColInd.size() * sizeof(int32_t), colIndDev);
     if (aclRet == ACL_SUCCESS)
-        aclRet = CreateDeviceTensor((uint8_t *)csrVal.data(),
+        aclRet = CreateDeviceTensor(csrVal.data(),
                                     csrVal.size() * sizeof(ValT), valsDev);
     if (aclRet == ACL_SUCCESS)
-        aclRet = CreateDeviceTensor((uint8_t *)xVec.data(),
+        aclRet = CreateDeviceTensor(xVec.data(),
                                     xVec.size() * sizeof(ValT), xDev);
     if (aclRet == ACL_SUCCESS)
-        aclRet = CreateDeviceTensor((uint8_t *)yVec.data(),
+        aclRet = CreateDeviceTensor(yVec.data(),
                                     yVec.size() * sizeof(OutT), yDev);
     return aclRet;
 }
@@ -1822,11 +1823,52 @@ static void RunTwoProdRegression(TestStats &stats, aclrtStream stream) {
 // include 位置须在上述定义之后，参照 spmv_test_c64.h / spmv_test_cube.h 先例）
 #include "spmv_test_zero_row.h"
 #include "spmv_test_rne16.h"
+#include "spmv_test_strides.h"
+
+static bool PrintStridesOnlySummary(const TestStats &stats) {
+    const char *stridesOnly = std::getenv("SPARSE_TEST_STRIDES_ONLY");
+    if (!stridesOnly || std::string(stridesOnly) != "1") {
+        return false;
+    }
+    std::cout << "[SpMV stride] total=" << stats.total << " passed=" << stats.passed << " failed=" << stats.failed << "\n";
+    for (const auto &name : stats.failedCases) std::cout << "[FAIL] " << name << "\n";
+    return true;
+}
+
+static int PrintTestSummary(const TestStats &stats, const CheckStats &paramChecks, const CheckStats &leakChecks) {
+    std::cout << "\n========================================\n";
+    std::cout << "              Test Summary\n";
+    std::cout << "========================================\n";
+    std::cout << "Total cases  : " << stats.total << "\n";
+    std::cout << "Passed       : " << stats.passed << "\n";
+    std::cout << "Failed       : " << stats.failed << "\n";
+    if (stats.total > 0) {
+        std::cout << "Pass rate    : " << (100.0 * stats.passed / stats.total) << "%\n";
+    }
+    if (!stats.failedCases.empty()) {
+        std::cout << "----------------------------------------\n";
+        std::cout << "Failed case details:\n";
+        for (const auto &s : stats.failedCases) std::cout << "  - " << s << "\n";
+    }
+    std::cout << "----------------------------------------\n";
+    std::cout << "Invalid-param checks : " << paramChecks.passed << "/" << paramChecks.total
+              << " passed (" << paramChecks.failed << " failed)\n";
+    if (!paramChecks.failedChecks.empty()) {
+        for (const auto &s : paramChecks.failedChecks) std::cout << "  - " << s << "\n";
+    }
+    std::cout << "Resource-leak checks : " << leakChecks.passed << "/" << leakChecks.total
+              << " passed (" << leakChecks.failed << " failed)\n";
+    if (!leakChecks.failedChecks.empty()) {
+        for (const auto &s : leakChecks.failedChecks) std::cout << "  - " << s << "\n";
+    }
+    std::cout << "========================================\n";
+    return stats.failed + paramChecks.failed + leakChecks.failed;
+}
 
 // ===================== main =====================
 
 int main(int32_t /*argc*/, char * /*argv*/[]) {
-    if (!TestSpmvVerification()) {
+    if (!TestSpmvVerification() || !TestSpmvStridePlan()) {
         std::cout << "[FAIL] SpMV host verification regression\n";
         return 1;
     }
@@ -1839,6 +1881,11 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     }
 
     TestStats stats;
+    RunSpmvStrideRegression(stats, stream);
+    if (PrintStridesOnlySummary(stats)) {
+        Finalize(deviceId, stream);
+        return stats.failed == 0 ? 0 : 1;
+    }
     std::cout << "[SpMV] " << (SparseTestFullEnabled() ? "full stress shapes" : "small functional shapes")
               << " (set SPARSE_TEST_PRESMOKE=1 for small shapes)\n";
 
@@ -2355,39 +2402,8 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     TestResourceLeak(stream, leakChecks);
 
     // ====================== 汇总 ======================
-    std::cout << "\n========================================\n";
-    std::cout << "              Test Summary\n";
-    std::cout << "========================================\n";
-    std::cout << "Total cases  : " << stats.total << "\n";
-    std::cout << "Passed       : " << stats.passed << "\n";
-    std::cout << "Failed       : " << stats.failed << "\n";
-    if (stats.total > 0) {
-        std::cout << "Pass rate    : "
-                  << (100.0 * stats.passed / stats.total) << "%\n";
-    }
-    if (!stats.failedCases.empty()) {
-        std::cout << "----------------------------------------\n";
-        std::cout << "Failed case details:\n";
-        for (const auto &s : stats.failedCases) {
-            std::cout << "  - " << s << "\n";
-        }
-    }
-    std::cout << "----------------------------------------\n";
-    std::cout << "Invalid-param checks : " << paramChecks.passed << "/" << paramChecks.total
-              << " passed (" << paramChecks.failed << " failed)\n";
-    if (!paramChecks.failedChecks.empty()) {
-        for (const auto &s : paramChecks.failedChecks)
-            std::cout << "  - " << s << "\n";
-    }
-    std::cout << "Resource-leak checks : " << leakChecks.passed << "/" << leakChecks.total
-              << " passed (" << leakChecks.failed << " failed)\n";
-    if (!leakChecks.failedChecks.empty()) {
-        for (const auto &s : leakChecks.failedChecks)
-            std::cout << "  - " << s << "\n";
-    }
-    std::cout << "========================================\n";
+    const int totalFailed = PrintTestSummary(stats, paramChecks, leakChecks);
 
     Finalize(deviceId, stream);
-    const int totalFailed = stats.failed + paramChecks.failed + leakChecks.failed;
     return (totalFailed == 0) ? 0 : 1;
 }

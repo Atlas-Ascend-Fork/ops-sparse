@@ -21,8 +21,8 @@ y = alpha * op(A) * x + beta * y
 | aclsparseSpMVGetBufferSize | 查询执行所需 workspace 字节数 |
 | aclsparseSpMVPreprocess | 可选预处理：arch22 对 CUBE 算法执行一次最长行探测（rowPtr D2H + 流同步）并缓存到矩阵描述符，其余算法仅参数校验；arch35 对转置路径构建可复用的确定性 CSR-to-CSC 索引 |
 | aclsparseSpMV | 执行稀疏矩阵-稠密向量乘法 y = alpha * op(A) * x + beta * y |
-| aclsparseCsrSetStrides / GetStrides | 设置/获取 CSR rowOffsets、colInd、values 的元素步长（arch35 路径使用） |
-| aclsparseDnVecSetStride / GetStride | 设置/获取稠密向量的元素步长（arch35 路径使用） |
+| aclsparseCsrSetStrides / GetStrides | 设置/获取 CSR rowOffsets、colInd、values 的元素步长（arch22/arch35） |
+| aclsparseDnVecSetStride / GetStride | 设置/获取稠密向量的元素步长（arch22/arch35） |
 
 ## 算子执行接口
 
@@ -325,3 +325,49 @@ ALG2 逐比特确定性尚缺少对应回归用例。算子能力矩阵不等同
 `SpMV950/test_cases/` 还必须执行 200 条 ATK 精度用例、固定 P-01/P-02/P-03 GPU/NPU 性能
 用例及内存对比；报告预热至少 10 次、采样至少 30 次，记录 median/P90、workspace、
 峰值内存和 NPU Dispatch/Profiler 证据。无 CANN/NPU 环境时只可做静态检查，不能宣称验收通过。
+
+### Atlas A2/A3：CSR 与向量元素步长
+
+arch22 支持 `aclsparseCsrSetStrides` 的 rowOffsets/colInd/values 步长及
+`aclsparseDnVecSetStride` 的 X/Y 步长，单位均为对应类型的元素；步长必须为正。
+该路径保留上述全部类型组合、base 0/1、N/T 及 DEFAULT/CSR_ALG1/CSR_ALG2。
+
+五个步长全为 1 时沿用原计算 kernel、原 workspace 大小和原 launch 序列。
+非连续数组在每次 `aclsparseSpMV` 调用时按原生字节打包到连续 workspace，
+复用同一数值 kernel；仅当 Y 非连续时增加一次精确元素 scatter。
+因此该路径有额外搬运 kernel 开销，性能采集应统计公开 API 的完整 kernel 序列。
+搬运不做低精度转换；FP16/BF16 的累加、beta 补偿和最终 RNE 仍由原数值 kernel 完成。
+Y 的 gap、前后 guard 字节不会被写入；beta=0 时不打包或读取原 Y。
+scatter 按真实 Y 地址的物理 64 字节缓存行划分核间所有权，不遍历步长中的物理空洞；
+非自然元素对齐的 Y 使用单核保底。DMA stride 字段不能表达的超大字节间隔采用逐元素搬运，
+保持 64 位地址偏移，避免截断。
+
+非连续布局的 `ACL_SPARSE_SPMV_CSR_ALG_CUBE` 在保留原有 N、base 0、FP32 compute/output、
+FP32/FP16 input 约束之后回退到向量实现，和空输入等不可用 CUBE 布局的回退语义一致。
+该回退不探测、缓存或复用 CUBE 最长行元数据；连续 CUBE 的原路径与限制不变。
+
+非连续 workspace 同时容纳所需连续数组、原转置 double-single 区域及首地址最多 63 字节的
+对齐余量，所有区域按 64 字节对齐。必须按本次 `GetBufferSize` 返回值分配；
+此路径允许 `externalBuffer` 为任意字节偏移地址，无须调用方先对齐。
+外部指针参数没有容量字段，实际分配大小由调用方保证；使用 handle workspace 时会检查容量，
+不足返回 `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`。跨度、指针加法和 workspace 布局溢出返回
+`ACL_SPARSE_STATUS_INVALID_VALUE`。只使用 external/handle workspace，不创建额外的临时设备分配。
+
+arch22 的普通向量路径及非连续 CUBE 回退的 `Preprocess` 只校验元数据，不缓存设备内容。
+同地址更新 rowOffsets、colInd、values、X 或 Y 内容后，下一次执行会重新打包，
+不需要因内容变化重新预处理。改变维度、类型或步长后应重新查询 workspace 大小。
+各搬运和计算 kernel 使用 handle 当前 stream；调用方应保证输入、workspace 在异步任务完成前有效，
+并负责跨 stream 的依赖。Host scalar 向量路径不额外同步或回读设备数据；Device scalar 模式沿用
+既有标量读取/同步约定。对连续 CUBE 而言，原地改变 CSR 行结构仍须按既有约定重新预处理。
+
+验证入口：`SPARSE_TEST_STRIDES_ONLY=1 ./spmv_test` 运行新增步长回归；不设置该变量时继续运行
+原完整 SpMV 测试。步长回归覆盖 11 种类型组合、N/T、base 0/1、五步长单独及混合、
+ALG1/ALG2、beta=0 的 NaN Y、guard/gap、Y 非自然对齐、workspace 字节偏移 1/63、
+同址更新全部五数组、CUBE 回退、宽转置及长度 1 的 `INT64_MAX` 步长。
+其中 Host 布局检查覆盖跨度/地址/对齐加法溢出，设备回归还检查 handle workspace 容量不足的错误码。
+
+非连续且输出非空时，arch22 新打包路径要求 rows/cols 可由 `uint32_t` 表示，
+且 `nnz + indexBase <= INT32_MAX`，以便原数值 tiling 和 I32 CSR 行偏移可表示输入；
+不满足时 query/execute 一致返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+该检查不改变连续路径的既有能力。输出为空时 query 返回 0，执行直接 no-op，不构建打包 plan，
+也不施加上述新增范围限制；nnz=0 但 Y 非空仍执行 `beta * Y`。

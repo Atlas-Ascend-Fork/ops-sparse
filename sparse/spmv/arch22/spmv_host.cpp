@@ -24,6 +24,8 @@
 #include "spmv_cube_tiling.h"
 #include "spmv_tiling_data.h"
 #include "spmv_ub_budget.h"
+#include "spmv_stride_plan.h"
+#include "spmv_stride_kernel.h"
 
 // -------------------------------------------------------------------
 // 前向声明：AscendC 内核启动分发器（定义在 kernels/spmv_kernel.cpp）
@@ -255,11 +257,12 @@ namespace {
      * - complex64 输出：同理按交错 float2，大小 groups*roundUp(2*cols,8)*8；
      * 其余情形（int32 整数原子加）为 0。
      */
-    size_t SpmvWorkspaceSize(aclsparseOperation_t opA, aclsparseConstSpMatDescr_t matA,
-                             aclsparseDnVecDescr_t vecY, aclDataType computeType)
+    bool SpmvWorkspaceSize(aclsparseOperation_t opA, aclsparseConstSpMatDescr_t matA,
+                             aclsparseDnVecDescr_t vecY, aclDataType computeType, size_t &bytes)
     {
+        bytes = 0;
         if (opA != ACL_SPARSE_OP_TRANSPOSE) {
-            return 0;
+            return true;
         }
         auto outType = ToVecInner(vecY)->valueType;
         size_t cols = static_cast<size_t>(ToMatInner(matA)->cols);
@@ -267,7 +270,7 @@ namespace {
                      (outType == ACL_FLOAT || outType == ACL_FLOAT16 || outType == ACL_BF16);
         bool dsC64 = (outType == ACL_COMPLEX64 && computeType == ACL_COMPLEX64);
         if (!dsF32 && !dsC64) {
-            return 0;
+            return true;
         }
         uint32_t coreNum = 1;
         auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
@@ -279,9 +282,12 @@ namespace {
         if (rows > 0 && rows < groups) {
             groups = rows;
         }
-        size_t laneFloats = dsC64 ? 2 * cols : cols;
-        size_t stride = (laneFloats + 7) / 8 * 8;
-        return groups * stride * 2 * sizeof(float);
+        size_t laneFloats = cols, stride = 0;
+        if ((dsC64 && !spmv_stride::Multiply(cols, 2U, laneFloats)) ||
+            !spmv_stride::Add(laneFloats, 7U, stride)) return false;
+        stride = stride / 8U * 8U;
+        return spmv_stride::Multiply(groups, stride, bytes) &&
+               spmv_stride::Multiply(bytes, 2U * sizeof(float), bytes);
     }
 
     /// aclsparseSpMV / aclsparseSpMVGetBufferSize 共同解析出的参数。
@@ -296,6 +302,7 @@ namespace {
         uint64_t yLength;
         /// 是否走 cube 版实现（算法与数据类型均满足要求）
         bool useCube;
+        SpmvStridePlan stridePlan;
     };
 
     /**
@@ -410,7 +417,45 @@ namespace {
         args->valType = valType;
         args->outType = outType;
         args->yLength = yRequired;
-        args->useCube = (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE);
+        // Execute is a no-op for empty output; query and preprocess need no packing or workspace.
+        if (yRequired == 0) {
+            args->stridePlan = SpmvStridePlan{};
+            args->useCube = false;
+            return ACL_SPARSE_STATUS_SUCCESS;
+        }
+        const uint32_t valueBytes = valType == ACL_INT8 ? 1U :
+            (valType == ACL_FLOAT16 || valType == ACL_BF16) ? 2U :
+            valType == ACL_COMPLEX64 ? 8U : 4U;
+        const uint32_t outputBytes = (outType == ACL_FLOAT16 || outType == ACL_BF16) ? 2U :
+            outType == ACL_COMPLEX64 ? 8U : 4U;
+        CHECK_RET(matInner->rows != std::numeric_limits<uint64_t>::max(),
+                  return ACL_SPARSE_STATUS_INVALID_VALUE);
+        const uint64_t lengths[5] = {matInner->rows + 1U, matInner->nnz, matInner->nnz,
+                                     xRequired, yRequired};
+        const int64_t strides[5] = {matInner->ptrStride, matInner->idxStride, matInner->valueStride,
+                                    xInner->stride, yInner->stride};
+        const uint32_t widths[5] = {4U, 4U, valueBytes, valueBytes, outputBytes};
+        const void *pointers[5] = {matInner->ptrs, matInner->idxs, matInner->values,
+                                   xInner->values, yInner->values};
+        bool strided = false;
+        for (unsigned i = 0; i < 5; ++i) {
+            CHECK_RET(spmv_stride::SpanFits(pointers[i], lengths[i], strides[i], widths[i]),
+                      LOG_PRINT("[ERROR] SpMV: invalid or overflowing stride/address for array %u\n", i);
+                      return ACL_SPARSE_STATUS_INVALID_VALUE);
+            strided |= strides[i] != 1;
+        }
+        CHECK_RET(!strided || spmv_stride::DimensionsFit(matInner->rows, matInner->cols, matInner->nnz,
+                      matInner->baseType == ACL_SPARSE_INDEX_BASE_ONE ? 1U : 0U),
+                  LOG_PRINT("[ERROR] SpMV: strided dimensions require uint32 rows/cols and int32 nnz+indexBase\n");
+                  return ACL_SPARSE_STATUS_INVALID_VALUE);
+        size_t vectorBytes = 0;
+        CHECK_RET(SpmvWorkspaceSize(opA, matA, vecY, computeType, vectorBytes) &&
+                      spmv_stride::MakePlan(lengths, strides, widths, vectorBytes, args->stridePlan),
+                  LOG_PRINT("[ERROR] SpMV: workspace layout overflow\n");
+                  return ACL_SPARSE_STATUS_INVALID_VALUE);
+        // CUBE already falls back to vector for unavailable layouts (including empty CSR).
+        // Keep its public dtype/op/base constraints above, but avoid probing/caching strided rows.
+        args->useCube = (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE) && !strided;
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
@@ -441,6 +486,8 @@ namespace {
     aclsparseStatus_t SelectSpmvWorkspace(aclsparseContext *h, void *externalBuffer,
                                           size_t requiredBytes, void **outWorkspace) {
         if (externalBuffer != nullptr) {
+            CHECK_RET(spmv_stride::SpanFits(externalBuffer, requiredBytes, 1, 1),
+                      return ACL_SPARSE_STATUS_INVALID_VALUE);
             *outWorkspace = externalBuffer;
             return ACL_SPARSE_STATUS_SUCCESS;
         }
@@ -458,7 +505,32 @@ namespace {
                   LOG_PRINT("[ERROR] aclsparseSpMV: handle has no workspace\n");
                   return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES);
 
+        CHECK_RET(spmv_stride::SpanFits(workspace, requiredBytes, 1, 1),
+                  return ACL_SPARSE_STATUS_INVALID_VALUE);
         *outWorkspace = workspace;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    aclsparseStatus_t PrepareSpmvVectorWorkspace(aclsparseContext *h, void *externalBuffer,
+                                                 const SpmvStridePlan &plan, void *&vectorWorkspace,
+                                                 void *&strideWorkspace, void **mapped[5]) {
+        const size_t wsSize = static_cast<size_t>(plan.totalBytes);
+        if (wsSize > 0) {
+            const aclsparseStatus_t status = SelectSpmvWorkspace(h, externalBuffer, wsSize, &vectorWorkspace);
+            CHECK_RET(status == ACL_SPARSE_STATUS_SUCCESS, return status);
+        }
+        if (!plan.active) {
+            return ACL_SPARSE_STATUS_SUCCESS;
+        }
+        auto address = reinterpret_cast<uintptr_t>(vectorWorkspace);
+        auto padding = (64U - (address & 63U)) & 63U;
+        strideWorkspace = static_cast<uint8_t *>(vectorWorkspace) + padding;
+        vectorWorkspace = strideWorkspace;
+        for (unsigned i = 0; i < 5; ++i) {
+            if (plan.copies[i].enabled) {
+                *mapped[i] = static_cast<uint8_t *>(strideWorkspace) + plan.copies[i].offset;
+            }
+        }
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
@@ -505,7 +577,7 @@ extern "C" {
 
         // 向量版：转置 + f32 计算（f32/f16/bf16 输出）及转置 + c64 输出需要
         // double-single 平面 workspace，其余情形为 0
-        *bufferSize = SpmvWorkspaceSize(opA, matA, vecY, computeType);
+        *bufferSize = static_cast<size_t>(args.stridePlan.totalBytes);
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
@@ -624,6 +696,9 @@ extern "C" {
         void *csrRowPtrDevice = matInner->ptrs;
         void *csrColIndDevice = matInner->idxs;
         void *csrValDevice = matInner->values;
+        void *xVecDevice = xInner->values;
+        void *yVecDevice = yInner->values;
+        void *strideWorkspace = nullptr;
 
         // ==================== 算法分发：cube 版 tiling / workspace ====================
         // tiling 全部在 host 侧算好，随 launch 按值传给 kernel；workspace 优先取
@@ -690,11 +765,11 @@ extern "C" {
             // 输出需要 double-single 平面 workspace；externalBuffer 为空时回退到
             // 句柄 workspace（与 cube 路径同一 SelectSpmvWorkspace 口径）。
             // DS 方案每核整平面覆写（空载核写零平面），不依赖清零，无需 memset。
-            size_t wsSize = SpmvWorkspaceSize(opA, matA, vecY, computeType);
-            if (wsSize > 0) {
-                aclsparseStatus_t wsSt = SelectSpmvWorkspace(h, externalBuffer, wsSize, &vectorWorkspace);
-                CHECK_RET(wsSt == ACL_SPARSE_STATUS_SUCCESS, return wsSt);
-            }
+            void **mapped[5] = {&csrRowPtrDevice, &csrColIndDevice, &csrValDevice,
+                                 &xVecDevice, &yVecDevice};
+            aclsparseStatus_t wsSt = PrepareSpmvVectorWorkspace(h, externalBuffer, args.stridePlan,
+                                                               vectorWorkspace, strideWorkspace, mapped);
+            CHECK_RET(wsSt == ACL_SPARSE_STATUS_SUCCESS, return wsSt);
             // 向量版 kernel 在 UB 内按 SPMV_TILE_ELEMS 固定分块循环处理整行，
             // 行长不受 UB 容量限制，无需 rowPtr 回读与同步。
         }
@@ -733,14 +808,25 @@ extern "C" {
                                   static_cast<const void *>(&betaInt) :
                                   static_cast<const void *>(&betaC64);
 
+        if (args.stridePlan.active) {
+            spmv_stride_pack_do(static_cast<GM_ADDR>(matInner->ptrs), static_cast<GM_ADDR>(matInner->idxs),
+                static_cast<GM_ADDR>(matInner->values), static_cast<GM_ADDR>(xInner->values),
+                static_cast<GM_ADDR>(yInner->values), static_cast<GM_ADDR>(strideWorkspace),
+                args.stridePlan, !betaIsZero, blockDim, stream);
+        }
+
         spmv_kernel_do(
             static_cast<GM_ADDR>(csrRowPtrDevice), static_cast<GM_ADDR>(csrColIndDevice),
-            static_cast<GM_ADDR>(csrValDevice), static_cast<GM_ADDR>(xInner->values),
-            static_cast<GM_ADDR>(yInner->values), static_cast<GM_ADDR>(vectorWorkspace),
+            static_cast<GM_ADDR>(csrValDevice), static_cast<GM_ADDR>(xVecDevice),
+            static_cast<GM_ADDR>(yVecDevice), static_cast<GM_ADDR>(vectorWorkspace),
             tilingHost,
             alphaPtr, betaPtr,
             cType, vType, oType, trans, algType, blockDim,
             static_cast<GM_ADDR>(cubeWorkspace), cubeTiling, cubeBlocks, stream);
+        if (args.stridePlan.copies[4].enabled) {
+            spmv_stride_scatter_do(static_cast<GM_ADDR>(strideWorkspace), static_cast<GM_ADDR>(yInner->values),
+                args.stridePlan.copies[4], blockDim, stream);
+        }
 
         return ACL_SPARSE_STATUS_SUCCESS;
     }
