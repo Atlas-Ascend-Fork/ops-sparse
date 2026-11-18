@@ -10,16 +10,20 @@
 
 """Offline checks for the public builder's native-resource exit callbacks."""
 
-from contextlib import contextmanager
 import importlib.util
 import logging
-from pathlib import Path
+import os
+import platform
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import Mock, patch
-
 
 BUILDER_SOURCE = (Path(__file__).resolve().parents[3] / "torch_extension" /
                   "cann_ops_sparse" / "op_builder" / "builder.py")
@@ -105,6 +109,148 @@ class OpBuilderLifecycleTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["HANDLES_RELEASED", "BACKEND_SHUTDOWN"])
+
+
+def run_host_command(command, directory):
+    result = subprocess.run(command, cwd=directory, capture_output=True, text=True,
+                            check=False, timeout=60)
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
+
+
+def create_host_libraries(directory, cxx, ar):
+    # Harmless fixture archives stand in only for linkable library files;
+    # no vendor API or device operation is implemented or invoked.
+    (directory / "empty.cpp").write_text("void fixture_unused() {}\n", encoding="utf-8")
+    run_host_command([cxx, "-c", "empty.cpp", "-o", "empty.o"], directory)
+    for name in ("ops_sparse", "torch_npu", "c_sec"):
+        run_host_command([ar, "rcs", f"lib{name}.a", "empty.o"], directory)
+
+
+def builder_linker_flags(directory):
+    # Observe flags at the public load boundary; keep source/path discovery
+    # and the production builder's flag construction active.
+    with fake_builder_environment(types.SimpleNamespace()) as (builder, jit_load), \
+            patch.dict(os.environ, {"OPS_SPARSE_LIB_DIR": str(directory),
+                                    "ASCEND_HOME_PATH": "/fake/cann"}):
+        builder("link-path-probe").load()
+        return jit_load.call_args.kwargs["extra_ldflags"]
+
+
+def builder_linker_flags_for_platform(directory, platform_name):
+    # Observe platform-specific flags at the same public load boundary: os.name
+    # is patched so load() -> _get_linker_flags selects the toolchain flavour,
+    # without the test reaching into protected members. Path discovery still
+    # runs (isdir/isfile are mocked), so the configured directory stays first.
+    with fake_builder_environment(types.SimpleNamespace()) as (builder, jit_load), \
+            patch.dict(os.environ, {"OPS_SPARSE_LIB_DIR": str(directory),
+                                    "ASCEND_HOME_PATH": "/fake/cann"}), \
+            patch.object(os, "name", platform_name):
+        builder("link-path-probe").load()
+        return jit_load.call_args.kwargs["extra_ldflags"]
+
+
+class OpBuilderLinkerPathTest(unittest.TestCase):
+    def test_library_flags_round_trip_ninja_and_shell(self):
+        for directory in ("/plain/lib", "/lib with spaces", "/single'quote", "/cash$directory"):
+            with self.subTest(directory=directory):
+                flags = builder_linker_flags(directory)
+                decoded = shlex.split(" ".join(flags).replace("$$", "$"))
+                self.assertEqual(decoded[:2], [f"-L{directory}", f"-Wl,-rpath,{directory}"])
+                self.assertEqual(decoded[-3:], ["-lops_sparse", "-ltorch_npu", "-lc_sec"])
+
+    def test_plain_flags_preserve_link_order(self):
+        arch_root = f"/fake/cann/{platform.machine()}-linux"
+        self.assertEqual(builder_linker_flags("/first"), [
+            "-L/first", "-Wl,-rpath,/first",
+            "-L/fake/torch_npu/lib", "-Wl,-rpath,/fake/torch_npu/lib",
+            "-L/fake/cann/lib64", "-Wl,-rpath,/fake/cann/lib64",
+            f"-L{arch_root}/lib64", f"-Wl,-rpath,{arch_root}/lib64",
+            "-lops_sparse", "-ltorch_npu", "-lc_sec",
+        ])
+
+    def test_windows_flags_use_libpath_and_dot_lib(self):
+        # link.exe has no -L/-rpath: it takes /LIBPATH: and <name>.lib, and POSIX
+        # single quotes would reach it verbatim, so the flags must differ.
+        for directory in ("C:\\plain\\lib", "C:\\lib with spaces", "C:\\cash$directory"):
+            with self.subTest(directory=directory):
+                flags = builder_linker_flags_for_platform(directory, "nt")
+                self.assertEqual(flags[0], '"/LIBPATH:{}"'.format(directory.replace("$", "$$")))
+                self.assertEqual(flags[-3:], ["ops_sparse.lib", "torch_npu.lib", "c_sec.lib"])
+                joined = " ".join(flags)
+                self.assertNotIn("'", joined)
+                self.assertNotIn("-Wl,-rpath", joined)
+                self.assertNotIn("-lops_sparse", joined)
+
+    def test_posix_flags_unchanged_by_platform_split(self):
+        flags = builder_linker_flags_for_platform("/plain/lib", "posix")
+        self.assertEqual(flags[:2], ["-L/plain/lib", "-Wl,-rpath,/plain/lib"])
+        self.assertEqual(flags[-3:], ["-lops_sparse", "-ltorch_npu", "-lc_sec"])
+
+    def test_get_linker_flags_follows_os_name(self):
+        nt_flags = builder_linker_flags_for_platform("/fake/lib", "nt")
+        self.assertEqual(nt_flags[0], '"/LIBPATH:/fake/lib"')
+        self.assertEqual(nt_flags[-1], "c_sec.lib")
+        posix_flags = builder_linker_flags_for_platform("/fake/lib", "posix")
+        self.assertEqual(posix_flags[0], "-L/fake/lib")
+
+    def test_real_ninja_link_preserves_library_directory(self):
+        tools = [shutil.which(name) for name in ("c++", "ar", "ninja")]
+        if not all(tools):
+            self.skipTest("Host integration test requires c++, ar and ninja")
+        cxx, ar, ninja = tools
+        for name in ("plain", "lib with spaces", "single'quote", "cash$directory"):
+            with self.subTest(directory=name), tempfile.TemporaryDirectory() as temporary:
+                self.link_fixture(Path(temporary), name, cxx, ar, ninja)
+
+    def link_fixture(self, root, name, cxx, ar, ninja):
+        libraries = root / name
+        libraries.mkdir()
+        create_host_libraries(libraries, cxx, ar)
+        (root / "main.cpp").write_text("int main() {return 0;}\n", encoding="utf-8")
+        flags = " ".join(builder_linker_flags(libraries))
+        # Match Torch's POSIX Ninja variable/command boundary. All path names
+        # and commands here are controlled Host test fixtures.
+        (root / "build.ninja").write_text(
+            f"ldflags = {flags}\nrule link\n"
+            f"  command = {shlex.quote(cxx)} main.cpp -o program $ldflags\n"
+            "build program: link main.cpp\n", encoding="utf-8",
+        )
+        run_host_command([ninja, "-f", "build.ninja"], root)
+        self.assertTrue((root / "program").is_file())
+
+    def test_real_torch_loader_preserves_linker_and_include_paths(self):
+        tools = [shutil.which(name) for name in ("c++", "ar", "ninja")]
+        if not all(tools):
+            self.skipTest("Host integration test requires c++, ar and ninja")
+        cxx, ar, _ = tools
+        for name in ("plain", "lib with spaces", "single'quote", "cash$directory"):
+            with self.subTest(directory=name), tempfile.TemporaryDirectory() as temporary:
+                self.torch_link_fixture(Path(temporary), name, cxx, ar)
+
+    def torch_link_fixture(self, root, name, cxx, ar):
+        from torch.utils.cpp_extension import load
+
+        libraries = root / name
+        libraries.mkdir()
+        create_host_libraries(libraries, cxx, ar)
+        headers = root / "include with spaces and 'quote"
+        headers.mkdir()
+        (headers / "fixture.h").write_text("constexpr int fixture_value = 0;\n", encoding="utf-8")
+        source = root / "main.cpp"
+        source.write_text('#include "fixture.h"\nint main() {return fixture_value;}\n', encoding="utf-8")
+        build = root / "build"
+        build.mkdir()
+        # Exercise the real Torch loader/Ninja writer with unchanged raw
+        # include paths. Torch already quotes POSIX include arguments itself.
+        executable = load(
+            name="ops_sparse_host_link_probe", sources=[str(source)],
+            extra_include_paths=[str(headers)],
+            extra_ldflags=builder_linker_flags(libraries),
+            build_directory=str(build), is_python_module=False,
+            is_standalone=True, with_cuda=False, verbose=False,
+        )
+        run_host_command([executable], root)
 
 
 if __name__ == "__main__":

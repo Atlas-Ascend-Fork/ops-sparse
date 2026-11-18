@@ -16,15 +16,19 @@ Native sources are added with their corresponding wrapper PRs.
 import atexit
 import os
 import platform
+import shlex
 import threading
-from importlib.util import find_spec
 from abc import ABC, abstractmethod
+from importlib.util import find_spec
 from typing import List
 
 from torch.utils.cpp_extension import load
 
-
 _LOAD_LOCK = threading.Lock()
+
+# Link-time dependencies of the JIT wrapper: the package itself, the torch_npu
+# runtime and securec (wrappers call memcpy_s and friends directly).
+_LINK_LIBRARIES = ("ops_sparse", "torch_npu", "c_sec")
 
 
 class OpBuilder(ABC):
@@ -42,14 +46,49 @@ class OpBuilder(ABC):
         destination.extend(path for path in candidates if os.path.isdir(path))
 
     @staticmethod
-    def _get_linker_flags(library_dirs) -> List[str]:
+    def _quote_ldflag(flag: str, platform_name: str) -> str:
+        """Quote one linker flag for the Ninja-generated command line.
+
+        Ninja expands ``$`` before the shell or ``link.exe`` sees the flag, so
+        dollars are doubled in both flavours. POSIX shells take ``shlex.quote``;
+        Windows ``link.exe`` takes double quotes, because POSIX single quotes
+        would reach it verbatim and the directory would not be found.
+        """
+        if platform_name == "nt":
+            return '"{}"'.format(flag.replace("$", "$$"))
+        return shlex.quote(flag).replace("$", "$$")
+
+    @staticmethod
+    def _linker_flags_for(platform_name: str, library_dirs) -> List[str]:
+        """Build linker flags for ``posix`` or ``nt`` from the library directories.
+
+        POSIX emits ``-L`` plus ``-Wl,-rpath,`` so the ELF loader finds the
+        shared objects. Windows has no rpath: ``link.exe`` receives
+        ``/LIBPATH:`` and ``<name>.lib``, and the loader resolves
+        ``ops_sparse.dll`` and the CANN DLLs through ``PATH`` (or beside the
+        extension), so anything that relocates the wheel must keep those DLLs
+        reachable.
+        """
         flags = []
         for directory in library_dirs:
-            flags.extend(["-L{}".format(directory), "-Wl,-rpath,{}".format(directory)])
+            if platform_name == "nt":
+                flags.append(OpBuilder._quote_ldflag("/LIBPATH:{}".format(directory), platform_name))
+            else:
+                for flag in ("-L{}".format(directory), "-Wl,-rpath,{}".format(directory)):
+                    flags.append(OpBuilder._quote_ldflag(flag, platform_name))
         # Wrappers call securec functions directly (for example memcpy_s in
         # SpGEMM).  Declare the dependency instead of relying on another loaded
         # CANN library to expose its symbols transitively.
-        return flags + ["-lops_sparse", "-ltorch_npu", "-lc_sec"]
+        if platform_name == "nt":
+            flags.extend("{}.lib".format(name) for name in _LINK_LIBRARIES)
+        else:
+            flags.extend("-l{}".format(name) for name in _LINK_LIBRARIES)
+        return flags
+
+    @staticmethod
+    def _get_linker_flags(library_dirs) -> List[str]:
+        """Linker flags for the toolchain of this platform; see ``_linker_flags_for``."""
+        return OpBuilder._linker_flags_for(os.name, library_dirs)
 
     @abstractmethod
     def sources(self) -> List[str]:
