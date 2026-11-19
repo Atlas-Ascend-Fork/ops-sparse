@@ -952,7 +952,7 @@ aclsparseStatus_t aclsparseSpSV_updateMatrix(
     auto *h = spsv::ToInternalHandle(handle);
     aclrtStream useStream = h->stream;
 
-    SpsvTilingData tiling;
+    SpsvTilingData tiling{};
     InitUpdateTilingData(spsvDescr, tiling);
 
     uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
