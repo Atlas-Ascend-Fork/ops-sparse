@@ -364,7 +364,7 @@ static aclsparseStatus_t LaunchGtsv2StridedBatchKernel(
                 m, kMaxMForUBPath);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    Gtsv2StridedBatchTilingData tiling;
+    Gtsv2StridedBatchTilingData tiling{};
     SetupTilingData(tiling, m, batchCount, batchStride, params, useGmWorkspace);
     LogStridedBatchTiling(tiling, params);
 
