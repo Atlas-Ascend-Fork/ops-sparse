@@ -485,7 +485,7 @@ aclsparseStatus_t aclsparseSparseToDense(
 
     // ①③ 执行前置链（CheckMeta → 核数 → FillTiling；见 PrepareExec）
     uint32_t coreNum = 0;
-    Sparse2DenseTilingData tiling;
+    Sparse2DenseTilingData tiling{};
     aclsparseStatus_t stPre = PrepareExec(&viewA, &viewB, static_cast<int32_t>(alg), stream, coreNum, tiling);
     if (stPre != ACL_SPARSE_STATUS_SUCCESS) {
         return stPre;
