@@ -129,7 +129,7 @@ static aclsparseStatus_t ComputeTilingAndLaunch(
     int32_t totalUnits = (dirA == ACL_SPARSE_DIRECTION_ROW) ? m : n;
     int32_t unitSize = (dirA == ACL_SPARSE_DIRECTION_ROW) ? n : m;
 
-    NnzTilingData tiling;
+    NnzTilingData tiling{};
     tiling.lda = static_cast<int32_t>(lda);
     tiling.dirA = static_cast<int32_t>(dirA);
     tiling.totalUnits = totalUnits;
