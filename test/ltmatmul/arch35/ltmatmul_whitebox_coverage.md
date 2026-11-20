@@ -70,7 +70,7 @@
 
 | # | 分支 | 条件 | 覆盖用例 | 状态 |
 |---|------|------|----------|------|
-| B19 | GeLU Exp clamp 触发 | `Mins(geluTemp, geluTemp, 20.0f, count)` — 输入值 |x|>6 时 z>20 触发 clamp | **402**(range[-10,10]), **403**(range[-10,10]), **404**(range[-10,10]), **410**(range[-5,5]), **413**(range[-10,10]) | 覆盖 |
+| B19 | GeLU Exp clamp 触发 | `Mins(geluTemp, geluTemp, 20.0f, count)` — 输入值 \|x\|>6 时 z>20 触发 clamp | **402**(range[-10,10]), **403**(range[-10,10]), **404**(range[-10,10]), **410**(range[-5,5]), **413**(range[-10,10]) | 覆盖 |
 
 > case 402 (无 bias) 验证 GeLU clamp 在无 bias 时正确工作。
 
