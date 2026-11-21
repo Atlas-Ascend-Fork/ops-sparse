@@ -449,7 +449,7 @@ static Gebsr2GebscLaunchParams ComputeGebsr2GebscLaunchParams(
     aclsparseDirection_t dirA,
     uint32_t aivCoreNum)
 {
-    Gebsr2GebscLaunchParams p;
+    Gebsr2GebscLaunchParams p{};
     p.numBlocks = ComputeStripeCount(nnzb, nb, aivCoreNum);
     p.stripeSize = static_cast<int32_t>(
         CeilDiv<uint32_t>(static_cast<uint32_t>(nnzb), p.numBlocks));

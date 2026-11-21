@@ -684,7 +684,7 @@ __int128 AlignWorkspace(__int128 value)
 
 WsOffsets InitializeWsOffsets(int64_t m, int32_t blockDim)
 {
-    WsOffsets o;
+    WsOffsets o{};
     o.tilingOff = SPMM_WS_HEADER_BYTES;
     o.reorderOff = spmm_align_up<SPMM_WS_ALIGN>(
         o.tilingOff + static_cast<int64_t>(sizeof(SpmmTilingWireV1)));
@@ -742,7 +742,7 @@ ComplexCubeWorkspaceSizing BuildComplexCubeWorkspaceSizing(
             (m + kComplexCubeReserveRowsPerGroup - 1) /
                 kComplexCubeReserveRowsPerGroup);
     const int64_t paddedRows = groupCount * SPMM_CUBE_MIN_ROWS;
-    ComplexCubeWorkspaceSizing sizing;
+    ComplexCubeWorkspaceSizing sizing{};
     sizing.metaEnd = static_cast<__int128>(cubeMetaOff) +
         static_cast<__int128>(sizeof(SpmmCubeGroupMeta)) * groupCount;
     sizing.rowIdsOff = AlignWorkspace(sizing.metaEnd);

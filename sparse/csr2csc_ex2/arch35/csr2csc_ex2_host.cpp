@@ -474,7 +474,7 @@ static Csr2CscEx2LaunchParams ComputeCsr2cscEx2LaunchParams(
     aclDataType valType, aclsparseAction_t copyValues,
     uint32_t aivCoreNum)
 {
-    Csr2CscEx2LaunchParams p;
+    Csr2CscEx2LaunchParams p{};
     p.numBlocks = ComputeStripeCount(nnz, n, aivCoreNum);
     p.stripeSize = static_cast<int32_t>(
         CeilDiv<uint32_t>(static_cast<uint32_t>(nnz), p.numBlocks));
