@@ -349,7 +349,7 @@ static aclsparseStatus_t LaunchGtsv2StridedBatchKernel(
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
 
-    Gtsv2LaunchParams params;
+    Gtsv2LaunchParams params{};
     aclsparseStatus_t calcSt = ComputeLaunchParams(m, batchCount, params);
     if (calcSt != ACL_SPARSE_STATUS_SUCCESS) {
         return calcSt;
