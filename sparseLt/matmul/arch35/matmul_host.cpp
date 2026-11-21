@@ -951,7 +951,7 @@ aclsparseStatus_t spltMatmulRunInternal(
         return st;
     }
 
-    MatmulLaunchArgs args;
+    MatmulLaunchArgs args{};
     st = prepare_matmul_pointers(md, baseTd, alpha, beta, matA, matB, matC, matD, workspace,
                                  stream, args);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {

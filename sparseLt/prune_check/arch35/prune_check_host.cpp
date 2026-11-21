@@ -493,7 +493,7 @@ extern "C" aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
     int* d_valid,
     aclrtStream stream)
 {
-    PruneCheckParams params;
+    PruneCheckParams params{};
     aclsparseStatus_t status = validate_prune_check_params(handle, matmulDescr, d_in, d_valid,
                                                            params);
     if (status != ACL_SPARSE_STATUS_SUCCESS) {

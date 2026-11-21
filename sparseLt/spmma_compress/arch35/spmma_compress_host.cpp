@@ -329,7 +329,7 @@ extern "C" aclsparseStatus_t aclsparseLtSpMMACompressedSize(const aclsparseLtHan
     if (compressedSize == nullptr || compressBufferSize == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    CompressParams params;
+    CompressParams params{};
     const auto status = ValidateSpMmaCompressParams(plan, params);
     if (status != ACL_SPARSE_STATUS_SUCCESS) {
         return status;
@@ -347,7 +347,7 @@ extern "C" aclsparseStatus_t aclsparseLtSpMMACompress(const aclsparseLtHandle_t*
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
     }
     (void)d_compressed_buffer;
-    CompressParams params;
+    CompressParams params{};
     auto status = ValidateSpMmaCompressParams(plan, params);
     if (status == ACL_SPARSE_STATUS_SUCCESS) {
         status = ValidateBuffers(d_dense, d_compressed, params);

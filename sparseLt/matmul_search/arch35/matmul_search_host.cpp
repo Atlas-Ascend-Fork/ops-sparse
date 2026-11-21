@@ -708,7 +708,7 @@ extern "C" aclsparseStatus_t aclsparseLtMatmulSearch(
     MatmulTimingArgs ta = {handle, alpha, matA, matB, beta, matC, matD, workspace,
                            streams, numStreams, stream0, searchIterations};
 
-    SearchSnapshot snap;
+    SearchSnapshot snap{};
     SavePlanState(p, snap);
 
     CandidateList cands;
