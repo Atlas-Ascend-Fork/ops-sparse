@@ -193,6 +193,11 @@
 | [aclsparseCubeSpmmGetBufferSize](../../sparse/cube_spmm/README.md#aclsparsecubespmmgetbuffersize) | 查询 CubeSpMM 所需工作区大小 |
 | [aclsparseCubeSpmm](../../sparse/cube_spmm/README.md#aclsparsecubespmm) | 执行 CubeSpMM（Cube 加速稀疏-稠密矩阵乘） |
 | [aclsparseCubeSpmmPadDenseMatrixB](../../sparse/cube_spmm/README.md#aclsparsecubespmmpaddensematrixb) | 按 CubeSpMM 布局要求补齐稠密 B 矩阵 |
+| [aclsparseCubeSpmm1dCreatePlan](#aclsparsecubespmm1dcreateplan) | 从 Host vector-CSR 准备 CubeSpMM 1D 计划（仅 A2/A3，arch22） |
+| [aclsparseCubeSpmm1dCreateCsrPlan](#aclsparsecubespmm1dcreatecsrplan) | 从 Host 标准 CSR 转换并准备 CubeSpMM 1D 计划（仅 A2/A3，arch22） |
+| [aclsparseCubeSpmm1dGetPlanInfo](#aclsparsecubespmm1dgetplaninfo) | 查询 CubeSpMM 1D 的逻辑/补齐尺寸、配置和内存需求（仅 arch22） |
+| [aclsparseCubeSpmm1dExecute](#aclsparsecubespmm1dexecute) | 异步计算 FP16 A/B、FP32 输出的 C=A×B，执行前清零 C（仅 arch22） |
+| [aclsparseCubeSpmm1dDestroyPlan](#aclsparsecubespmm1ddestroyplan) | 释放 CubeSpMM 1D 计划及其持有的 A，不等待 stream（仅 arch22） |
 | [aclsparseXcoosort_bufferSizeExt](../../sparse/coosort/README.md#aclsparsexcoosort_buffersizeext) | 查询 COO 排序所需工作区大小 |
 | [aclsparseXcoosortByRow](../../sparse/coosort/README.md#aclsparsexcoosortbyrow) | COO 坐标按行稳定排序 |
 | [aclsparseXcoosortByColumn](../../sparse/coosort/README.md#aclsparsexcoosortbycolumn) | COO 坐标按列稳定排序 |
@@ -2048,6 +2053,100 @@ aclsparseStatus_t aclsparseSpMM(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - 其他值：失败
+
+---
+
+### aclsparseCubeSpmm1dCreatePlan
+
+```c
+aclsparseStatus_t aclsparseCubeSpmm1dCreatePlan(
+    aclsparseHandle_t handle, int32_t m, int32_t n, int32_t k,
+    const int32_t *hostOffsets, size_t offsetCount,
+    const int32_t *hostColumns, const uint16_t *hostValues, size_t vectors,
+    const aclsparseCubeSpmm1dOptions *options, aclsparseCubeSpmm1dPlan_t *plan);
+```
+
+**功能**：从 Host 上 d=16 的 vector-CSR 数组创建可复用计划，复制并上传 A。
+`m` 必须为 16 的倍数；行块指针长度为 `m/16+1`，每块列索引严格递增，
+数值为 `16*vectors` 个有限 FP16 位模式。`plan` 为 Host 输出参数，调用前 `*plan` 必须为空。
+
+**产品支持**：Atlas A2/A3，`arch22`。仅在 Ascend910B3 上完成板测；
+950PR/950DT（`arch35`）及其他无对应实现的构建不编译或导出本接口族。
+以下四个接口采用相同产品边界。
+
+`options == NULL` 使用自适应选择；非空时须正确设置 `structSize`、`tilingKey`、
+`reserved` 和 `workspaceLimitBytes`。准备阶段可分配和上传设备数据，A 变化后需重新准备。
+完整的参数、选项、限制与返回值见
+[算子接口说明](../../sparse/cube_spmm_1d/README.md#aclsparsecubespmm1dcreateplan)。
+
+---
+
+### aclsparseCubeSpmm1dCreateCsrPlan
+
+```c
+aclsparseStatus_t aclsparseCubeSpmm1dCreateCsrPlan(
+    aclsparseHandle_t handle, int32_t m, int32_t n, int32_t k,
+    const int64_t *hostOffsets, size_t offsetCount,
+    const int64_t *hostColumns, const uint16_t *hostValues, size_t nnz,
+    const aclsparseCubeSpmm1dOptions *options, aclsparseCubeSpmm1dPlan_t *plan);
+```
+
+**功能**：从 Host 标准 CSR 转换并准备同一 CubeSpMM 1D 计划。索引从 0 开始，
+行指针为 `int64_t[m+1]`，列索引为 `int64_t[nnz]`，数值为有限 FP16 位模式。
+支持无序列、重复项、显式零和空行，将 M 补齐到 16 的倍数。
+
+重复项按输入顺序以 FP64 求和后以 RNE 重新量化为 FP16，再去零并转换为 vector-CSR；
+重新量化可能与逐项 CSR 乘加产生不同舍入结果，不能视为对所有重复项的无损转换。
+输入数组在准备期间被复制；A 固定，更新 A 需重新创建计划。参数及返回值见
+[CSR 接口说明](../../sparse/cube_spmm_1d/README.md#aclsparsecubespmm1dcreatecsrplan)。
+
+---
+
+### aclsparseCubeSpmm1dGetPlanInfo
+
+```c
+aclsparseStatus_t aclsparseCubeSpmm1dGetPlanInfo(
+    aclsparseCubeSpmm1dPlan_t plan, aclsparseCubeSpmm1dPlanInfo *info);
+```
+
+**功能**：将有效计划的信息写入非空 Host `info`，包括逻辑 M/N/K、`paddedM`、
+`paddedN`、配置 key、设备/核数、vector 数和 B/C/workspace/A 的设备字节数。
+调用者必须按查询结果分配缓冲区，不以逻辑尺寸代替物理容量。字段及返回值见
+[计划查询说明](../../sparse/cube_spmm_1d/README.md#aclsparsecubespmm1dgetplaninfo)。
+
+---
+
+### aclsparseCubeSpmm1dExecute
+
+```c
+aclsparseStatus_t aclsparseCubeSpmm1dExecute(
+    aclsparseHandle_t handle, aclsparseCubeSpmm1dPlan_t plan,
+    const void *b, size_t bBytes, void *c, size_t cBytes,
+    void *workspace, size_t workspaceBytes);
+```
+
+**功能**：在 handle 的 stream 上先清零物理 C，再异步提交 `C=A×B`；
+只支持有限 FP16 A/B、FP32 C，不提供转置、alpha/beta 缩放或 batch 语义。
+
+- B 为 Device 行主序 `[K,paddedN]`，尾列补零；C 为 Device 列主序 `[paddedM,paddedN]`。
+- B/C/workspace 均须非空、32 字节对齐，位于准备时的设备/上下文且互不重叠；容量按字节传入。
+- 执行不进行设备分配或张量 H2D/D2H。调用者须同步 stream 检查异步错误，并保证计划和所有缓冲区在工作完成前存活。
+
+精确的容量、布局和生命周期约束及返回值见
+[执行接口说明](../../sparse/cube_spmm_1d/README.md#aclsparsecubespmm1dexecute)。
+
+---
+
+### aclsparseCubeSpmm1dDestroyPlan
+
+```c
+aclsparseStatus_t aclsparseCubeSpmm1dDestroyPlan(aclsparseCubeSpmm1dPlan_t plan);
+```
+
+**功能**：释放计划和它持有的设备 A，不释放调用者的 B/C/workspace，也不等待 stream。
+调用者必须先完成所有使用该计划的执行，并在创建计划的上下文中销毁。
+空计划返回 `ACL_SPARSE_STATUS_SUCCESS`。详细约束与返回值见
+[计划销毁说明](../../sparse/cube_spmm_1d/README.md#aclsparsecubespmm1ddestroyplan)。
 
 ---
 

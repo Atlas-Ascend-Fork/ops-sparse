@@ -1222,6 +1222,67 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
                                 const void* beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
                                 aclsparseSpMMAlg_t alg, void* buffer);
 
+
+/* Cube SpMM 1D: finite FP16 inputs, FP32 C=A*B, d=16. No transpose,
+ * alpha/beta or batching. A is copied at preparation; prepare again to update A.
+ * Prepare calls consume HOST arrays and may allocate/copy. Execute only queues
+ * work on the handle stream: retain plan/B/C/workspace until it completes. */
+struct aclsparseCubeSpmm1dPlan;
+typedef struct aclsparseCubeSpmm1dPlan* aclsparseCubeSpmm1dPlan_t;
+
+typedef struct aclsparseCubeSpmm1dOptions {
+    size_t structSize;
+    int32_t tilingKey;          /* -1: adaptive selection; otherwise an explicit compiled key. */
+    uint32_t reserved;          /* Must be zero. */
+    size_t workspaceLimitBytes; /* Zero: no additional caller limit. */
+} aclsparseCubeSpmm1dOptions;
+
+typedef struct aclsparseCubeSpmm1dPlanInfo {
+    int32_t m, n, k, paddedM, paddedN;
+    int32_t tilingKey, blockDim, deviceId;
+    int64_t vectors;
+    size_t bBytes, cBytes, workspaceBytes, persistentABytes;
+} aclsparseCubeSpmm1dPlanInfo;
+
+/* Native vector-CSR. m must be divisible by 16; offsets length m/16+1,
+ * columns length vectors, values length 16*vectors (IEEE binary16 bits).
+ * Columns in each row block must be strictly increasing and in [0,k).
+ * Empty A permits null columns/values. Output plan must initially be null. */
+aclsparseStatus_t aclsparseCubeSpmm1dCreatePlan(aclsparseHandle_t handle, int32_t m, int32_t n, int32_t k,
+                                                const int32_t* hostOffsets, size_t offsetCount,
+                                                const int32_t* hostColumns, const uint16_t* hostValues, size_t vectors,
+                                                const aclsparseCubeSpmm1dOptions* options,
+                                                aclsparseCubeSpmm1dPlan_t* plan);
+
+/* HOST zero-based CSR: int64 offsets[m+1]/columns[nnz], FP16 values[nnz].
+ * Arbitrary positive m is padded to 16. Rows may be unsorted with duplicates.
+ * Duplicate values are stably summed in FP64, rounded to FP16 (RNE), then zeros
+ * removed; this normalization is explicit, not lossless for all duplicates.
+ * Nonfinite values and a duplicate sum outside finite FP16 range are rejected. */
+aclsparseStatus_t aclsparseCubeSpmm1dCreateCsrPlan(aclsparseHandle_t handle, int32_t m, int32_t n, int32_t k,
+                                                   const int64_t* hostOffsets, size_t offsetCount,
+                                                   const int64_t* hostColumns, const uint16_t* hostValues, size_t nnz,
+                                                   const aclsparseCubeSpmm1dOptions* options,
+                                                   aclsparseCubeSpmm1dPlan_t* plan);
+
+aclsparseStatus_t aclsparseCubeSpmm1dGetPlanInfo(aclsparseCubeSpmm1dPlan_t plan, aclsparseCubeSpmm1dPlanInfo* info);
+
+/* B: DEVICE finite FP16 row-major[k,paddedN], tail columns zero.
+ * C: DEVICE FP32 column-major[paddedM,paddedN]. Default Execute clears all C
+ * before submission, so empty blocks never retain previous output.
+ * B/C/workspace must be nonoverlapping on the preparation device/context.
+ * Capacities are bytes; workspace alignment is 32 bytes. No allocation or
+ * host/device tensor copies occur here. Synchronize the caller stream to wait.
+ * Distinct calls may share immutable A, but not writable C/workspace while live. */
+aclsparseStatus_t aclsparseCubeSpmm1dExecute(aclsparseHandle_t handle, aclsparseCubeSpmm1dPlan_t plan, const void* b,
+                                             size_t bBytes, void* c, size_t cBytes, void* workspace,
+                                             size_t workspaceBytes);
+
+/* Caller must have completed all executions. Use the preparation context;
+ * destroy does not wait for a stream. Null plan is a successful no-op.
+ * Device-free failure returns EXECUTION_FAILED and retains the plan for destroy
+ * retry only; already freed buffers are skipped. Do not execute/query it again. */
+aclsparseStatus_t aclsparseCubeSpmm1dDestroyPlan(aclsparseCubeSpmm1dPlan_t plan);
 /**
  * @brief 创建 Cube SpMM 稀疏矩阵描述符（BCSR 专用）。
  *

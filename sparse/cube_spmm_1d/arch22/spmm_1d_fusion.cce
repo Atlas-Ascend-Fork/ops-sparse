@@ -1,0 +1,199 @@
+/**
+ * Copyright (c) 2026 AscSpMM Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#define __aicore__ [aicore]
+#include "kernel_operator.h"
+#include "internal/spmm_1d_kernel_utils.h"
+#define SPMM_CAT_I(a,b) a##b
+#define SPMM_CAT(a,b) SPMM_CAT_I(a,b)
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_B_PACK_SUB_TILE 32
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace base {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+using namespace fp16;
+#ifndef SPMM_FUSION_GROUP
+#error "SPMM_FUSION_GROUP must be selected at build time"
+#endif
+constexpr int FUSION_MAX = SPMM_FUSION_GROUP;
+static_assert(FUSION_MAX==2 || FUSION_MAX==4 || FUSION_MAX==8, "compiled group set");
+static_assert(2*(512/FUSION_MAX)*(64*FUSION_MAX<2048/FUSION_MAX?64*FUSION_MAX:2048/FUSION_MAX)<=65536, "L0A");
+static_assert(2*(16*FUSION_MAX)*(64*FUSION_MAX<2048/FUSION_MAX?64*FUSION_MAX:2048/FUSION_MAX)<=65536, "L0B");
+static_assert(2*4*(16*FUSION_MAX)*(512/FUSION_MAX)<=65536, "double L0C");
+constexpr int EXPANDED_A_HALF = 32768;
+
+__aicore__ __inline__ bool can_fuse(int first, int rows, __gm__ int *offsets)
+{
+    if (first + FUSION_MAX > rows) return false;
+    int capacity=64*FUSION_MAX;
+    if(capacity>2048/FUSION_MAX)capacity=2048/FUSION_MAX;
+    if(offsets[first+FUSION_MAX]-offsets[first]>capacity)return false;
+    for (int r=0;r<FUSION_MAX;++r) {
+        if (offsets[first+r] == offsets[first+r+1]) return false;
+    }
+    return true;
+}
+
+#define FUSION_ARGS \
+    int M, int N, int K, int vec_length, __gm__ __fp16 *values, \
+    __gm__ int *col_indices, __gm__ int *row_offsets, __gm__ __fp16 *B, \
+    __gm__ float *C, __gm__ void *ffts_addr, __gm__ __fp16 *workspace1, \
+    int64_t b_pack_slot_stride_elems, int64_t total_b_pack_elems, \
+    int64_t max_vectors_per_row, int64_t num_n_blocks, int64_t ldc, int64_t tiling_key
+
+#if __DAV_C220_CUBE__
+extern "C" __global__ __aicore__ void SPMM_CAT(SPMM_KERNEL_NAME,_mix_aic)(FUSION_ARGS)
+{
+    if(max_vectors_per_row>256)return;
+    set_ffts_base_addr((uint64_t)ffts_addr);
+    set_padding(0);set_atomic_none();set_nd_para(1);
+    int core=get_block_idx(),cores=get_block_num(),rows=M/16;
+    __cbuf__ __fp16 *l1b=(__cbuf__ __fp16 *)(uintptr_t)(64*1024);
+    __cbuf__ __fp16 *l1a=(__cbuf__ __fp16 *)(uintptr_t)0;
+    __ca__ __fp16 *l0a=(__ca__ __fp16 *)(uintptr_t)0;
+    __cb__ __fp16 *l0b=(__cb__ __fp16 *)(uintptr_t)0;
+    __cc__ float *l0c=(__cc__ float *)(uintptr_t)0;
+    __gm__ __fp16 *expanded=workspace1+total_b_pack_elems+(int64_t)core*2*EXPANDED_A_HALF;
+    __gm__ __fp16 *packed=workspace1+(int64_t)core*2*b_pack_slot_stride_elems;
+    int64_t fusion_sequence=0,output_sequence=0;
+    bool l1_pending=false,l0_pending=false,fix0=false,fix1=false;
+    for(int group=core*FUSION_MAX;group<rows;group+=cores*FUSION_MAX) {
+        bool fuse=can_fuse(group,rows,row_offsets);
+        int end=group+FUSION_MAX<rows?group+FUSION_MAX:rows;
+        for(int row=group;row<end;) {
+            int count=fuse?FUSION_MAX:1;
+            int length=row_offsets[row+count]-row_offsets[row];
+            if(length==0){row+=count;continue;}
+            int height=count*16,rounded=(length+15)/16*16,kfracs=rounded/16;
+            int nfracs=height/16,tile=512/count;
+            int memory_tile=(32768/rounded)/16*16;
+            if(tile>memory_tile)tile=memory_tile;
+            int a_slot=(int)(fusion_sequence%2);
+            wait_flag_dev(6+a_slot);
+            if(l1_pending){wait_flag(PIPE_MTE1,PIPE_MTE2,EVENT_ID1);l1_pending=false;}
+            spmm_matrix_gm2cbuf_ND2nN(l1b,expanded+(int64_t)a_slot*EXPANDED_A_HALF,
+                height,rounded,height,length,height);
+            ffts_cross_core_sync(PIPE_MTE2,GET_FFST_MSG(2,14+a_slot));
+            set_flag(PIPE_MTE2,PIPE_MTE1,EVENT_ID0);wait_flag(PIPE_MTE2,PIPE_MTE1,EVENT_ID0);
+            if(l0_pending){wait_flag(PIPE_M,PIPE_MTE1,EVENT_ID1);l0_pending=false;}
+            load_cbuf_to_cb(l0b,l1b,0,(uint8_t)(kfracs*nfracs),1,0,0,true,inc);
+            set_flag(PIPE_MTE1,PIPE_MTE2,EVENT_ID1);l1_pending=true;
+            set_flag(PIPE_MTE1,PIPE_M,EVENT_ID0);wait_flag(PIPE_MTE1,PIPE_M,EVENT_ID0);
+            int packs=(N+511)/512;
+            for(int pack=0;pack<packs;++pack) {
+                int64_t task=fusion_sequence*packs+pack;
+                int slot=(int)(task%2),begin=pack*512,width=N-begin;if(width>512)width=512;
+                wait_flag_dev(base::b_pack_ready_flag(task));
+                for(int local=0;local<width;local+=tile) {
+                    int actual=width-local;if(actual>tile)actual=tile;
+                    if(l1_pending){wait_flag(PIPE_MTE1,PIPE_MTE2,EVENT_ID1);l1_pending=false;}
+                    base::copy_b_pack_row_major_to_l1(l1a,packed+(int64_t)slot*b_pack_slot_stride_elems+local,
+                        512,rounded,length,actual);
+                    if(local+tile>=width)ffts_cross_core_sync(PIPE_MTE2,GET_FFST_MSG(2,base::b_pack_ack_flag(task)));
+                    set_flag(PIPE_MTE2,PIPE_MTE1,EVENT_ID0);wait_flag(PIPE_MTE2,PIPE_MTE1,EVENT_ID0);
+                    if(l0_pending){wait_flag(PIPE_M,PIPE_MTE1,EVENT_ID1);l0_pending=false;}
+                    int mf=(actual+15)/16;
+                    for(int f=0;f<mf;++f)load_cbuf_to_ca(l0a+(int64_t)f*kfracs*256,l1a,
+                        (uint16_t)(f*kfracs),(uint8_t)kfracs,1,0,0,true,inc);
+                    set_flag(PIPE_MTE1,PIPE_MTE2,EVENT_ID1);l1_pending=true;
+                    set_flag(PIPE_MTE1,PIPE_M,EVENT_ID0);wait_flag(PIPE_MTE1,PIPE_M,EVENT_ID0);
+                    int out_slot=(int)(output_sequence++%2);
+                    if(out_slot==0&&fix0){wait_flag(PIPE_FIX,PIPE_M,EVENT_ID0);fix0=false;}
+                    if(out_slot==1&&fix1){wait_flag(PIPE_FIX,PIPE_M,EVENT_ID1);fix1=false;}
+                    __cc__ float *out=l0c+out_slot*8192;
+                    mad(out,l0a,l0b,(uint16_t)actual,(uint16_t)length,(uint16_t)height,
+                        0,1,0,false,false,false,true);
+                    set_flag(PIPE_M,PIPE_MTE1,EVENT_ID1);l0_pending=true;
+                    if(out_slot==0){
+                        set_flag(PIPE_M,PIPE_FIX,EVENT_ID0);wait_flag(PIPE_M,PIPE_FIX,EVENT_ID0);
+                    }else{
+                        set_flag(PIPE_M,PIPE_FIX,EVENT_ID1);wait_flag(PIPE_M,PIPE_FIX,EVENT_ID1);
+                    }
+                    copy_matrix_cc_to_gm(C+(int64_t)row*16+(int64_t)(begin+local)*ldc,out,
+                        0,(uint16_t)height,(uint16_t)actual,(uint32_t)ldc,(uint16_t)actual,
+                        0,0,0,false,true);
+                    if(out_slot==0){set_flag(PIPE_FIX,PIPE_M,EVENT_ID0);fix0=true;}
+                    else{set_flag(PIPE_FIX,PIPE_M,EVENT_ID1);fix1=true;}
+                }
+            }
+            ++fusion_sequence;row+=count;
+        }
+    }
+    if(l1_pending)wait_flag(PIPE_MTE1,PIPE_MTE2,EVENT_ID1);
+    if(l0_pending)wait_flag(PIPE_M,PIPE_MTE1,EVENT_ID1);
+    if(fix0)wait_flag(PIPE_FIX,PIPE_M,EVENT_ID0);
+    if(fix1)wait_flag(PIPE_FIX,PIPE_M,EVENT_ID1);
+    pipe_barrier(PIPE_ALL);
+}
+#endif
+
+#if __DAV_C220_VEC__
+extern "C" __global__ __aicore__ void SPMM_CAT(SPMM_KERNEL_NAME,_mix_aiv)(FUSION_ARGS)
+{
+    if (max_vectors_per_row > 256) return;
+    set_ffts_base_addr((uint64_t)ffts_addr);
+    set_vector_mask(-1,-1);set_mask_norm();
+    int core=get_block_idx(),cores=get_block_num(),rows=M/16;
+    __ubuf__ __fp16 *panel0=(__ubuf__ __fp16 *)(uintptr_t)0;
+    __ubuf__ __fp16 *panel1=panel0+32*512;
+    __ubuf__ __fp16 *a_ub=(__ubuf__ __fp16 *)(uintptr_t)(64*1024);
+    __gm__ __fp16 *expanded=workspace1+total_b_pack_elems+(int64_t)core*2*EXPANDED_A_HALF;
+    __gm__ __fp16 *packed=workspace1+(int64_t)core*2*b_pack_slot_stride_elems;
+    int64_t fusion_sequence=0;
+    for(int group=core*FUSION_MAX;group<rows;group+=cores*FUSION_MAX) {
+        bool fuse=can_fuse(group,rows,row_offsets);
+        int end=group+FUSION_MAX<rows?group+FUSION_MAX:rows;
+        for(int row=group;row<end;) {
+            int count=fuse?FUSION_MAX:1;
+            int first=row_offsets[row],stop=row_offsets[row+count],length=stop-first;
+            if(length==0){row+=count;continue;}
+            int height=count*16,rounded=(length+15)/16*16;
+            if(fusion_sequence>=2)wait_flag_dev(14+(int)(fusion_sequence%2));
+            int repeats=rounded*height/128;
+            for(int off=0;repeats>0;) {
+                int now=repeats>255?255:repeats;
+                vector_dup(a_ub+off,(__fp16)0,(uint8_t)now,1,1,8,0);
+                off+=now*128;repeats-=now;
+            }
+            set_flag(PIPE_V,PIPE_MTE2,EVENT_ID2);wait_flag(PIPE_V,PIPE_MTE2,EVENT_ID2);
+            for(int r=0;r<count;++r) {
+                int start=row_offsets[row+r],len=row_offsets[row+r+1]-start;
+                copy_gm_to_ubuf(a_ub+(int64_t)(start-first)*height+r*16,values+(int64_t)start*16,
+                    0,len,1,0,count-1);
+            }
+            set_flag(PIPE_MTE2,PIPE_MTE3,EVENT_ID2);wait_flag(PIPE_MTE2,PIPE_MTE3,EVENT_ID2);
+            copy_ubuf_to_gm(expanded+(fusion_sequence%2)*EXPANDED_A_HALF,a_ub,0,1,rounded*height/16,0,0);
+            ffts_cross_core_sync(PIPE_MTE3,GET_FFST_MSG(2,6+(int)(fusion_sequence%2)));
+            int packs=(N+511)/512;
+            for(int pack=0;pack<packs;++pack) {
+                int64_t task=fusion_sequence*packs+pack;
+                if(task>=2)wait_flag_dev(base::b_pack_ack_flag(task-2));
+                int width=N-pack*512;if(width>512)width=512;
+                base::pack_b_selected_panels_nbatch_row_major_aiv_pipelined(
+                    N,pack*512,width,length,col_indices+first,B,
+                    packed+(int64_t)(task%2)*b_pack_slot_stride_elems,panel0,panel1);
+                ffts_cross_core_sync(PIPE_MTE3,GET_FFST_MSG(2,base::b_pack_ready_flag(task)));
+            }
+            ++fusion_sequence;
+            row+=count;
+        }
+    }
+    int64_t tasks=fusion_sequence*((N+511)/512);
+    for(int64_t task=tasks>2?tasks-2:0;task<tasks;++task)wait_flag_dev(base::b_pack_ack_flag(task));
+    for(int64_t seq=fusion_sequence>2?fusion_sequence-2:0;seq<fusion_sequence;++seq)wait_flag_dev(14+(int)(seq%2));
+    pipe_barrier(PIPE_ALL);
+}
+#endif

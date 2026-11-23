@@ -1,0 +1,882 @@
+/**
+ * Copyright (c) 2026 AscSpMM Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#ifdef __CCE_KT_TEST__
+#define __aicore__
+#else
+#define __aicore__ [aicore]
+#endif
+
+#include "kernel_operator.h"
+#include "internal/spmm_1d_kernel_utils.h"
+#include "internal/spmm_1d_tiling_keys.h"
+
+#ifndef SPMM_KERNEL_NAME
+#define SPMM_KERNEL_NAME spmm_1d_kernel_unified
+#endif
+#define SPMM_CAT_IMPL(a, b) a##b
+#define SPMM_CAT(a, b) SPMM_CAT_IMPL(a, b)
+#define SPMM_AIC_SYMBOL(name) SPMM_CAT(name, _mix_aic)
+#define SPMM_AIV_SYMBOL(name) SPMM_CAT(name, _mix_aiv)
+
+#if !defined(SPMM_KERNEL_FAMILY_WORKSPACE) && !defined(SPMM_KERNEL_FAMILY_DIRECT)
+#error "one spmm_1d unified kernel family must be selected"
+#endif
+#if defined(SPMM_KERNEL_FAMILY_WORKSPACE) && defined(SPMM_KERNEL_FAMILY_DIRECT)
+#error "spmm_1d unified kernel families are mutually exclusive"
+#endif
+
+#if defined(SPMM_KERNEL_FAMILY_WORKSPACE)
+#ifdef SPMM_NMAJOR_EXTENSIONS
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_SUB_TILE 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 1
+#define SPMM_N_MAJOR 1
+namespace nmajor_57 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_AIC_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_B_PACK_SUB_TILE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_N_MAJOR
+#endif
+
+#if __DAV_C220_CUBE__
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic16_k128_bpack512 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic16_k128_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 8
+#define SPMM_SPARSE_K_TILE 256
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic8_k256_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 4
+#define SPMM_SPARSE_K_TILE 512
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic4_k512_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 2
+#define SPMM_SPARSE_K_TILE 1024
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic2_k1024_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 1
+#define SPMM_SPARSE_K_TILE 2048
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic1_k2048_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 128
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_aic16_k128_bpack2048 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 32
+#define SPMM_SPARSE_K_TILE 64
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 1
+namespace workspace_aic32_k64_bpack1024_l0cpp {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 1
+namespace workspace_aic16_k128_bpack1024_l0cpp {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 1
+namespace workspace_aic16_k128_bpack512_l0cpp {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 32
+#define SPMM_SPARSE_K_TILE 64
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 1
+namespace workspace_aic32_k64_bpack512_l0cpp {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#endif  // __DAV_C220_CUBE__
+
+#if __DAV_C220_VEC__
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic16_k128_bpack512 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_vec_aic16_k128_bpack512 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 32
+#define SPMM_SPARSE_K_TILE 64
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_vec_aic32_k64_bpack512 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic16_k128_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 8
+#define SPMM_SPARSE_K_TILE 256
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic8_k256_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 4
+#define SPMM_SPARSE_K_TILE 512
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic4_k512_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 2
+#define SPMM_SPARSE_K_TILE 1024
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic2_k1024_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 1
+#define SPMM_SPARSE_K_TILE 2048
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic1_k2048_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 8
+#define SPMM_SPARSE_K_TILE 256
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_vec_aic8_k256_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_vec_aic16_k128_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 128
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_vec_aic16_k128_bpack2048 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 32
+#define SPMM_SPARSE_K_TILE 64
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace workspace_vec_aic32_k64_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_B_PACK_SUB_TILE 32
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_p32_vec_aic16_k128_bpack1024 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_SUB_TILE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_B_PACK_SUB_TILE 32
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_p32_vec_aic16_k128_bpack512 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_SUB_TILE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 32
+#define SPMM_SPARSE_K_TILE 64
+#define SPMM_B_PACK_N_BATCH 32
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_B_PACK_SUB_TILE 32
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 1
+#define SPMM_DIRECT_B_GATHER_AIC 0
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace aivpp_p32_vec_aic32_k64_bpack512 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_SUB_TILE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#endif  // __DAV_C220_VEC__
+
+#elif defined(SPMM_KERNEL_FAMILY_DIRECT)
+
+#define SPMM_AIC_N_BATCH 64
+#define SPMM_SPARSE_K_TILE 32
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 1
+#define SPMM_ENABLE_L0C_PIPELINE 0
+namespace direct_aic64_k32 {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#if SPMM_DIRECT_EXTENSIONS
+#define SPMM_AIC_N_BATCH 32
+#define SPMM_SPARSE_K_TILE 64
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 1
+#define SPMM_ENABLE_L0C_PIPELINE 1
+namespace direct_aic32_k64_l0cpp {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#define SPMM_AIC_N_BATCH 16
+#define SPMM_SPARSE_K_TILE 128
+#define SPMM_B_PACK_N_BATCH 64
+#define SPMM_B_PACK_PIPE_DEPTH 2
+#define SPMM_ENABLE_AIV_PANEL_PIPELINE 0
+#define SPMM_DIRECT_B_GATHER_AIC 1
+#define SPMM_ENABLE_L0C_PIPELINE 1
+namespace direct_aic16_k128_l0cpp {
+#include "internal/spmm_1d_kernel_variant.inc"
+}
+#undef SPMM_ENABLE_L0C_PIPELINE
+#undef SPMM_DIRECT_B_GATHER_AIC
+#undef SPMM_ENABLE_AIV_PANEL_PIPELINE
+#undef SPMM_B_PACK_PIPE_DEPTH
+#undef SPMM_B_PACK_N_BATCH
+#undef SPMM_SPARSE_K_TILE
+#undef SPMM_AIC_N_BATCH
+
+#endif
+
+#endif  // kernel family
+
+#if __DAV_C220_CUBE__
+extern "C" __global__ __aicore__ void SPMM_AIC_SYMBOL(SPMM_KERNEL_NAME)(
+    int M,
+    int N,
+    int K,
+    int vec_length,
+    __gm__ __fp16 *values,
+    __gm__ int *col_indices,
+    __gm__ int *row_offsets,
+    __gm__ __fp16 *B,
+    __gm__ float *C,
+    __gm__ void *ffts_addr,
+    __gm__ __fp16 *workspace1,
+    int64_t b_pack_slot_stride_elems,
+    int64_t total_b_pack_elems,
+    int64_t max_vectors_per_row,
+    int64_t num_n_blocks,
+    int64_t ldc,
+    int64_t tiling_key
+)
+{
+#if defined(SPMM_KERNEL_FAMILY_WORKSPACE)
+    switch ((int32_t)tiling_key) {
+#ifdef SPMM_NMAJOR_EXTENSIONS
+        case SPMM_TILING_NMAJOR_57:
+            nmajor_57::run_aic({M,N,K,vec_length,values,col_indices,row_offsets,B,C,
+                ffts_addr,workspace1,b_pack_slot_stride_elems,total_b_pack_elems,
+                max_vectors_per_row,num_n_blocks,ldc});
+            break;
+#endif
+        case SPMM_TILING_WORKSPACE_AIC16_K128_BPACK512:
+        case SPMM_TILING_AIVPP_AIC16_K128_BPACK512:
+            workspace_aic16_k128_bpack512::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_P32_AIC16_K128_BPACK512:
+            workspace_aic16_k128_bpack512_l0cpp::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_AIC32_K64_BPACK512:
+        case SPMM_TILING_AIVPP_L0CPP_P32_AIC32_K64_BPACK512:
+            workspace_aic32_k64_bpack512_l0cpp::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC16_K128_BPACK1024:
+        case SPMM_TILING_AIVPP_AIC16_K128_BPACK1024:
+            workspace_aic16_k128_bpack1024::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC8_K256_BPACK1024:
+        case SPMM_TILING_AIVPP_AIC8_K256_BPACK1024:
+            workspace_aic8_k256_bpack1024::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC4_K512_BPACK1024:
+            workspace_aic4_k512_bpack1024::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC2_K1024_BPACK1024:
+            workspace_aic2_k1024_bpack1024::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC1_K2048_BPACK1024:
+            workspace_aic1_k2048_bpack1024::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_AIC16_K128_BPACK2048:
+            workspace_aic16_k128_bpack2048::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_L0CPP_AIC32_K64_BPACK1024:
+            workspace_aic32_k64_bpack1024_l0cpp::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_AIC16_K128_BPACK1024:
+        case SPMM_TILING_AIVPP_L0CPP_P32_AIC16_K128_BPACK1024:
+            workspace_aic16_k128_bpack1024_l0cpp::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        default:
+            break;
+    }
+#else
+#if SPMM_DIRECT_EXTENSIONS
+    switch ((int32_t)tiling_key) {
+        case SPMM_TILING_DIRECT_AIC32_K64_L0CPP:
+            direct_aic32_k64_l0cpp::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_DIRECT_AIC16_K128_L0CPP:
+            direct_aic16_k128_l0cpp::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        default: break;
+    }
+#else
+            direct_aic64_k32::run_aic({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+#endif
+#endif
+}
+#endif  // __DAV_C220_CUBE__
+
+#if __DAV_C220_VEC__
+extern "C" __global__ __aicore__ void SPMM_AIV_SYMBOL(SPMM_KERNEL_NAME)(
+    int M,
+    int N,
+    int K,
+    int vec_length,
+    __gm__ __fp16 *values,
+    __gm__ int *col_indices,
+    __gm__ int *row_offsets,
+    __gm__ __fp16 *B,
+    __gm__ float *C,
+    __gm__ void *ffts_addr,
+    __gm__ __fp16 *workspace1,
+    int64_t b_pack_slot_stride_elems,
+    int64_t total_b_pack_elems,
+    int64_t max_vectors_per_row,
+    int64_t num_n_blocks,
+    int64_t ldc,
+    int64_t tiling_key
+)
+{
+#if defined(SPMM_KERNEL_FAMILY_WORKSPACE)
+    switch ((int32_t)tiling_key) {
+#ifdef SPMM_NMAJOR_EXTENSIONS
+        case SPMM_TILING_NMAJOR_57:
+            nmajor_57::run_aiv({M,N,K,vec_length,values,col_indices,row_offsets,B,C,
+                ffts_addr,workspace1,b_pack_slot_stride_elems,total_b_pack_elems,
+                max_vectors_per_row,num_n_blocks,ldc});
+            break;
+#endif
+        case SPMM_TILING_WORKSPACE_AIC16_K128_BPACK512:
+            workspace_vec_aic16_k128_bpack512::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_AIC16_K128_BPACK512:
+            aivpp_vec_aic16_k128_bpack512::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_P32_AIC16_K128_BPACK512:
+            aivpp_p32_vec_aic16_k128_bpack512::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_AIC32_K64_BPACK512:
+            aivpp_vec_aic32_k64_bpack512::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_P32_AIC32_K64_BPACK512:
+            aivpp_p32_vec_aic32_k64_bpack512::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC16_K128_BPACK1024:
+            workspace_vec_aic16_k128_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC8_K256_BPACK1024:
+            workspace_vec_aic8_k256_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC4_K512_BPACK1024:
+            workspace_vec_aic4_k512_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC2_K1024_BPACK1024:
+            workspace_vec_aic2_k1024_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_WORKSPACE_AIC1_K2048_BPACK1024:
+            workspace_vec_aic1_k2048_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_AIC8_K256_BPACK1024:
+            aivpp_vec_aic8_k256_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_AIC16_K128_BPACK1024:
+        case SPMM_TILING_AIVPP_L0CPP_AIC16_K128_BPACK1024:
+            aivpp_vec_aic16_k128_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_L0CPP_P32_AIC16_K128_BPACK1024:
+            aivpp_p32_vec_aic16_k128_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_AIVPP_AIC16_K128_BPACK2048:
+            aivpp_vec_aic16_k128_bpack2048::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_L0CPP_AIC32_K64_BPACK1024:
+            workspace_vec_aic32_k64_bpack1024::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        default:
+            break;
+    }
+#else
+#if SPMM_DIRECT_EXTENSIONS
+    switch ((int32_t)tiling_key) {
+        case SPMM_TILING_DIRECT_AIC32_K64_L0CPP:
+            direct_aic32_k64_l0cpp::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        case SPMM_TILING_DIRECT_AIC16_K128_L0CPP:
+            direct_aic16_k128_l0cpp::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+            break;
+        default: break;
+    }
+#else
+            direct_aic64_k32::run_aiv({
+                M, N, K, vec_length, values, col_indices, row_offsets, B, C,
+                ffts_addr, workspace1, b_pack_slot_stride_elems, total_b_pack_elems,
+                max_vectors_per_row, num_n_blocks, ldc});
+#endif
+#endif
+}
+#endif  // __DAV_C220_VEC__

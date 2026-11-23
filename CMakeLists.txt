@@ -243,6 +243,10 @@ set_property(SOURCE
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_complex_binary64_primary.cpp
     APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off -fno-fast-math)
 
+# Operator-local generated/external device objects use the common selection hook.
+include(cmake/operator_extensions.cmake)
+ops_sparse_configure_extensions(${OPS_SPARSE})
+
 # Harden shipped shared libraries and retain symbols for Debug diagnostics.
 foreach(sparse_target IN ITEMS ${OPS_SPARSE} ${OPS_SPARSELT})
     if(TARGET ${sparse_target})

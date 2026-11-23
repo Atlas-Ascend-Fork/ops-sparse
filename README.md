@@ -47,6 +47,7 @@ git clone -b ${tag_version} https://gitcode.com/cann/ops-sparse.git
 | [SpMM](sparse/spmm/README.md) | `aclsparseSpMM` | √ | √ |
 | [SpMMOp](sparse/spmm_op/README.md) | `aclsparseSpMMOp` | × | √ |
 | [CubeSpMM](sparse/cube_spmm/README.md) | `aclsparseCubeSpmm` | √ | × |
+| [CubeSpMM 1D](sparse/cube_spmm_1d/README.md) | `aclsparseCubeSpmm1dExecute` | √ | × |
 | [SDDMM](sparse/sddmm/README.md) | `aclsparseSDDMM` | √ | √ |
 | [SpGEMM](sparse/spgemm/README.md) | `aclsparseSpGEMM` | √ | √ |
 | [SpSM](sparse/spsm/README.md) | `aclsparseSpSM` | √ | √ |
