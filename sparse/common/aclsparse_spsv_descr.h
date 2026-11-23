@@ -14,6 +14,7 @@
 #define ACLSPARSE_SPSV_DESCR_H_
 
 #include <cstdint>
+#include "acl/acl.h"
 
 struct aclsparseSpSVDescr {
     // True once the analysis kernel has been launched (submitted to stream).
@@ -25,6 +26,16 @@ struct aclsparseSpSVDescr {
     // used during analysis, so the pointer-consistency check in solve is relaxed.
     bool updateMatrixCalled = false;
     void *workspaceBuffer = nullptr;
+
+    // A same-stream asynchronous snapshot of the structural analysis result.
+    // A pending/stale snapshot must never suppress dependency recovery.
+    int32_t cachedNumLevels = 0;
+    int32_t *analysisNumLevels = nullptr;
+    aclrtEvent analysisEvent = nullptr;
+    aclrtStream analysisCopyStream = nullptr;
+    bool analysisCopyPending = false;
+    bool analysisEventRecorded = false;
+    bool analysisSnapshotCurrent = false;
 
     int64_t cachedM = 0;
     int64_t cachedNnz = 0;
@@ -40,6 +51,7 @@ struct aclsparseSpSVDescr {
     int32_t cachedPermType = 0;      // 0=int32 workspace arrays, 1=int64 (nnz > INT32_MAX)
     int32_t cachedIndexType = 0;      // 0=I32, 1=I64 for rowPtr (ptrType)
     int32_t cachedColIndType = 0;    // 0=I32, 1=I64 for colInd (idxType)
+    int32_t cachedValueType = 0;     // 0=ACL_FLOAT, 1=ACL_COMPLEX64
 
     // Weak reference to the user's matrix values pointer at analysis time.
     // The user must keep this memory valid until solve completes. If the user

@@ -17,7 +17,7 @@
 #include "cann_ops_sparse.h"
 #include "aclsparse_descr_internal.h"
 #include "aclsparse_spsv_descr.h"
-#include "spsv_tiling_data.h"  // kSimtMaxThreads canonical definition
+#include "../shared/spsv_tiling_data.h" // kSimtMaxThreads canonical definition
 
 namespace spsv {
 
@@ -31,46 +31,43 @@ constexpr size_t kInternalAlign = 64u;
 // into namespace spsv so host code can use spsv::kSimtMaxThreads.
 using ::kSimtMaxThreads;
 
-inline size_t AlignUp(size_t x)
+inline size_t AlignUp(size_t x) { return ((x + kAlign - 1u) / kAlign) * kAlign; }
+
+inline size_t AlignUpInternal(size_t x) { return ((x + kInternalAlign - 1u) / kInternalAlign) * kInternalAlign; }
+
+inline struct aclsparseContext* ToInternalHandle(aclsparseHandle_t handle)
 {
-    return ((x + kAlign - 1u) / kAlign) * kAlign;
+    return reinterpret_cast<struct aclsparseContext*>(handle);
 }
 
-inline size_t AlignUpInternal(size_t x)
+inline struct aclsparseSpMatDescr* ToMatInner(aclsparseConstSpMatDescr_t desc)
 {
-    return ((x + kInternalAlign - 1u) / kInternalAlign) * kInternalAlign;
+    return const_cast<struct aclsparseSpMatDescr*>(reinterpret_cast<const struct aclsparseSpMatDescr*>(desc));
 }
 
-inline struct aclsparseContext *ToInternalHandle(aclsparseHandle_t handle)
+inline struct aclsparseDnVecDescr* ToVecInner(aclsparseConstDnVecDescr_t desc)
 {
-    return reinterpret_cast<struct aclsparseContext *>(handle);
+    return const_cast<struct aclsparseDnVecDescr*>(reinterpret_cast<const struct aclsparseDnVecDescr*>(desc));
 }
 
-inline struct aclsparseSpMatDescr *ToMatInner(aclsparseConstSpMatDescr_t desc)
+inline struct aclsparseDnVecDescr* ToVecInnerMut(aclsparseDnVecDescr_t desc)
 {
-    return const_cast<struct aclsparseSpMatDescr *>(
-        reinterpret_cast<const struct aclsparseSpMatDescr *>(desc));
-}
-
-inline struct aclsparseDnVecDescr *ToVecInner(aclsparseConstDnVecDescr_t desc)
-{
-    return const_cast<struct aclsparseDnVecDescr *>(
-        reinterpret_cast<const struct aclsparseDnVecDescr *>(desc));
-}
-
-inline struct aclsparseDnVecDescr *ToVecInnerMut(aclsparseDnVecDescr_t desc)
-{
-    return reinterpret_cast<struct aclsparseDnVecDescr *>(desc);
+    return reinterpret_cast<struct aclsparseDnVecDescr*>(desc);
 }
 
 inline int32_t FormatToInt(aclsparseFormat_t fmt)
 {
     switch (fmt) {
-        case ACL_SPARSE_FORMAT_CSR: return 0;
-        case ACL_SPARSE_FORMAT_CSC: return 1;
-        case ACL_SPARSE_FORMAT_COO: return 2;
-        case ACL_SPARSE_FORMAT_SLICED_ELL: return 3;
-        default: return -1;
+        case ACL_SPARSE_FORMAT_CSR:
+            return 0;
+        case ACL_SPARSE_FORMAT_CSC:
+            return 1;
+        case ACL_SPARSE_FORMAT_COO:
+            return 2;
+        case ACL_SPARSE_FORMAT_SLICED_ELL:
+            return 3;
+        default:
+            return -1;
     }
 }
 

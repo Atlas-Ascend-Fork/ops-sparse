@@ -13,6 +13,7 @@
 
 #include <Eigen/Eigen>
 #include <Eigen/SparseCore>
+#include <complex>
 #include <vector>
 #include "../frame/fill.h"
 
@@ -129,6 +130,63 @@ std::vector<T> SpSVGolden(
     for (int i = 0; i < m; i++) {
         output[i] = static_cast<T>(result(i));
     }
+    return output;
+}
+
+// One triangular solve with op applied.  Eigen takes the view mode as a
+// compile-time parameter, so the four fill/diag combinations have to be
+// spelled out by the caller; applying op in here means they are spelled out
+// once rather than once per op.
+template <int MODE, typename M, typename V>
+inline V SpSVTriSolveC(const M& A, const V& rhs, int op) {
+    if (op == 1) return A.template triangularView<MODE>().transpose().solve(rhs);
+    if (op == 2) return A.template triangularView<MODE>().adjoint().solve(rhs);
+    return A.template triangularView<MODE>().solve(rhs);
+}
+
+// complex64 golden.  The structure still comes from CsrMatrix, which is
+// shared with the other operators and holds floats; the complex values travel
+// beside it.  op is 0 = N, 1 = T, 2 = H -- T and H are the same thing for a
+// real matrix but not for this one, so the conjugate case solves against the
+// adjoint rather than the transpose.
+inline std::vector<std::complex<double>> SpSVGoldenComplex(
+    const CsrMatrix& csr,
+    const std::vector<std::complex<float>>& values,
+    const std::vector<std::complex<float>>& x,
+    std::complex<float> alpha,
+    bool lower,
+    bool unitDiag,
+    int op)
+{
+    using cd = std::complex<double>;
+    int m = static_cast<int>(csr.rows);
+    if (m <= 0) return {};
+
+    Eigen::SparseMatrix<cd, Eigen::RowMajor> A(m, m);
+    std::vector<Eigen::Triplet<cd>> triplets;
+    triplets.reserve(static_cast<size_t>(csr.nnz));
+    for (int i = 0; i < m; i++) {
+        for (int j = static_cast<int>(csr.rowOffsets[i]); j < static_cast<int>(csr.rowOffsets[i + 1]); j++) {
+            triplets.emplace_back(i, static_cast<int>(csr.colIndices[j]),
+                                  cd(values[j].real(), values[j].imag()));
+        }
+    }
+    A.setFromTriplets(triplets.begin(), triplets.end());
+
+    Eigen::Matrix<cd, Eigen::Dynamic, 1> rhs(m);
+    cd a(alpha.real(), alpha.imag());
+    for (int i = 0; i < m; i++) {
+        rhs(i) = a * cd(x[i].real(), x[i].imag());
+    }
+
+    Eigen::Matrix<cd, Eigen::Dynamic, 1> result(m);
+    if (lower && !unitDiag) result = SpSVTriSolveC<Eigen::Lower>(A, rhs, op);
+    else if (lower)         result = SpSVTriSolveC<Eigen::Lower | Eigen::UnitDiag>(A, rhs, op);
+    else if (!unitDiag)     result = SpSVTriSolveC<Eigen::Upper>(A, rhs, op);
+    else                    result = SpSVTriSolveC<Eigen::Upper | Eigen::UnitDiag>(A, rhs, op);
+
+    std::vector<cd> output(m);
+    for (int i = 0; i < m; i++) output[i] = result(i);
     return output;
 }
 

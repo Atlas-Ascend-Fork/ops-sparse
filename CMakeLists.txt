@@ -230,6 +230,19 @@ target_link_libraries(${OPS_SPARSE} PRIVATE
 set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/sparse/cgtsv2/arch35/cgtsv2_kernel.cpp
     APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off -fno-fast-math)
 
+# SpSV certificates also depend on the rounded intermediates in TwoSum and
+# the explicit fmaf residuals. Apply the same contract to every device
+# translation units; keep exact recovery separate for register allocation.
+set_property(SOURCE
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_complex_dyadic_recovery.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_complex_rational_recovery.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_float_prefix_certificate.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_complex_wide_primary.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_real_scaled_primary.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_complex_binary64_primary.cpp
+    APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off -fno-fast-math)
+
 # ========= 安装规则（CPack 打包时放入 lib64 和 include） =========
 install(TARGETS ${OPS_SPARSE}
     LIBRARY DESTINATION lib64

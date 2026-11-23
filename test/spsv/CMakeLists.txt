@@ -10,6 +10,10 @@
 
 ops_sparse_add_gtest_tests(spsv ${OPS_SPARSE} EIGEN)
 
+if(TARGET spsv_test AND "arch35" IN_LIST SOC_ARCH_DIRS)
+    target_sources(spsv_test PRIVATE arch35/spsv_certificate_test.cpp arch35/spsv_schedule_cache_test.cpp)
+endif()
+
 if(TARGET spsv_test AND "arch22" IN_LIST SOC_ARCH_DIRS)
     target_include_directories(spsv_test PRIVATE
         "${CMAKE_SOURCE_DIR}/sparse/spsv/arch22/host"

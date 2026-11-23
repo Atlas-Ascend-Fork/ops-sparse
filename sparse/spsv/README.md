@@ -33,7 +33,7 @@ op(A) · Y = alpha · X
 
 其中：
 - op(A) 为稀疏方阵 A 的操作：`ACL_SPARSE_OP_NON_TRANSPOSE`（非转置）、`ACL_SPARSE_OP_TRANSPOSE`（转置）、`ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`（共轭转置，float32 下等价于转置）
-- alpha 为 float32 标量，指针位置由 `aclsparseSetPointerMode` 控制（Host 或 Device 内存）
+- alpha 的类型随 `computeType`：`ACL_FLOAT` 对应 `float`，`ACL_COMPLEX64` 对应 `aclsparseComplex`；指针位置由 `aclsparseSetPointerMode` 控制（Host 或 Device 内存）
 - 矩阵属性通过 `aclsparseSpMatSetAttribute` 设置：fillMode（LOWER/UPPER）和 diagType（NON_UNIT/UNIT）
 
 SpSV 采用三阶段执行模型（bufferSize → analysis → solve），对标 cuSPARSE cusparseSpSV Generic API。analysis 阶段在 device 侧完成 Level Scheduling 预处理，solve 阶段按 level 顺序执行前代/回代求解（支持单核/多核自适应执行）。所有接口支持异步执行，host 侧无 D2H 同步操作。
@@ -130,11 +130,11 @@ aclsparseStatus_t aclsparseSpSV_bufferSize(
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，Host 内存 |
 | opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，Host 内存 |
-| alpha | 输入 | const void* | 标量 alpha 指针（float32），Host 或 Device 内存（由 `aclsparseSetPointerMode` 控制）。(bufferSize 仅校验 alpha 非空，不读取其值；为保持与 analysis/solve 签名一致性而保留此参数) |
+| alpha | 输入 | const void* | 标量 alpha 指针，类型随 `computeType`：`ACL_FLOAT` 对应 `float`，`ACL_COMPLEX64` 对应 `aclsparseComplex`；Host 或 Device 内存（由 `aclsparseSetPointerMode` 控制）。(bufferSize 仅校验 alpha 非空，不读取其值；为保持与 analysis/solve 签名一致性而保留此参数) |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏三角矩阵 A 的描述符，Host 内存 |
 | vecX | 输入 | aclsparseConstDnVecDescr_t | 输入稠密向量 x 的描述符，可为 NULL，Host 内存 |
 | vecY | 输入 | aclsparseDnVecDescr_t | 输出稠密向量 y 的描述符，可为 NULL，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型，仅支持 ACL_FLOAT，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型，支持 ACL_FLOAT / ACL_COMPLEX64，Host 内存 |
 | alg | 输入 | aclsparseSpSVAlg_t | 算法类型，仅支持 ACL_SPARSE_SPSV_ALG_DEFAULT，Host 内存 |
 | spsvDescr | 输入 | aclsparseSpSVDescr_t | SpSV 描述符，Host 内存 |
 | bufferSize | 输出 | size_t* | 所需 workspace 字节数，Host 内存 |
@@ -176,11 +176,11 @@ aclsparseStatus_t aclsparseSpSV_analysis(
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，Host 内存 |
 | opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，Host 内存 |
-| alpha | 输入 | const void* | 标量 alpha 指针（float32），Host 或 Device 内存（由 `aclsparseSetPointerMode` 控制） |
+| alpha | 输入 | const void* | 标量 alpha 指针，类型随 `computeType`：`ACL_FLOAT` 对应 `float`，`ACL_COMPLEX64` 对应 `aclsparseComplex`；Host 或 Device 内存（由 `aclsparseSetPointerMode` 控制） |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏三角矩阵 A 的描述符，Host 内存 |
 | vecX | 输入 | aclsparseConstDnVecDescr_t | 输入稠密向量 x 的描述符，可为 NULL，Host 内存 |
 | vecY | 输入 | aclsparseDnVecDescr_t | 输出稠密向量 y 的描述符，可为 NULL，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型，仅支持 ACL_FLOAT，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型，支持 ACL_FLOAT / ACL_COMPLEX64，Host 内存 |
 | alg | 输入 | aclsparseSpSVAlg_t | 算法类型，仅支持 ACL_SPARSE_SPSV_ALG_DEFAULT，Host 内存 |
 | spsvDescr | 输入/输出 | aclsparseSpSVDescr_t | SpSV 描述符，Host 内存 |
 | externalBuffer | 输入 | void* | workspace 缓冲区（由 bufferSize 查询大小后分配），Device 内存 |
@@ -225,11 +225,11 @@ aclsparseStatus_t aclsparseSpSV_solve(
 |--------|----------|---------|------|
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，Host 内存 |
 | opA | 输入 | aclsparseOperation_t | 稀疏矩阵 A 的操作类型，Host 内存 |
-| alpha | 输入 | const void* | 标量 alpha 指针（float32），Host 或 Device 内存（由 `aclsparseSetPointerMode` 控制） |
+| alpha | 输入 | const void* | 标量 alpha 指针，类型随 `computeType`：`ACL_FLOAT` 对应 `float`，`ACL_COMPLEX64` 对应 `aclsparseComplex`；Host 或 Device 内存（由 `aclsparseSetPointerMode` 控制） |
 | matA | 输入 | aclsparseConstSpMatDescr_t | 稀疏三角矩阵 A 的描述符，Host 内存 |
 | vecX | 输入 | aclsparseConstDnVecDescr_t | 输入稠密向量 x 的描述符，Host 内存 |
 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输出稠密向量 y 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型，仅支持 ACL_FLOAT，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型，支持 ACL_FLOAT / ACL_COMPLEX64，Host 内存 |
 | alg | 输入 | aclsparseSpSVAlg_t | 算法类型，仅支持 ACL_SPARSE_SPSV_ALG_DEFAULT，Host 内存 |
 | spsvDescr | 输入 | aclsparseSpSVDescr_t | SpSV 描述符（须已完成 analysis），Host 内存 |
 
@@ -241,9 +241,10 @@ aclsparseStatus_t aclsparseSpSV_solve(
 - 支持 in-place 操作：vecX 和 vecY 可指向同一设备内存
 - solve 提供确定性（bit-wise）结果：相同输入产生完全相同的输出
 - solve 启动 device kernel 异步执行，立即返回
-- 当 nnz == 0 时，solve 不执行常规求解 kernel，而是直接写入 vecY：
-  - `ACL_SPARSE_DIAG_TYPE_UNIT`：Y = alpha * X（scale copy）
-  - `ACL_SPARSE_DIAG_TYPE_NON_UNIT`：Y = 全零（三角矩阵无非零元时解为零向量）
+- 当 `m == 0` 时，solve 直接返回 SUCCESS，不启动 device kernel。
+- 当 `m > 0` 且 `nnz == 0` 时，solve 不执行常规求解 kernel：
+  - `ACL_SPARSE_DIAG_TYPE_UNIT`：隐式单位对角，`Y = alpha * X`。
+  - `ACL_SPARSE_DIAG_TYPE_NON_UNIT`：对角线缺失，矩阵奇异；实现按 IEEE-754 除零传播 Inf/NaN。`alpha == 0` 时也不特殊改写为零解，仍遵循除零和 `0 * Inf` 的 IEEE-754 结果。
 - `matA` 不可为 nullptr
 - `spsvDescr` 不可为 nullptr
 - `opA` 须为 ACL_SPARSE_OP_NON_TRANSPOSE / ACL_SPARSE_OP_TRANSPOSE / ACL_SPARSE_OP_CONJUGATE_TRANSPOSE 之一
@@ -364,7 +365,8 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(
 
 | matA 值类型 | vecX 值类型 | vecY 值类型 | computeType | 说明 |
 |------------|------------|------------|-------------|------|
-| ACL_FLOAT | ACL_FLOAT | ACL_FLOAT | ACL_FLOAT | 当前唯一支持的类型组合 |
+| ACL_FLOAT | ACL_FLOAT | ACL_FLOAT | ACL_FLOAT | 支持下表中的三种索引宽度组合 |
+| ACL_COMPLEX64 | ACL_COMPLEX64 | ACL_COMPLEX64 | ACL_COMPLEX64 | 仅支持 I32 行/列索引和 32 位 workspace 排列，nnz ≤ INT32_MAX |
 
 ## 支持的稀疏格式
 
@@ -381,6 +383,8 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(
 |----------|------|------|
 | ACL_SPARSE_INDEX_32I | ✅ | 32-bit 有符号整数索引 |
 | ACL_SPARSE_INDEX_64I | ✅ | 64-bit 有符号整数索引 |
+
+下表适用于 ACL_FLOAT。ACL_COMPLEX64 仅支持 (I32, I32)，且 workspace 排列必须为 32 位（nnz ≤ INT32_MAX）；bufferSize、analysis 和 solve 均对不支持的宽度返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 SpSV 允许 rowOffsets（ptrType）与 colInd（idxType）独立指定索引宽度，但需满足以下支持矩阵：
 
@@ -420,13 +424,13 @@ SpSV 允许 rowOffsets（ptrType）与 colInd（idxType）独立指定索引宽�
 - handle 不可为 nullptr，且须先调用 `aclsparseSetStream` 设置 stream
 - matA 必须为方阵（rows == cols）
 - matA 的索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO`（C 兼容性）和 `ACL_SPARSE_INDEX_BASE_ONE`（Fortran 兼容性）；1-based 输入时 analysis 阶段在 device 侧构建 0-based workspace CSR 副本，需要额外 workspace
-- computeType 仅支持 `ACL_FLOAT`
+- computeType 支持 `ACL_FLOAT` / `ACL_COMPLEX64`
 - alg 仅支持 `ACL_SPARSE_SPSV_ALG_DEFAULT`
-- matA 的值类型仅支持 `ACL_FLOAT`
-- matA 的 rowOffsets 与 colInd 索引宽度可独立指定，支持组合详见上方"支持的索引类型"章节；仅 (I32, I64) 组合不受支持
-- 矩阵维度 m（rows/cols）不得超过 INT32_MAX（2,147,483,647）；nnz 可超过 INT32_MAX，但此时必须使用 I64 rowOffsets（ptrType=ACL_SPARSE_INDEX_64I），colInd 可为 I32 或 I64
+- matA、vecX、vecY 的值类型须与 computeType 一致，支持 `ACL_FLOAT` / `ACL_COMPLEX64`
+- matA 的 rowOffsets 与 colInd 索引宽度可独立指定，支持组合详见上方"支持的索引类型"章节；ACL_FLOAT 不支持 (I32, I64)，ACL_COMPLEX64 仅支持 (I32, I32)
+- 矩阵维度 m（rows/cols）不得超过 INT32_MAX（2,147,483,647）；ACL_FLOAT 的 nnz 可超过 INT32_MAX，但此时必须使用 I64 rowOffsets（ptrType=ACL_SPARSE_INDEX_64I），colInd 可为 I32 或 I64
 - 允许 matA 索引未排序（colInd 无需按行内升序排列）
-- 当 m == 0 时，所有调用均合法：bufferSize 返回 0，analysis 和 solve 不启动 device kernel 直接返回 SUCCESS
+- 当 m == 0 且参数满足上述类型与索引约束时，bufferSize 返回 0，analysis 和 solve 不启动 device kernel 直接返回 SUCCESS
 - 所有接口支持异步执行，host 侧无 D2H 同步操作
 
 ### 调用顺序约束
@@ -464,6 +468,7 @@ SpSV 允许 rowOffsets（ptrType）与 colInd（idxType）独立指定索引宽�
 - COO/SLICED_ELL 格式：workspace 额外存储 CSR 副本（rowPtr + colInd + values + perm），用于格式转换
 - 1-based CSR/CSC 格式（INDEX_BASE_ONE）：workspace 额外存储 0-based CSR 副本（rowPtr + colInd + values + perm），用于将 1-based 输入归一化为 0-based 进行下游处理
 - 转置操作（TRANSPOSE/CONJUGATE_TRANSPOSE）：workspace 额外存储转置后的 CSR 副本
+- FP32 求解另外保留原始 RHS、每行解的低字和前驱误差包络，以及按需使用的整数重算区。求解专用区域为 `5*m*sizeof(float) + 10*ceil((620*m+512)/16)*sizeof(uint16_t)` 字节，再按内部对齐要求向上取整；格式转换和层级元数据另计。正常求解不访问整数重算区。依赖误差扫描与按需重算由同一 stream 上后续的单块 kernel 执行，与常规求解隔离资源占用。
 - workspace 大小由 `aclsparseSpSV_bufferSize` 计算，用户自行分配
 - workspace 在 analysis 和 solve 之间须保持有效，不可释放
 - **对齐要求**：workspace 首地址须 512B 对齐（满足 GM 基址对齐），workspace 内部各子分配区域按 64B 对齐
@@ -576,9 +581,26 @@ aclFinalize();
 | 4096 | ~4.2M | 待补充 | - |
 | 8192 | ~16.8M | 待补充 | - |
 
-> 注：当前版本无硬性性能指标，以功能正确性为主。求解阶段支持多核并行执行：当矩阵维度 m 大于 SIMT 线程数（根据 m 选取 64/128/256/2048）且估算平均层宽（≈ m²/nnz）≥ 256 时启动多核，否则回退至单核执行以避免多核间 SyncAll 同步开销。多核 analysis 采用三阶段拆分（串行/并行/收尾），通过同一 stream 排序保证跨 kernel 的 GM 可见性。
->
-> 由于 ComputeNthreads 在 m ≤ 256 时返回 m（选取 64/128/256 之一），仅在 m > 256 时 nthreads 升至 2048，因此多核执行的实际有效触发条件为 m > 2048 且估算平均层宽（≈ m²/nnz）≥ 256。
+### Host 启动配置与 Kernel 调度
+
+Host 的 `SelectNthreads` 为 FP32 在 `m <= 5000` 时选择 64 线程，较大矩阵选择 256 线程；Complex64 固定为 256 线程。`ComputeNumBlocks` 在 `m <= nthreads` 时返回 1，否则返回 `min(ceil(m/nthreads), aivCoreNum)`。这是启动资源配置，实际求解路径由 analysis 生成的层级决定，不以 `m²/nnz` 估计层宽。
+
+FP32 Kernel 的实际分流如下：
+
+- `numLevels == m`：block 0 用 32 线程执行依赖链。
+- 平均层宽 `floor(m/numLevels)` 在 2–64 且层数大于 3：block 0 求解；`nnz <= 4*m` 使用普通逐行路径，否则使用 256 线程、每行 8 线程的分组路径。
+- 启动块数大于 1 且平均层宽至少为 128：选择多块路径，但层数不超过 3 时仍由 block 0 完成整张层级表。其余多块调度每行根据 `nnz/m` 使用 1、4 或 32 线程。
+- 其余情况由 block 0 执行普通层级调度。单行层的行长至少为 256 时使用整块协作，其余单行层使用一个 warp。
+
+Complex64 Kernel 在 `numLevels == m` 时由 block 0 执行链路径；启动块数大于 1 且平均层宽至少为 256 时才逐层多块求解，否则由 block 0 求解。单块路径还识别宽前缀、串行中段与宽后缀；普通层内默认单线程处理短行，满足中长行条件时使用 4 线程分组，单行层另有 warp/整块协作路径。具体行长选择以 `SpsvSolveComplexLevelRows` 和单行层分支为准。
+
+多块求解在层间通过 `CrossCoreSetFlag` / `CrossCoreWaitFlag` 会合，并在消费跨块前驱值前失效核内数据缓存。多核 analysis 使用串行、并行、收尾三个 kernel，由同一 stream 的执行顺序保证跨 kernel 的 GM 可见性。
+
+### FP32 前驱误差与依赖重算
+
+快速求解向后继同时传递解的高低字和前向误差上界，使用向外舍入的非负乘加累积 `sum(abs(a_ij)*error_j)`。求解后检查有限输出的 FP32 舍入区间及精度预算；预算为验收相对误差阈值 `2^-10` 与绝对误差阈值 `2^-16` 的四分之一，并受 `0.0005` 绝对误差上限约束。若不能认证某行，从原始 RHS 和矩阵标记其非零前驱依赖子图，按行消除二进制指数得到整数三角系统；通过模素数求解、对角行列式和中国剩余定理恢复精确有理数结果，最后一次性舍入到 FP32。重算保留原始依赖信息，直到目标后继完成，不使用已舍入的前驱高低字代替原始输入。
+
+精确重建之前，先从原始输入按 128、256、512 位整数有效数字重算并传播带独立指数的外包误差。仅在误差区间能够认证最终 FP32 舍入结果时停止；不能认证则增加精度，三档均不能认证的行才进入 CRT。最多 8 个目标行共享依赖子图、分母及模素数求解。模数乘积超过已证明的整数行列式界两倍后才结束精确重建，不以固定的浮点展开字数作为精度认证条件。整数缓冲区为 `O(m)`；病态输入的依赖重算可能显著增加耗时。非有限输入或奇异对角的 IEEE 传播沿用原路径，整数重算只接受有限、非奇异的依赖子图。
 
 ## 支持芯片
 
@@ -624,7 +646,7 @@ SpSV 的核心并行化方法为 Level Scheduling：
 ### 求解优化
 
 - **validCount 优化**：analysis 阶段为每行预计算有效依赖元素计数（validCount），solve 阶段利用该计数跳过已处理的依赖项（按列索引排序的前缀），避免冗余遍历，对 unsorted CSR 场景性能提升显著
-- **多核并行**：当 m > nthreads 且估算平均层宽（≈ m²/nnz）≥ 256 时启动多核求解；小矩阵或深层结构（平均层宽 < 256）回退至单核执行，避免多核 SyncAll 同步开销
+- **多核并行**：Host 配置线程块数；FP32 与 Complex64 求解 Kernel 再依据 Analysis 的实际层数、层宽和行长选择单块或多块调度。具体启动配置和分流条件见[Host 启动配置与 Kernel 调度](#host-启动配置与-kernel-调度)
 - **多核 analysis**：多核路径拆分为串行（格式转换 + 顺序层计算）、并行（levelRow scatter + diagPtr/validCount）、收尾（levelPtr 修正）三个阶段，在同一 stream 上依次调度，由 stream 排序保证跨 kernel 的全局内存可见性
 
 ### 确定性保证

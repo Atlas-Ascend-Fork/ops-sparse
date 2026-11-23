@@ -183,7 +183,8 @@ inline bool CsvAllowsOmittedTrailingColumns(const std::string& csvPath,
                                   "ld_dense", "dense_order", "cd_order", "ld_cd", "direct_feed"}}},
         {"prune_test.csv", {13, {"num_batches", "batch_stride", "ld", "in_place"}}},
         {"matmulSearch_test.csv", {39, {"ld_sparse", "ld_dense", "dense_order", "cd_order", "ld_cd"}}},
-        {"spsv_test.csv", {22, {"rowptr_type", "colind_type", "force_permtype64"}}},
+        {"spsv_test.csv", {22, {"rowptr_type", "colind_type", "force_permtype64",
+                                  "value_type", "alpha_imag"}}},
     };
     const size_t separator = csvPath.find_last_of("/\\");
     const std::string fileName = csvPath.substr(separator == std::string::npos ? 0 : separator + 1);

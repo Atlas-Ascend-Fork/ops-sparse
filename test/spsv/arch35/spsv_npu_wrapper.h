@@ -15,218 +15,28 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <complex>
 #include <vector>
 
 #include "descriptor_manager.h"
 #include "fill.h"
 #include "sparse_test.h"
+#include "spsv_npu_setup.h"
+#include "../../../sparse/common/aclsparse_spsv_descr.h"
 
 namespace sparse_test {
 
-struct SpSVNpuResult {
-    std::vector<float> y;
-    std::vector<float> y2;
-    bool hasSecondSolve = false;
-};
-
-struct SpSVNpuConfig {
-    std::string format = "CSR";
-    bool isI64 = false;
-    bool isRowPtrI64 = false;  // effective rowPtr (or colOffset for CSC) index width
-    bool isColIndI64 = false;  // effective colInd (or rowInd for CSC/COO) index width
-    int32_t idxBase = 0;  // 0=INDEX_BASE_ZERO, 1=INDEX_BASE_ONE
-    bool lower = true;
-    bool unitDiag = false;
-    aclsparseOperation_t opA = ACL_SPARSE_OP_NON_TRANSPOSE;
-    bool inPlace = false;
-    bool nullVec = false;
-    std::string updateMode = "NONE";
-    int32_t sliceWidth = 1;
-};
-
-struct SpSVDeviceSetup {
-    DeviceBuffer dVals;
-    DeviceBuffer dIdx0;
-    DeviceBuffer dIdx1;
-    SpMatManager matA;
-};
-
-static inline SpSVDeviceSetup SetupCsrDescriptor(const CsrMatrix& csr, int64_t m,
-                                                   aclsparseIndexType_t rowPtrType,
-                                                   aclsparseIndexType_t colIndType,
-                                                   aclsparseIndexBase_t idxBase) {
-    SpSVDeviceSetup setup;
-    // Row offsets: independently sized by rowPtrType
-    if (rowPtrType == ACL_SPARSE_INDEX_64I) {
-        std::vector<int64_t> rowOff64(csr.rowOffsets.begin(), csr.rowOffsets.end());
-        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-            for (auto& v : rowOff64) v++;
-        }
-        setup.dIdx0 = DeviceBuffer::copyFrom(rowOff64.data(), rowOff64.size() * sizeof(int64_t));
-    } else {
-        std::vector<int32_t> rowOff(csr.rowOffsets);
-        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-            for (auto& v : rowOff) v++;
-        }
-        setup.dIdx0 = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
-    }
-    // Column indices: independently sized by colIndType
-    if (colIndType == ACL_SPARSE_INDEX_64I) {
-        std::vector<int64_t> colIdx64(csr.colIndices.begin(), csr.colIndices.end());
-        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-            for (auto& v : colIdx64) v++;
-        }
-        setup.dIdx1 = DeviceBuffer::copyFrom(colIdx64.data(), colIdx64.size() * sizeof(int64_t));
-    } else {
-        std::vector<int32_t> colIdx(csr.colIndices);
-        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-            for (auto& v : colIdx) v++;
-        }
-        setup.dIdx1 = DeviceBuffer::copyFrom(colIdx.data(), colIdx.size() * sizeof(int32_t));
-    }
-    setup.dVals = DeviceBuffer::copyFrom(csr.values.data(), csr.values.size() * sizeof(float));
-    setup.matA = SpMatManager::createCsr(m, m, csr.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
-                                           setup.dVals.get(), rowPtrType, colIndType,
-                                           idxBase, ACL_FLOAT);
-    return setup;
-}
-
-static inline SpSVDeviceSetup SetupCscDescriptor(const CsrMatrix& csr, int64_t m,
-                                                   aclsparseIndexType_t colOffType,
-                                                   aclsparseIndexType_t rowIndType,
-                                                   aclsparseIndexBase_t idxBase) {
-    CscMatrix csc;
-    csc.rows = m; csc.cols = m; csc.nnz = csr.nnz;
-    csc.colOffsets.assign(m + 1, 0);
-    csc.rowIndices.resize(csr.nnz);
-    csc.values.resize(csr.nnz);
-    for (int32_t c : csr.colIndices) csc.colOffsets[c + 1]++;
-    for (int64_t c = 0; c < m; c++) csc.colOffsets[c + 1] += csc.colOffsets[c];
-    std::vector<int32_t> counter(csc.colOffsets.begin(), csc.colOffsets.end() - 1);
-    for (int64_t i = 0; i < m; i++) {
-        for (int32_t k = csr.rowOffsets[i]; k < csr.rowOffsets[i + 1]; k++) {
-            int32_t c = csr.colIndices[k];
-            int32_t dest = counter[c]++;
-            csc.rowIndices[dest] = static_cast<int32_t>(i);
-            csc.values[dest] = csr.values[k];
-        }
-    }
-    if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-        for (auto& v : csc.colOffsets) v++;
-        for (auto& v : csc.rowIndices) v++;
-    }
-    SpSVDeviceSetup setup;
-    // Column offsets: independently sized by colOffType
-    if (colOffType == ACL_SPARSE_INDEX_64I) {
-        std::vector<int64_t> colOff64(csc.colOffsets.begin(), csc.colOffsets.end());
-        setup.dIdx0 = DeviceBuffer::copyFrom(colOff64.data(), colOff64.size() * sizeof(int64_t));
-    } else {
-        setup.dIdx0 = DeviceBuffer::copyFrom(csc.colOffsets.data(), csc.colOffsets.size() * sizeof(int32_t));
-    }
-    // Row indices: independently sized by rowIndType
-    if (rowIndType == ACL_SPARSE_INDEX_64I) {
-        std::vector<int64_t> rowIdx64(csc.rowIndices.begin(), csc.rowIndices.end());
-        setup.dIdx1 = DeviceBuffer::copyFrom(rowIdx64.data(), rowIdx64.size() * sizeof(int64_t));
-    } else {
-        setup.dIdx1 = DeviceBuffer::copyFrom(csc.rowIndices.data(), csc.rowIndices.size() * sizeof(int32_t));
-    }
-    setup.dVals = DeviceBuffer::copyFrom(csc.values.data(), csc.values.size() * sizeof(float));
-    setup.matA = SpMatManager::createCsc(m, m, csc.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
-                                           setup.dVals.get(), colOffType, rowIndType,
-                                           idxBase, ACL_FLOAT);
-    return setup;
-}
-
-static inline SpSVDeviceSetup SetupCooDescriptor(const CsrMatrix& csr, int64_t m,
-                                                   aclsparseIndexType_t idxType,
-                                                   aclsparseIndexBase_t idxBase) {
-    CooMatrix coo;
-    coo.rows = m; coo.cols = m; coo.nnz = csr.nnz;
-    coo.rowIndices.reserve(csr.nnz);
-    coo.colIndices.reserve(csr.nnz);
-    coo.values.reserve(csr.nnz);
-    for (int64_t i = 0; i < m; i++) {
-        for (int32_t k = csr.rowOffsets[i]; k < csr.rowOffsets[i + 1]; k++) {
-            coo.rowIndices.push_back(static_cast<int32_t>(i));
-            coo.colIndices.push_back(csr.colIndices[k]);
-            coo.values.push_back(csr.values[k]);
-        }
-    }
-    if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-        for (auto& v : coo.rowIndices) v++;
-        for (auto& v : coo.colIndices) v++;
-    }
-    SpSVDeviceSetup setup;
-    if (idxType == ACL_SPARSE_INDEX_64I) {
-        std::vector<int64_t> rowIdx64(coo.rowIndices.begin(), coo.rowIndices.end());
-        std::vector<int64_t> colIdx64(coo.colIndices.begin(), coo.colIndices.end());
-        setup.dIdx0 = DeviceBuffer::copyFrom(rowIdx64.data(), rowIdx64.size() * sizeof(int64_t));
-        setup.dIdx1 = DeviceBuffer::copyFrom(colIdx64.data(), colIdx64.size() * sizeof(int64_t));
-    } else {
-        setup.dIdx0 = DeviceBuffer::copyFrom(coo.rowIndices.data(), coo.rowIndices.size() * sizeof(int32_t));
-        setup.dIdx1 = DeviceBuffer::copyFrom(coo.colIndices.data(), coo.colIndices.size() * sizeof(int32_t));
-    }
-    setup.dVals = DeviceBuffer::copyFrom(coo.values.data(), coo.values.size() * sizeof(float));
-    setup.matA = SpMatManager::createCoo(m, m, coo.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
-                                           setup.dVals.get(), idxType,
-                                           idxBase, ACL_FLOAT);
-    return setup;
-}
-
-static inline SpSVDeviceSetup SetupSlicedEllDescriptor(const CsrMatrix& csr, int64_t m,
-                                                       aclsparseIndexType_t idxType,
-                                                       aclsparseIndexBase_t idxBase,
-                                                       int32_t sliceWidth = 1) {
-    SlicedEllMatrix ell = csrToSlicedEll(csr, sliceWidth);
-    if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
-        for (auto& v : ell.sliceOffsets) v++;
-        for (auto& v : ell.colIndices) {
-            if (v >= 0) v++;
-        }
-    }
-    SpSVDeviceSetup setup;
-    if (idxType == ACL_SPARSE_INDEX_64I) {
-        std::vector<int64_t> sliceOff64(ell.sliceOffsets.begin(), ell.sliceOffsets.end());
-        std::vector<int64_t> colIdx64(ell.colIndices.begin(), ell.colIndices.end());
-        setup.dIdx0 = DeviceBuffer::copyFrom(sliceOff64.data(), sliceOff64.size() * sizeof(int64_t));
-        setup.dIdx1 = DeviceBuffer::copyFrom(colIdx64.data(), colIdx64.size() * sizeof(int64_t));
-    } else {
-        setup.dIdx0 = DeviceBuffer::copyFrom(ell.sliceOffsets.data(), ell.sliceOffsets.size() * sizeof(int32_t));
-        setup.dIdx1 = DeviceBuffer::copyFrom(ell.colIndices.data(), ell.colIndices.size() * sizeof(int32_t));
-    }
-    setup.dVals = DeviceBuffer::copyFrom(ell.values.data(), ell.values.size() * sizeof(float));
-    setup.matA = SpMatManager::createSlicedEll(m, m, ell.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
-                                                setup.dVals.get(),
-                                                static_cast<int64_t>(ell.sliceWidth),
-                                                static_cast<int64_t>(ell.sliceOffsets.size()) - 1,
-                                                idxType,
-                                                idxBase, ACL_FLOAT);
-    return setup;
-}
-
-static inline SpSVDeviceSetup SetupMatrixDescriptor(const CsrMatrix& csr, const SpSVNpuConfig& cfg) {
-    int64_t m = csr.rows;
-    aclsparseIndexType_t rowPtrType = cfg.isRowPtrI64 ? ACL_SPARSE_INDEX_64I : ACL_SPARSE_INDEX_32I;
-    aclsparseIndexType_t colIndType = cfg.isColIndI64 ? ACL_SPARSE_INDEX_64I : ACL_SPARSE_INDEX_32I;
-    aclsparseIndexBase_t idxBase = (cfg.idxBase == 1) ? ACL_SPARSE_INDEX_BASE_ONE : ACL_SPARSE_INDEX_BASE_ZERO;
-    if (cfg.format == "CSR") return SetupCsrDescriptor(csr, m, rowPtrType, colIndType, idxBase);
-    if (cfg.format == "CSC") return SetupCscDescriptor(csr, m, rowPtrType, colIndType, idxBase);
-    // COO and SLICED_ELL use a single index type for both arrays; map via colIndType
-    if (cfg.format == "COO") return SetupCooDescriptor(csr, m, colIndType, idxBase);
-    if (cfg.format == "SLICED_ELL") return SetupSlicedEllDescriptor(csr, m, colIndType, idxBase, cfg.sliceWidth);
-    throw std::runtime_error("Unsupported format: " + cfg.format);
-}
-
-static inline DeviceBuffer RunAnalysis(aclsparseHandle_t handle, const SpSVNpuConfig& cfg,
-                                        float alpha, SpMatManager& matA,
+template <typename A>
+static inline DeviceBuffer RunAnalysisT(aclsparseHandle_t handle, const SpSVNpuConfig& cfg,
+                                        const A& alpha, SpMatManager& matA,
                                         DnVecManager& vecX, DnVecManager& vecY,
-                                        SpSVDescrManager& spsvDescr) {
+                                        SpSVDescrManager& spsvDescr, aclDataType computeType) {
     size_t bufferSize = 0;
     auto ret = aclsparseSpSV_bufferSize(
         handle, cfg.opA, &alpha, matA.cget(),
         cfg.nullVec ? nullptr : vecX.cget(),
         cfg.nullVec ? nullptr : vecY.get(),
-        ACL_FLOAT, ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get(), &bufferSize);
+        computeType, ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get(), &bufferSize);
     if (ret != ACL_SPARSE_STATUS_SUCCESS) {
         throw std::runtime_error("aclsparseSpSV_bufferSize failed, status=" + std::to_string(ret));
     }
@@ -236,22 +46,37 @@ static inline DeviceBuffer RunAnalysis(aclsparseHandle_t handle, const SpSVNpuCo
         handle, cfg.opA, &alpha, matA.cget(),
         cfg.nullVec ? nullptr : vecX.cget(),
         cfg.nullVec ? nullptr : vecY.get(),
-        ACL_FLOAT, ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get(),
+        computeType, ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get(),
         bufferSize > 0 ? dWorkspace.get() : nullptr);
     if (ret != ACL_SPARSE_STATUS_SUCCESS) {
         throw std::runtime_error("aclsparseSpSV_analysis failed, status=" + std::to_string(ret));
     }
+    if (cfg.analysisCacheState >= 0) {
+        if (aclrtSynchronizeEvent(spsvDescr.get()->analysisEvent) != ACL_SUCCESS) {
+            throw std::runtime_error("analysis cache synchronization failed");
+        }
+        spsvDescr.get()->cachedNumLevels = cfg.analysisCacheState ? *spsvDescr.get()->analysisNumLevels : 0;
+        spsvDescr.get()->analysisSnapshotCurrent = false;
+    }
     return dWorkspace;
 }
 
-static inline void RunSolve(aclsparseHandle_t handle, aclrtStream stream,
-                             const SpSVNpuConfig& cfg, float alpha,
+static inline DeviceBuffer RunAnalysis(aclsparseHandle_t handle, const SpSVNpuConfig& cfg,
+                                        float alpha, SpMatManager& matA,
+                                        DnVecManager& vecX, DnVecManager& vecY,
+                                        SpSVDescrManager& spsvDescr) {
+    return RunAnalysisT(handle, cfg, alpha, matA, vecX, vecY, spsvDescr, ACL_FLOAT);
+}
+
+template <typename A, typename V>
+static inline void RunSolveT(aclsparseHandle_t handle, aclrtStream stream,
+                             const SpSVNpuConfig& cfg, const A& alpha,
                              SpMatManager& matA, DnVecManager& vecX, DnVecManager& vecY,
                              SpSVDescrManager& spsvDescr, DeviceBuffer& dY,
-                             std::vector<float>& outY) {
+                             std::vector<V>& outY, aclDataType computeType) {
     auto ret = aclsparseSpSV_solve(
         handle, cfg.opA, &alpha, matA.cget(), vecX.cget(), vecY.get(),
-        ACL_FLOAT, ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get());
+        computeType, ACL_SPARSE_SPSV_ALG_DEFAULT, spsvDescr.get());
     if (ret != ACL_SPARSE_STATUS_SUCCESS) {
         throw std::runtime_error("aclsparseSpSV_solve failed, status=" + std::to_string(ret));
     }
@@ -259,7 +84,34 @@ static inline void RunSolve(aclsparseHandle_t handle, aclrtStream stream,
         throw std::runtime_error("aclrtSynchronizeStream failed after solve");
     }
     int64_t m = static_cast<int64_t>(outY.size());
-    dY.copyToHost(outY.data(), m * sizeof(float));
+    dY.copyToHost(outY.data(), m * sizeof(V));
+}
+
+static inline void RunSolve(aclsparseHandle_t handle, aclrtStream stream,
+                             const SpSVNpuConfig& cfg, float alpha,
+                             SpMatManager& matA, DnVecManager& vecX, DnVecManager& vecY,
+                             SpSVDescrManager& spsvDescr, DeviceBuffer& dY,
+                             std::vector<float>& outY) {
+    RunSolveT(handle, stream, cfg, alpha, matA, vecX, vecY, spsvDescr, dY, outY, ACL_FLOAT);
+}
+
+// Upload the new values and hand them to updateMatrix.
+//
+// Returns the device buffer: on a layout with no workspace copy (zero-base
+// CSR, NON_TRANSPOSE) a GENERAL update keeps this pointer rather than
+// copying from it, so it has to outlive the next solve.
+static inline DeviceBuffer SendUpdate(aclsparseHandle_t handle,
+                                      SpSVDescrManager& spsvDescr,
+                                      const std::vector<float>& newVals,
+                                      const std::string& updateMode) {
+    auto dNewVals = DeviceBuffer::copyFrom(newVals.data(), newVals.size() * sizeof(float));
+    aclsparseSpSVUpdate_t updatePart = (updateMode == "DIAGONAL")
+        ? ACL_SPARSE_SPSV_UPDATE_DIAGONAL : ACL_SPARSE_SPSV_UPDATE_GENERAL;
+    auto ret = aclsparseSpSV_updateMatrix(handle, spsvDescr.get(), dNewVals.get(), updatePart);
+    if (ret != ACL_SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("aclsparseSpSV_updateMatrix failed, status=" + std::to_string(ret));
+    }
+    return dNewVals;
 }
 
 /**
@@ -268,7 +120,8 @@ static inline void RunSolve(aclsparseHandle_t handle, aclrtStream stream,
  *          kernel 通过 perm[csrIdx] 映射 CSR 位置 → SELL 槽位位置，
  *          因此 updateMatrix 读取的是 SELL 槽位索引的值.
  */
-static inline void RunUpdateSellGeneral(aclsparseHandle_t handle,
+// Returns SendUpdate's buffer, which the caller must keep alive.
+static inline DeviceBuffer RunUpdateSellGeneral(aclsparseHandle_t handle,
                                          SpSVDescrManager& spsvDescr,
                                          int32_t sliceWidth, const CsrMatrix& csr) {
     std::mt19937 rng(9999);
@@ -309,12 +162,7 @@ static inline void RunUpdateSellGeneral(aclsparseHandle_t handle,
         }
     }
 
-    auto dNewVals = DeviceBuffer::copyFrom(newVals.data(), newVals.size() * sizeof(float));
-    auto ret = aclsparseSpSV_updateMatrix(handle, spsvDescr.get(), dNewVals.get(),
-                                           ACL_SPARSE_SPSV_UPDATE_GENERAL);
-    if (ret != ACL_SPARSE_STATUS_SUCCESS) {
-        throw std::runtime_error("aclsparseSpSV_updateMatrix failed, status=" + std::to_string(ret));
-    }
+    return SendUpdate(handle, spsvDescr, newVals, "GENERAL");
 }
 
 /**
@@ -322,7 +170,8 @@ static inline void RunUpdateSellGeneral(aclsparseHandle_t handle,
  * @details newVals 按 CSR 顺序索引；GENERAL 模式构造对角占优保证收敛性，
  *          DIAGONAL 模式生成随机值（仅对角线位置被 kernel 读取）.
  */
-static inline void RunUpdateCsrLayout(aclsparseHandle_t handle,
+// Returns SendUpdate's buffer, which the caller must keep alive.
+static inline DeviceBuffer RunUpdateCsrLayout(aclsparseHandle_t handle,
                                        SpSVDescrManager& spsvDescr,
                                        const std::string& updateMode,
                                        const CsrMatrix& csr) {
@@ -351,13 +200,7 @@ static inline void RunUpdateCsrLayout(aclsparseHandle_t handle,
         // DIAGONAL 模式: 全量生成随机值, 仅对角线位置被 kernel 读取
         for (size_t i = 0; i < newVals.size(); i++) newVals[i] = dist(rng);
     }
-    auto dNewVals = DeviceBuffer::copyFrom(newVals.data(), newVals.size() * sizeof(float));
-    aclsparseSpSVUpdate_t updatePart = (updateMode == "DIAGONAL")
-        ? ACL_SPARSE_SPSV_UPDATE_DIAGONAL : ACL_SPARSE_SPSV_UPDATE_GENERAL;
-    auto ret = aclsparseSpSV_updateMatrix(handle, spsvDescr.get(), dNewVals.get(), updatePart);
-    if (ret != ACL_SPARSE_STATUS_SUCCESS) {
-        throw std::runtime_error("aclsparseSpSV_updateMatrix failed, status=" + std::to_string(ret));
-    }
+    return SendUpdate(handle, spsvDescr, newVals, updateMode);
 }
 
 /**
@@ -368,7 +211,8 @@ static inline void RunUpdateCsrLayout(aclsparseHandle_t handle,
  *          实现采用"列计数 - 前缀和 - scatter"三步法：从 CSR 表示的矩阵遍历，
  *          按列散射到 CSC 顺序的 newVals 数组。
  */
-static inline void RunUpdateCsc(aclsparseHandle_t handle,
+// Returns SendUpdate's buffer, which the caller must keep alive.
+static inline DeviceBuffer RunUpdateCsc(aclsparseHandle_t handle,
                                  SpSVDescrManager& spsvDescr,
                                  const std::string& updateMode,
                                  const CsrMatrix& csr) {
@@ -424,13 +268,7 @@ static inline void RunUpdateCsc(aclsparseHandle_t handle,
         for (size_t i = 0; i < nnz; i++) newVals[i] = dist(rng);
     }
 
-    auto dNewVals = DeviceBuffer::copyFrom(newVals.data(), newVals.size() * sizeof(float));
-    aclsparseSpSVUpdate_t updatePart = (updateMode == "DIAGONAL")
-        ? ACL_SPARSE_SPSV_UPDATE_DIAGONAL : ACL_SPARSE_SPSV_UPDATE_GENERAL;
-    auto ret = aclsparseSpSV_updateMatrix(handle, spsvDescr.get(), dNewVals.get(), updatePart);
-    if (ret != ACL_SPARSE_STATUS_SUCCESS) {
-        throw std::runtime_error("aclsparseSpSV_updateMatrix failed, status=" + std::to_string(ret));
-    }
+    return SendUpdate(handle, spsvDescr, newVals, updateMode);
 }
 
 /**
@@ -443,18 +281,167 @@ static inline void RunUpdate(aclsparseHandle_t handle, aclrtStream stream,
                               DnVecManager& vecX, DnVecManager& vecY,
                               SpSVDescrManager& spsvDescr, DeviceBuffer& dY,
                               SpSVNpuResult& result) {
+    DeviceBuffer dNewVals;
     if (cfg.updateMode == "GENERAL" && cfg.format == "SLICED_ELL") {
-        RunUpdateSellGeneral(handle, spsvDescr, cfg.sliceWidth, csr);
+        dNewVals = RunUpdateSellGeneral(handle, spsvDescr, cfg.sliceWidth, csr);
     } else if (cfg.format == "CSC") {
-        RunUpdateCsc(handle, spsvDescr, cfg.updateMode, csr);
+        dNewVals = RunUpdateCsc(handle, spsvDescr, cfg.updateMode, csr);
     } else {
-        RunUpdateCsrLayout(handle, spsvDescr, cfg.updateMode, csr);
+        dNewVals = RunUpdateCsrLayout(handle, spsvDescr, cfg.updateMode, csr);
     }
 
     int64_t m = csr.rows;
     result.y2.resize(m);
+    // dNewVals stays in scope across this call on purpose: for a GENERAL
+    // update on a layout with no workspace copy the descriptor is pointing
+    // into it, and RunSolve synchronises before returning.
     RunSolve(handle, stream, cfg, alpha, matA, vecX, vecY, spsvDescr, dY, result.y2);
     result.hasSecondSolve = true;
+}
+
+struct SpSVNpuResultComplex {
+    std::vector<std::complex<float>> y;
+    std::vector<std::complex<float>> y2;         // the solve after updateMatrix
+    std::vector<std::complex<float>> newValues;  // what the update sent, CSR order
+    bool hasSecondSolve = false;
+    int32_t analysisLevels = 0;
+};
+
+// New complex values for updateMatrix.  GENERAL is parallel to the value
+// array and keeps the matrix diagonally dominant so the triangular solve
+// stays well conditioned.  DIAGONAL is indexed by ROW -- the kernel does
+// values[diagPtr[i]] = newDiag[i] -- so entry i is row i's new diagonal and
+// the rest of the buffer is never read.
+//
+// Unlike the float path, which writes this generator out a second time in the
+// test to rebuild the golden, these values are handed back to the caller, so
+// the golden cannot drift away from what the device was given.
+static inline std::vector<std::complex<float>> MakeComplexUpdateValues(
+    const CsrMatrix& csr, const std::string& updateMode) {
+    using cf = std::complex<float>;
+    std::mt19937 rng(4242);
+    std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
+    std::vector<cf> vals(static_cast<size_t>(csr.nnz), cf(0.0f, 0.0f));
+    if (updateMode != "GENERAL") {
+        // entry i is row i's diagonal; keep it away from zero so the solve
+        // stays finite, and give it an imaginary part so H differs from T
+        for (int64_t i = 0; i < csr.rows; i++) {
+            vals[i] = cf(dist(rng) + (dist(rng) < 0.0f ? -2.5f : 2.5f), dist(rng));
+        }
+        return vals;
+    }
+    for (int64_t i = 0; i < csr.rows; i++) {
+        float rowAbsSum = 0.0f;
+        int32_t diagIdx = -1;
+        for (int32_t k = csr.rowOffsets[i]; k < csr.rowOffsets[i + 1]; k++) {
+            if (csr.colIndices[k] == static_cast<int32_t>(i)) {
+                diagIdx = k;
+            } else {
+                cf v(dist(rng), dist(rng));
+                vals[k] = v;
+                rowAbsSum += std::abs(v);
+            }
+        }
+        // a real dominant diagonal, with an imaginary part small enough to
+        // keep |diag| dominant but large enough that T and H differ
+        if (diagIdx >= 0) vals[diagIdx] = cf(rowAbsSum + 1.0f, dist(rng) * 0.25f);
+    }
+    return vals;
+}
+
+// updateMatrix for the complex path.  GENERAL values go up in the format's
+// own slot order, the same ordering the initial upload used, so CSC and
+// SLICED_ELL are covered without a per-format generator; DIAGONAL values are
+// indexed by row and go up as they are.
+static inline DeviceBuffer RunUpdateComplex(aclsparseHandle_t handle,
+                                     SpSVDescrManager& spsvDescr,
+                                     const CsrMatrix& csr,
+                                     const SpSVNpuConfig& cfg,
+                                     const std::vector<std::complex<float>>& newVals) {
+    using cf = std::complex<float>;
+    std::vector<cf> buf;
+    if (cfg.updateMode == "DIAGONAL") {
+        // indexed by row, so the format's slot order does not apply
+        buf = newVals;
+    } else {
+        auto order = ValueOrder(csr, cfg);
+        buf.assign(order.size(), cf(0.0f, 0.0f));
+        for (size_t p = 0; p < order.size(); p++) {
+            if (order[p] >= 0) buf[p] = newVals[order[p]];
+        }
+    }
+    auto dNewVals = DeviceBuffer::copyFrom(buf.data(), buf.size() * sizeof(cf));
+    aclsparseSpSVUpdate_t updatePart = (cfg.updateMode == "DIAGONAL")
+        ? ACL_SPARSE_SPSV_UPDATE_DIAGONAL : ACL_SPARSE_SPSV_UPDATE_GENERAL;
+    auto ret = aclsparseSpSV_updateMatrix(handle, spsvDescr.get(), dNewVals.get(), updatePart);
+    if (ret != ACL_SPARSE_STATUS_SUCCESS) {
+        throw std::runtime_error("aclsparseSpSV_updateMatrix (complex64) failed, status="
+                                 + std::to_string(ret));
+    }
+    return dNewVals;
+}
+
+// complex64 solve.  Same shape as SpSVNpuWrapper; the structure still comes
+// from CsrMatrix and the complex values travel beside it.
+inline SpSVNpuResultComplex SpSVNpuWrapperComplex(
+    aclsparseHandle_t handle, aclrtStream stream,
+    const CsrMatrix& csr,
+    const std::vector<std::complex<float>>& values,
+    const std::vector<std::complex<float>>& xVec,
+    std::complex<float> alpha,
+    SpSVNpuConfig cfg)
+{
+    using cf = std::complex<float>;
+    cfg.valueType = ACL_COMPLEX64;
+    cfg.complexValues = &values;
+
+    int64_t m = csr.rows;
+    SpSVNpuResultComplex result;
+    result.y.assign(m, cf(0.0f, 0.0f));
+    if (m <= 0) return result;
+
+    auto setup = SetupMatrixDescriptor(csr, cfg);
+    aclsparseFillMode_t fillMode = cfg.lower ? ACL_SPARSE_FILL_MODE_LOWER : ACL_SPARSE_FILL_MODE_UPPER;
+    aclsparseDiagType_t diagType = cfg.unitDiag ? ACL_SPARSE_DIAG_TYPE_UNIT : ACL_SPARSE_DIAG_TYPE_NON_UNIT;
+    setup.matA.setAttribute(ACL_SPARSE_SPMAT_FILL_MODE, &fillMode, sizeof(fillMode));
+    setup.matA.setAttribute(ACL_SPARSE_SPMAT_DIAG_TYPE, &diagType, sizeof(diagType));
+
+    auto dX = DeviceBuffer::copyFrom(xVec.data(), xVec.size() * sizeof(cf));
+    DeviceBuffer dYStorage;
+    DeviceBuffer* dY = &dX;
+    if (!cfg.inPlace) {
+        std::vector<cf> yInit(m, cf(0.0f, 0.0f));
+        dYStorage = DeviceBuffer::copyFrom(yInit.data(), yInit.size() * sizeof(cf));
+        dY = &dYStorage;
+    }
+
+    auto vecX = DnVecManager::createConst(m, dX.get(), ACL_COMPLEX64);
+    auto vecY = DnVecManager::create(m, dY->get(), ACL_COMPLEX64);
+    SpSVDescrManager spsvDescr;
+
+    auto dWorkspace = RunAnalysisT(handle, cfg, alpha, setup.matA, vecX, vecY,
+                                   spsvDescr, ACL_COMPLEX64);
+    if (cfg.analysisCacheState >= 0) {
+        result.analysisLevels = *spsvDescr.get()->analysisNumLevels;
+    }
+    RunSolveT(handle, stream, cfg, alpha, setup.matA, vecX, vecY, spsvDescr, *dY,
+              result.y, ACL_COMPLEX64);
+
+    if (cfg.updateMode == "GENERAL" || cfg.updateMode == "DIAGONAL") {
+        result.newValues = MakeComplexUpdateValues(csr, cfg.updateMode);
+        DeviceBuffer dNewVals =
+            RunUpdateComplex(handle, spsvDescr, csr, cfg, result.newValues);
+        if (cfg.inPlace) {
+            aclrtMemcpy(dX.get(), xVec.size() * sizeof(cf), xVec.data(),
+                        xVec.size() * sizeof(cf), ACL_MEMCPY_HOST_TO_DEVICE);
+        }
+        result.y2.assign(m, cf(0.0f, 0.0f));
+        // dNewVals must outlive this solve -- see RunUpdateComplex.
+        RunSolveT(handle, stream, cfg, alpha, setup.matA, vecX, vecY, spsvDescr, *dY,
+                  result.y2, ACL_COMPLEX64);
+        result.hasSecondSolve = true;
+    }
+    return result;
 }
 
 inline SpSVNpuResult SpSVNpuWrapper(
@@ -476,25 +463,27 @@ inline SpSVNpuResult SpSVNpuWrapper(
     setup.matA.setAttribute(ACL_SPARSE_SPMAT_DIAG_TYPE, &diagType, sizeof(diagType));
 
     auto dX = DeviceBuffer::copyFrom(xVec.data(), xVec.size() * sizeof(float));
-    DeviceBuffer dY;
-    if (cfg.inPlace) {
-        dY = DeviceBuffer::alloc(m * sizeof(float));
-        auto ret = aclrtMemcpy(dY.get(), m * sizeof(float), dX.get(), m * sizeof(float), ACL_MEMCPY_DEVICE_TO_DEVICE);
-        if (ret != ACL_SUCCESS) throw std::runtime_error("aclrtMemcpy D2D failed");
-    } else {
+    DeviceBuffer dYStorage;
+    DeviceBuffer* dY = &dX;
+    if (!cfg.inPlace) {
         std::vector<float> yInit(m, 0.0f);
-        dY = DeviceBuffer::copyFrom(yInit.data(), yInit.size() * sizeof(float));
+        dYStorage = DeviceBuffer::copyFrom(yInit.data(), yInit.size() * sizeof(float));
+        dY = &dYStorage;
     }
 
     auto vecX = DnVecManager::createConst(m, dX.get(), ACL_FLOAT);
-    auto vecY = DnVecManager::create(m, dY.get(), ACL_FLOAT);
+    auto vecY = DnVecManager::create(m, dY->get(), ACL_FLOAT);
     SpSVDescrManager spsvDescr;
 
     auto dWorkspace = RunAnalysis(handle, cfg, alpha, setup.matA, vecX, vecY, spsvDescr);
-    RunSolve(handle, stream, cfg, alpha, setup.matA, vecX, vecY, spsvDescr, dY, result.y);
+    RunSolve(handle, stream, cfg, alpha, setup.matA, vecX, vecY, spsvDescr, *dY, result.y);
 
     if (cfg.updateMode == "GENERAL" || cfg.updateMode == "DIAGONAL") {
-        RunUpdate(handle, stream, cfg, alpha, csr, setup.matA, vecX, vecY, spsvDescr, dY, result);
+        if (cfg.inPlace) {
+            aclrtMemcpy(dX.get(), xVec.size() * sizeof(float), xVec.data(),
+                        xVec.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE);
+        }
+        RunUpdate(handle, stream, cfg, alpha, csr, setup.matA, vecX, vecY, spsvDescr, *dY, result);
     }
 
     return result;

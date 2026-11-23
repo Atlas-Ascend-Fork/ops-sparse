@@ -31,7 +31,12 @@ struct SpSVParam : public SparseTestParamBase {
     std::string fill_mode = "LOWER";
     std::string diag_type = "NON_UNIT";
     std::string op_type = "NON_TRANSPOSE";
+    // FLOAT or COMPLEX64.  Absent in a row means FLOAT, so the rows written
+    // before this column existed keep their meaning untouched.
+    std::string value_type = "FLOAT";
     float alpha = 1.0f;
+    // Imaginary part of alpha; only read when value_type is COMPLEX64.
+    float alpha_imag = 0.0f;
     double sparsity = 0.5;
     std::string structure = "random_triangular";
     bool in_place = false;
@@ -57,7 +62,9 @@ struct SpSVParam : public SparseTestParamBase {
         fill_mode       = parseString(row, "fill_mode");
         diag_type       = parseString(row, "diag_type");
         op_type         = parseString(row, "op_type");
+        value_type      = parseString(row, "value_type");
         alpha           = parseFloat(row, "alpha");
+        alpha_imag      = parseFloat(row, "alpha_imag");
         sparsity        = parseDouble(row, "sparsity");
         structure       = parseString(row, "structure");
         in_place        = parseBool(row, "in_place");
@@ -75,6 +82,7 @@ struct SpSVParam : public SparseTestParamBase {
         if (fill_mode.empty()) fill_mode = "LOWER";
         if (diag_type.empty()) diag_type = "NON_UNIT";
         if (op_type.empty()) op_type = "NON_TRANSPOSE";
+        if (value_type.empty()) value_type = "FLOAT";
         if (update_mode.empty()) update_mode = "NONE";
         if (expect_result.empty()) expect_result = "ACL_SPARSE_STATUS_SUCCESS";
         if (slice_width <= 0) slice_width = 1;
@@ -84,6 +92,14 @@ struct SpSVParam : public SparseTestParamBase {
 
     bool isLower() const { return fill_mode == "LOWER"; }
     bool isUnitDiag() const { return diag_type == "UNIT"; }
+    bool isComplex() const { return value_type == "COMPLEX64"; }
+    // 0 = N, 1 = T, 2 = H.  The real path only needs the transpose flag, but
+    // T and H differ once the values are complex.
+    int opCode() const {
+        if (op_type == "TRANSPOSE") return 1;
+        if (op_type == "CONJUGATE_TRANSPOSE") return 2;
+        return 0;
+    }
     bool isTranspose() const {
         return op_type == "TRANSPOSE" || op_type == "CONJUGATE_TRANSPOSE";
     }
