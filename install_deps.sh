@@ -364,14 +364,11 @@ install_cmake() {
     case "$OS" in
         debian)
             if grep -q "Ubuntu 18.04" /etc/os-release; then
-                run_command wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
-                run_command echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ bionic main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
-                run_command sudo apt update
-                run_command sudo apt install -y cmake make
-            else
-                run_command sudo $PKG_MANAGER update
-                run_command sudo $PKG_MANAGER install -y cmake make
+                echo "Ubuntu 18.04: install CMake >= ${req_ver} from a trusted source and make it available on PATH, then rerun this script." >&2
+                return 1
             fi
+            run_command sudo $PKG_MANAGER update
+            run_command sudo $PKG_MANAGER install -y cmake make
             ;;
         rhel)
             if grep -q "release 7" /etc/redhat-release; then

@@ -11,7 +11,6 @@
 
 set -e
 
-BUILD_DIR=build
 BUILD_OPS=""
 RUN_TEST=OFF
 RUN_DEVICE=0
@@ -19,11 +18,9 @@ DEVICE_SPECIFIED=FALSE
 ENABLE_PACKAGE=FALSE
 ENABLE_TORCH_EXTENSION=FALSE
 
-export BASE_PATH=$(
-  cd "$(dirname "$0")"
-  pwd
-)
-# All build outputs and cleanup below are relative to the repository root.
+BASE_PATH=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+export BASE_PATH
+# Run tools that use relative paths from the repository root.
 cd "${BASE_PATH}"
 export BUILD_PATH="${BASE_PATH}/build"
 export BUILD_OUT_PATH="${BASE_PATH}/build_out"
@@ -218,8 +215,8 @@ echo "BUILD_OPS=${BUILD_OPS}, RUN_TEST=${RUN_TEST}, ENABLE_PACKAGE=${ENABLE_PACK
 # ==========================
 # 构建
 # ==========================
-rm -rf ${BUILD_DIR}
-mkdir -p ${BUILD_DIR}
+rm -rf -- "${BUILD_PATH}"
+mkdir -p -- "${BUILD_PATH}"
 
 # 默认 SOC_VERSION，ASCEND_CANN_PACKAGE_PATH 使用环境变量
 if [ -z "${SOC_VERSION}" ]; then
@@ -243,36 +240,40 @@ fi
 
 # Default Release; override via CMAKE_BUILD_TYPE=Debug.
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
-CMAKE_OPTIONS="-DSOC_VERSION=${SOC_VERSION} -DASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME} -DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
+CMAKE_OPTIONS=(
+    "-DSOC_VERSION=${SOC_VERSION}"
+    "-DASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME}"
+    "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
+)
 
 # 帮助 find_package(ASC) 定位 ASCConfig.cmake（CMake 查找 ASC/ASCConfig.cmake 或 ASC/asc-config.cmake）
 if [ -z "${ASC_DIR}" ]; then
     for p in "${ASCEND_HOME}/lib64/cmake" "${ASCEND_HOME}/compiler/latest/lib64/cmake" \
              "${ASCEND_HOME}/ascendc/lib64/cmake"; do
         if [ -f "${p}/ASC/ASCConfig.cmake" ] || [ -f "${p}/ASC/asc-config.cmake" ]; then
-            CMAKE_OPTIONS="${CMAKE_OPTIONS} -DCMAKE_PREFIX_PATH=${p}"
+            CMAKE_OPTIONS+=("-DCMAKE_PREFIX_PATH=${p}")
             break
         fi
     done
 fi
-[ -n "${ASC_DIR}" ] && CMAKE_OPTIONS="${CMAKE_OPTIONS} -DASC_DIR=${ASC_DIR}"
+[ -n "${ASC_DIR}" ] && CMAKE_OPTIONS+=("-DASC_DIR=${ASC_DIR}")
 
 if [ -n "${BUILD_OPS}" ]; then
     # 将逗号分隔转换为 CMake 列表格式（分号分隔）
     OP_LIST_CMAKE="${BUILD_OPS//,/;}"
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DBUILD_TEST=ON -DOP_LIST=${OP_LIST_CMAKE}"
+    CMAKE_OPTIONS+=("-DBUILD_TEST=ON" "-DOP_LIST=${OP_LIST_CMAKE}")
 fi
 
 if [ "${ENABLE_PACKAGE}" == "TRUE" ]; then
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DENABLE_PACKAGE=ON -DCANN_3RD_LIB_PATH=${CANN_3RD_LIB_PATH}"
+    CMAKE_OPTIONS+=("-DENABLE_PACKAGE=ON" "-DCANN_3RD_LIB_PATH=${CANN_3RD_LIB_PATH}")
 fi
 
-cmake -B ${BUILD_DIR} ${CMAKE_OPTIONS}
-cmake --build ${BUILD_DIR} -j
+cmake -S "${BASE_PATH}" -B "${BUILD_PATH}" "${CMAKE_OPTIONS[@]}"
+cmake --build "${BUILD_PATH}" -j
 if [ "${ENABLE_PACKAGE}" == "TRUE" ]; then
-    cmake --build ${BUILD_DIR} --target package
+    cmake --build "${BUILD_PATH}" --target package
 else
-    cmake --install ${BUILD_DIR}
+    cmake --install "${BUILD_PATH}"
 fi
 
 
@@ -289,7 +290,7 @@ if [ "${RUN_TEST}" == "ON" ]; then
 
     # 读取 CMake 配置阶段生成的 skip 清单
     declare -A SKIP_REASON_MAP=()
-    SKIPPED_FILE="${BUILD_DIR}/test/skipped_tests.list"
+    SKIPPED_FILE="${BUILD_PATH}/test/skipped_tests.list"
     if [ -f "${SKIPPED_FILE}" ]; then
         while IFS='|' read -r skip_op skip_reason || [ -n "${skip_op}" ]; do
             [ -z "${skip_op}" ] && continue
@@ -307,9 +308,9 @@ if [ "${RUN_TEST}" == "ON" ]; then
             continue
         fi
 
-        TEST_BIN="${BUILD_DIR}/test/${op}/${op}_test"
+        TEST_BIN="${BUILD_PATH}/test/${op}/${op}_test"
         if [ ! -f "${TEST_BIN}" ]; then
-            found=$(find "${BUILD_DIR}/test" -name "${op}_test" -type f 2>/dev/null | head -1)
+            found=$(find "${BUILD_PATH}/test" -name "${op}_test" -type f 2>/dev/null | head -1)
             [ -n "$found" ] && TEST_BIN="$found"
         fi
         echo ""
