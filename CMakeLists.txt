@@ -243,6 +243,21 @@ set_property(SOURCE
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse/spsv/arch35/op_kernel/spsv_complex_binary64_primary.cpp
     APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off -fno-fast-math)
 
+# Harden shipped shared libraries and retain symbols for Debug diagnostics.
+foreach(sparse_target IN ITEMS ${OPS_SPARSE} ${OPS_SPARSELT})
+    if(TARGET ${sparse_target})
+        target_link_options(${sparse_target} PRIVATE
+            -Wl,-z,relro,-z,now
+            $<$<CONFIG:Release>:-Wl,-s>
+        )
+        # Bisheng compiles both host and device code. Trap signed overflow on the host.
+        target_compile_options(${sparse_target} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-ftrapv>
+            "$<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:ASC>>:SHELL:-Xhost -ftrapv>"
+        )
+    endif()
+endforeach()
+
 # ========= 安装规则（CPack 打包时放入 lib64 和 include） =========
 install(TARGETS ${OPS_SPARSE}
     LIBRARY DESTINATION lib64
