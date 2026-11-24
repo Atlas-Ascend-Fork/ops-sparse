@@ -30,7 +30,7 @@
 
     编译成功后，安装包生成在 `build_out/` 目录下，文件名类似 `cann-950-ops-sparse-<cann_version>_linux-<arch>.run`。
 
-    - `${cann_version}`：表示 toolkit 安装包版本号，需满足上文的最低版本要求。
+    - `${cann_version}`：表示 ops-sparse 的 run 包版本，取自 [cmake/version.cmake](../../../cmake/version.cmake) 中的 `OPS_SPARSE_RUN_VERSION`。
     - `${arch}`：表示 CPU 架构，如 `aarch64`、`x86_64`。
     
 
