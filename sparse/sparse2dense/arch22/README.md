@@ -1,6 +1,6 @@
-# sparse2dense arch22（Atlas A2/A3，DAV_2201）
+# sparse2dense arch22（Atlas A2系列产品和Atlas A3系列产品，DAV_2201）
 
-aclsparseSparseToDense 的 arch22 实现（Atlas A2 训练系列 910B3/910B4、Atlas A3 训练系列
+aclsparseSparseToDense 的 arch22 实现（Atlas A2系列产品中的训练产品 910B3/910B4、Atlas A3系列产品中的训练产品
 910_93）：`op_host/`（Host 校验链 CheckMeta → 坐标校验（设备侧指纹记忆化）→ FillTiling）
 + `op_kernel/`（清零 + scatter 双 kernel，桶转置 / 批量散布直写快路径）+
 `sparse2dense_host.cpp`（公开 API 描述符映射层）+ `torch_extension/`（`aten::_to_dense`

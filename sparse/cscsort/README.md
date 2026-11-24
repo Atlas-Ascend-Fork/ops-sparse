@@ -32,9 +32,9 @@ cscsort是csrsort的列向对偶：csrsort按CSR行（`csrRowPtr`划分）排序
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -84,9 +84,9 @@ aclsparseStatus_t aclsparseXcscsort_bufferSizeExt(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -364,7 +364,7 @@ P: 1 2 0 3 5 4 6
 - 稳定性保证：归并阶段`left.key <= right.key`时选左侧，同列内相同行索引的元素保持原始相对顺序。
 - 列之间相互独立，不执行跨列排序；`cscColPtr`全程不修改。
 
-Atlas A2/A3（arch22）实现差异：arch22 的 AscendC `Sort` 仅支持 half/float 键且无 SIMT 排序，kernel 采用唯一 float 合成键驱动硬件排序完成稳定升序——每段构造键 `key = (segMaxRow - row) * 2^posBits + (len - 1 - pos)`（段内实测最大行号 `segMaxRow` 由 kernel `ReduceMax` 自适应，不依赖 host 传入的 m），键为小于 2^24 的非负精确整数且段内唯一，排序结果完全确定、稳定性不依赖硬件 tie 行为；pad 槽位键 `-1.0f` 沉底。Sort 的 index 通道预填 iota，输出每秩源下标，Extract 解交织后按字节偏移 Gather 同步重排 `cscRowInd` 与 `P`。短列（`len <= runSize`）多列聚合成批：每列独占一个 32 字节对齐的 UB 槽位，逐列 DataCopyPad 搬入后整批一次硬件 `Sort<float, false>`（isFullSort=false 按 32 组独立排序，repeat=段数），单段固定开销按批摊薄（批内行域上界取整批一次 `ReduceMax` 实测，不依赖 host 传入的 m）；键宽超预算（`segRowBits + posBits > 24`）或批内混入大于 32 槽位的段时，回退逐段路径（短段标量归并、长段矢量全排）。长列（`len > runSize`）按 `runSize` 分块在 UB 排序写入 GM workspace 形成有序 run，再多趟两路稳定归并；归并的 GM 写一律经 UB 暂存 + DataCopyPad（MTE3 带字节使能），避免标量 GM 写与相邻核 MTE3 写在共享 32B 扇区上互踩。workspace 与 arch35 口径一致（`2 * nnz * sizeof(int32_t)`）。
+Atlas A2系列产品和Atlas A3系列产品（arch22）实现差异：arch22 的 AscendC `Sort` 仅支持 half/float 键且无 SIMT 排序，kernel 采用唯一 float 合成键驱动硬件排序完成稳定升序——每段构造键 `key = (segMaxRow - row) * 2^posBits + (len - 1 - pos)`（段内实测最大行号 `segMaxRow` 由 kernel `ReduceMax` 自适应，不依赖 host 传入的 m），键为小于 2^24 的非负精确整数且段内唯一，排序结果完全确定、稳定性不依赖硬件 tie 行为；pad 槽位键 `-1.0f` 沉底。Sort 的 index 通道预填 iota，输出每秩源下标，Extract 解交织后按字节偏移 Gather 同步重排 `cscRowInd` 与 `P`。短列（`len <= runSize`）多列聚合成批：每列独占一个 32 字节对齐的 UB 槽位，逐列 DataCopyPad 搬入后整批一次硬件 `Sort<float, false>`（isFullSort=false 按 32 组独立排序，repeat=段数），单段固定开销按批摊薄（批内行域上界取整批一次 `ReduceMax` 实测，不依赖 host 传入的 m）；键宽超预算（`segRowBits + posBits > 24`）或批内混入大于 32 槽位的段时，回退逐段路径（短段标量归并、长段矢量全排）。长列（`len > runSize`）按 `runSize` 分块在 UB 排序写入 GM workspace 形成有序 run，再多趟两路稳定归并；归并的 GM 写一律经 UB 暂存 + DataCopyPad（MTE3 带字节使能），避免标量 GM 写与相邻核 MTE3 写在共享 32B 扇区上互踩。workspace 与 arch35 口径一致（`2 * nnz * sizeof(int32_t)`）。
 
 ## 对齐接口
 

@@ -20,11 +20,11 @@ csr2gebsr 算子用于将 CSR（Compressed Sparse Row）格式的稀疏矩阵转
 | bfloat16 | Bh | 2B |
 | int32 | I | 4B |
 
-### 支持芯片
+### 支持产品系列
 
-| 芯片型号 | NPU 架构 | 架构目录 |
+| 产品系列 | NPU 架构 | 架构目录 |
 |----------|----------|----------|
-| Ascend 950 | dav-3510 | arch35 |
+| Ascend 950PR&950DT系列产品 | dav-3510 | arch35 |
 
 ## 算子执行接口
 
@@ -40,9 +40,9 @@ csr2gebsr 算子用于将 CSR（Compressed Sparse Row）格式的稀疏矩阵转
 
 #### 产品支持情况
 
-| 芯片型号 | 支持状态 |
+| 产品系列 | 支持状态 |
 |----------|----------|
-| Ascend 950 | 支持 |
+| Ascend 950PR&950DT系列产品 | 支持 |
 
 #### 函数原型
 
@@ -85,9 +85,9 @@ aclsparseStatus_t aclsparseScsr2gebsr_bufferSize(
 
 #### 产品支持情况
 
-| 芯片型号 | 支持状态 |
+| 产品系列 | 支持状态 |
 |----------|----------|
-| Ascend 950 | 支持 |
+| Ascend 950PR&950DT系列产品 | 支持 |
 
 #### 函数原型
 
@@ -136,9 +136,9 @@ aclsparseStatus_t aclsparseXcsr2gebsrNnz(
 
 #### 产品支持情况
 
-| 芯片型号 | 支持状态 |
+| 产品系列 | 支持状态 |
 |----------|----------|
-| Ascend 950 | 支持 |
+| Ascend 950PR&950DT系列产品 | 支持 |
 
 #### 函数原型
 
@@ -378,7 +378,7 @@ bash build.sh --soc=ascend950 --ops=csr2gebsr --run
 
 ## 测试覆盖
 
-测试文件位于 `test/csr2gebsr/`，采用 GTest + CSV 参数化测试框架，在 Ascend950 真机全部通过。
+测试文件位于 `test/csr2gebsr/`，采用 GTest + CSV 参数化测试框架，在 arch35 实测设备上全部通过。
 
 ### 测试结构
 

@@ -29,11 +29,11 @@ Blocked-ELL 格式以固定大小 `ellBlockSize × ellBlockSize` 的块为基本
 
 `aclsparseCreateBlockedEll` 为架构无关的纯 host 接口（实现位于公共层，随 libops_sparse 在全平台构建）：
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（BELL 描述符可作为 DenseToSparse 的 BELL 输入，见 densetosparse 算子）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（同上）
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持（BELL 描述符可作为 DenseToSparse 的 BELL 输入，见 densetosparse 算子）
+- Atlas A2系列产品：支持（同上）
 
-> 注意：`aclsparseBlockedEllGet` / `aclsparseConstBlockedEllGet` 两个访问器仅提供 arch35（Ascend 950PR / Ascend 950DT）实现，A2 / A3 构建不含其符号——A2 / A3 平台可创建并使用 BELL 描述符，但无法通过 Get 接口回读字段（见下两节支持矩阵）。
+> 注意：`aclsparseBlockedEllGet` / `aclsparseConstBlockedEllGet` 两个访问器仅提供 arch35（Ascend 950PR&950DT系列产品）实现，Atlas A2系列产品和Atlas A3系列产品构建不含其符号——这些产品可创建并使用 BELL 描述符，但无法通过 Get 接口回读字段（见下两节支持矩阵）。
 
 #### 函数原型
 
@@ -76,9 +76,9 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 函数原型
 
@@ -118,9 +118,9 @@ aclsparseStatus_t aclsparseBlockedEllGet(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 函数原型
 

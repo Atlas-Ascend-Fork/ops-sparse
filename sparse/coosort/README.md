@@ -43,9 +43,9 @@ coosort 算子用于对 COO（Coordinate）格式稀疏矩阵的坐标数组进�
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 函数原型
 
@@ -84,7 +84,7 @@ aclsparseStatus_t aclsparseXcoosort_bufferSizeExt(
 - 单核直排路径预留 `nnz * 12` 字节；多核路径使用两份 `[row,col,P]` ping-pong 区，约为 `nnz * 24` 字节并附带内部对齐余量；最终均向上按 128 字节对齐
 - **不带 `P` 参数**（查询接口不依赖排列 P）
 - 不校验 row/col 值域（支持负数）
-- 不校验 pBuffer 对齐（Ascend 950 硬件无此要求）
+- 不校验 pBuffer 对齐（Ascend 950PR&950DT系列产品硬件无此要求）
 
 ---
 
@@ -92,9 +92,9 @@ aclsparseStatus_t aclsparseXcoosort_bufferSizeExt(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 函数原型
 
@@ -144,9 +144,9 @@ aclsparseStatus_t aclsparseXcoosortByRow(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 函数原型
 

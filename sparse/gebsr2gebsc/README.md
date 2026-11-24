@@ -21,11 +21,11 @@ gebsr2gebsc 算子用于将 GEBSR（General Block Sparse Row）格式的稀疏�
 | int32 | ACL_INT32 | 4B |
 | int8 | ACL_INT8 | 1B |
 
-### 支持芯片
+### 支持产品系列
 
-| 芯片型号 | NPU 架构 | 架构目录 |
+| 产品系列 | NPU 架构 | 架构目录 |
 |----------|----------|----------|
-| Ascend 950 | dav-3510 | arch35 |
+| Ascend 950PR&950DT系列产品 | dav-3510 | arch35 |
 
 ## 算子执行接口
 
@@ -40,9 +40,9 @@ gebsr2gebsc 算子用于将 GEBSR（General Block Sparse Row）格式的稀疏�
 
 #### 产品支持情况
 
-| 芯片型号 | 支持状态 |
+| 产品系列 | 支持状态 |
 |----------|----------|
-| Ascend 950 | 支持 |
+| Ascend 950PR&950DT系列产品 | 支持 |
 
 #### 函数原型
 
@@ -86,9 +86,9 @@ aclsparseStatus_t aclsparseGebsr2gebsc_bufferSize(
 
 #### 产品支持情况
 
-| 芯片型号 | 支持状态 |
+| 产品系列 | 支持状态 |
 |----------|----------|
-| Ascend 950 | 支持 |
+| Ascend 950PR&950DT系列产品 | 支持 |
 
 #### 函数原型
 
@@ -255,7 +255,7 @@ bash build.sh --soc=ascend950 --ops=gebsr2gebsc --run
 
 ## 测试覆盖
 
-测试文件位于 `test/gebsr2gebsc/`，采用 GTest + CSV 参数化测试框架，在 Ascend950 真机全部通过。
+测试文件位于 `test/gebsr2gebsc/`，采用 GTest + CSV 参数化测试框架，在 arch35 实测设备上全部通过。
 
 ### 测试结构
 

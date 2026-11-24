@@ -30,8 +30,8 @@ $$
 
 | 架构 | 硬件 | 实现目录 | 说明 |
 |------|------|----------|------|
-| arch35 | Ascend 950PR / 950DT | `arch35/` | Reg 优先 scatter；memset 清零；无数据级校验 |
-| arch22 | Atlas A2 训练系列（910B3/910B4）、Atlas A3 训练系列（910_93），DAV_2201 | `arch22/` | 清零 + scatter 双 kernel；Host 校验链（CheckMeta → 坐标校验 → FillTiling），坐标越界/offsets 非法拒绝，重复坐标合法（结果取任一写入值） |
+| arch35 | Ascend 950PR&950DT系列产品 | `arch35/` | Reg 优先 scatter；memset 清零；无数据级校验 |
+| arch22 | Atlas A2系列产品（训练产品，910B3/910B4）、Atlas A3系列产品（训练产品，910_93），DAV_2201 | `arch22/` | 清零 + scatter 双 kernel；Host 校验链（CheckMeta → 坐标校验 → FillTiling），坐标越界/offsets 非法拒绝，重复坐标合法（结果取任一写入值） |
 
 两架构 `bufferSize` 均恒返回 0（零 workspace 协议）。**aclsparse API 层**：重复 `(row, col)`（COO 直接重复与 CSR/CSC 段内展开重复）合法，结果取任一写入值（并行环境下写序不确定，本实现显式约定；cuSPARSE 对重复索引不做正确性承诺）；坐标越界仍返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，乱序坐标可接受。**torch_extension 层**：遵循 PyTorch `Tensor.to_dense` 对未 coalesce COO 重复坐标的求和语义，所有 SoC 进入原生算子前预归并（见 `torch_extension/sparse2dense.py`）；CSR/CSC 段内重复在 torch 层同样取任一写入值。arch22 原生接受未 coalesce 的 COO 张量（C API 能力；torch_extension 层统一预归并后进入）。
 
@@ -290,8 +290,8 @@ Dense matrix (4 x 4, row-major):
 
 测试文件位于 `test/sparse2dense/`，采用 GTest + CSV 参数化测试框架。
 
-- **arch35（Ascend 950 真机）**：50 个测试用例（32 正确性 + 16 负向 + 2 跳过）全部通过。
-- **arch22（Atlas A2/A3 真机）**：ST 全量 123 OK + 3 SKIP（L2_001/L2_016/MultiDevice 单卡口径跳过）、Host UT 73 PASS + 1 SKIP、Python e2e 133/133、官方 ATK 精度 200/200。
+- **arch35 实测设备**：50 个测试用例（32 正确性 + 16 负向 + 2 跳过）全部通过。
+- **arch22 实测设备（Atlas A2系列产品和Atlas A3系列产品）**：ST 全量 123 OK + 3 SKIP（L2_001/L2_016/MultiDevice 单卡口径跳过）、Host UT 73 PASS + 1 SKIP、Python e2e 133/133、官方 ATK 精度 200/200。
 
 ### arch35 测试结构
 
@@ -342,9 +342,9 @@ Dense matrix (4 x 4, row-major):
 
 | 芯片 | 支持情况 |
 |------|----------|
-| Ascend 950PR / Ascend 950DT | 支持（arch35 / dav-3510） |
-| Atlas A2 训练系列（Ascend 910B3 / 910B4） | 支持（arch22 / dav-2201） |
-| Atlas A3 训练系列（Ascend 910_93） | 支持（arch22 / dav-2201） |
+| Ascend 950PR&950DT系列产品 | 支持（arch35 / dav-3510） |
+| Atlas A2系列产品（训练产品，Ascend 910B3 / 910B4） | 支持（arch22 / dav-2201） |
+| Atlas A3系列产品（训练产品，Ascend 910_93） | 支持（arch22 / dav-2201） |
 
 ## PyTorch / Torch Extension
 

@@ -4,12 +4,12 @@
 
 | 产品 | 是否支持 |
 | :--- | :---: |
-| <term>Ascend 950PR / Ascend 950DT</term> | √（arch35） |
-| <term>Atlas A3 训练系列产品 / Atlas A3 推理系列产品</term> | √（arch22） |
-| <term>Atlas A2 训练系列产品 / Atlas A2 推理系列产品</term> | √（arch22） |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √（arch35） |
+| <term>Atlas A3系列产品</term> | √（arch22） |
+| <term>Atlas A2系列产品</term> | √（arch22） |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
 ## 功能说明
 
@@ -209,7 +209,7 @@ BELL 的 index 类型支持 `ACL_SPARSE_INDEX_32I` 和
 
 value 类型要求 `matA` 与 `matB` 相同；各架构支持范围如下。
 
-| 数据类型 | 枚举 | arch22 (A2/A3) | arch35 |
+| 数据类型 | 枚举 | arch22 (Atlas A2系列产品和Atlas A3系列产品) | arch35 |
 |----------|------|----------------|---------|
 | int8 | `ACL_INT8` | 支持 | 支持 |
 | float16 | `ACL_FLOAT16` | 支持 | 支持 |
@@ -507,7 +507,7 @@ PyTorch 接口（`Tensor.to_sparse*` 的 NPU 适配）通过 `torch_extension`
 ```text
 sparse/densetosparse/
 ├── README.md
-├── arch22/                        # Atlas A2/A3（AIV 向量编程模型）
+├── arch22/                        # Atlas A2系列产品和Atlas A3系列产品（AIV 向量编程模型）
 │   ├── densetosparse_host.cpp     # 三阶段 Host 编排与校验
 │   ├── densetosparse_count_kernel.cpp   # 计数/扫描链/offsets 收尾 + 启动编排
 │   ├── densetosparse_convert_kernel.cpp # CSR/CSC/COO 载荷提取（面板快路径）
@@ -515,7 +515,7 @@ sparse/densetosparse/
 │   ├── densetosparse_judge.h      # 共享判定链/位图/几何选择
 │   ├── densetosparse_kernel.h / densetosparse_kernel_shared.h
 │   └── densetosparse_tiling_data.h
-├── arch35/                        # Ascend 950PR
+├── arch35/                        # arch35 实现
 │   ├── densetosparse_host.cpp
 │   └── densetosparse_kernel.cpp / densetosparse_kernel.h
 └── torch_extension/               # PyTorch 接口注册（JIT 单独编译）

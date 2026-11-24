@@ -118,7 +118,7 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
 
 **异步执行**：函数异步执行，返回时结果可能尚未就绪，调用后需通过 `aclrtSynchronizeStream` 同步。
 
-**平台约束**：Kernel 使用 `asc_atomic_add` 原子操作，目标架构为 arch35 / Ascend950，其他芯片不支持。
+**平台约束**：Kernel 使用 `asc_atomic_add` 原子操作，目标架构为 arch35（Ascend 950PR&950DT系列产品），其他芯片不支持。
 
 **workspace 大小**：`nnz > 0` 时 `bufferSize = (1 + stripeCount) × (n + 1) × sizeof(int32_t)`，其中 `stripeCount = min(⌈nnz / 256⌉, AIV 核数, kCsr2CscMaxStripeWorkspaceBytes / ((n+1) × sizeof(int32_t)))`（至少为 1）。段 0 为 colCount（n+1 个 int32），段 1 起为 stripeHist / 游标区（stripeCount 段，每段 n+1 个 int32）。
 
@@ -378,7 +378,7 @@ int main()
 }
 ```
 
-预期输出如下（Ascend950 示例值）：
+预期输出如下（arch35 设备示例值）：
 
 ```
 bufferSize = 32 bytes
@@ -391,4 +391,4 @@ Result CSC:
 
 ## 支持芯片
 
-Ascend950（arch35）。其他芯片（Ascend910B / Ascend910_93 / Ascend310P 等）不支持。
+Ascend 950PR&950DT系列产品（arch35）。其他芯片（Ascend910B / Ascend910_93 / Ascend310P 等）不支持。

@@ -1,6 +1,6 @@
 # aclsparseSparseToDense 自测报告
 
-> 对应任务书交付件「自测报告」。950 实测以严格交付 stamp **`20260902_153138`**（P+内存）+ ATK 闭环 stamp **`20260902_154106`** 为准。
+> 对应任务书交付件「自测报告」。arch35 实测以严格交付 stamp **`20260902_153138`**（P+内存）+ ATK 闭环 stamp **`20260902_154106`** 为准。
 
 ## 0. 任务书符合性一览
 
@@ -13,7 +13,7 @@
 | §3.4 | 内存：IO>500MB 额外≤50% **或** workspace≤L2 | **已达** | 290 条全过：12 条走 peak_50%；其余 workspace=0≤L2 |
 | 交付「自测用例」 | 覆盖自验证核心场景（CSR/CSC/COO×5 dtype×base×layout+边界） | **已达** | **自测主集 500/500**（另有任务包 200） |
 | §4 设计文档 | competitions 设计 PR | **已有** | cann-ops-competitions 设计 MR |
-| §3.5 A2/A3 交叉 | A2/A3 回归 | **未跑** | 需另申请算力（非 A5 950 门禁） |
+| §3.5 Atlas A2系列产品和Atlas A3系列产品交叉 | Atlas A2系列产品和Atlas A3系列产品回归 | **未跑** | 需另申请算力（非 arch35 门禁） |
 
 说明：任务书正文未写死「恰好 500 条」；「500」在 §3.4 指 **500MB 内存阈值**。自测主集 500 条是按 §3.5/交付件「覆盖核心场景」补齐的交付用例集。
 
@@ -21,7 +21,7 @@
 
 | 项 | 值 |
 |----|-----|
-| 硬件 | Ascend 950PR（A5） |
+| 硬件 | Ascend 950PR（arch35 实测型号） |
 | CANN | 9.1.0 |
 | 代码仓 | https://gitcode.com/longcat_chen/ops-sparse |
 | 分支 | `feature/aclsparse-sparsetodense-950` |
@@ -68,7 +68,7 @@ python3 scripts/ci/run_sparsetodense_selftest_500.py
 
 - 绑定：统一 `torch_extension`（与 SpGEMM 同构）
 - Dispatcher：`aten::_to_dense` SparseCsrPrivateUse1 / SparsePrivateUse1 → aclsparse
-- UT：`test/sparse2dense/python/test_sparse2dense_torch_extension.py`（950：12 passed）
+- UT：`test/sparse2dense/python/test_sparse2dense_torch_extension.py`（arch35：12 passed）
 
 ## 5. 内存（§3.4）
 
