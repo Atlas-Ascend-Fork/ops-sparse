@@ -35,7 +35,7 @@ C = alpha * op(A) * op(B) + beta * C
 
 - Ascend910_93 系列：支持
 - Ascend910B 系列：支持
-- Ascend 950PR / Ascend 950DT：不支持（请使用 `sparse/spmm/arch35/` 实现）
+- Ascend 950PR&950DT系列产品：不支持（请使用 `sparse/spmm/arch35/` 实现）
 
 #### 函数原型
 
@@ -90,7 +90,7 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 
 - Ascend910_93 系列：支持
 - Ascend910B 系列：支持
-- Ascend 950PR / Ascend 950DT：不支持（请使用 `sparse/spmm/arch35/` 实现）
+- Ascend 950PR&950DT系列产品：不支持（请使用 `sparse/spmm/arch35/` 实现）
 
 #### 函数原型
 
@@ -135,7 +135,7 @@ aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOpe
 
 - Ascend910_93 系列：支持
 - Ascend910B 系列：支持
-- Ascend 950PR / Ascend 950DT：不支持（请使用 `sparse/spmm/arch35/` 实现）
+- Ascend 950PR&950DT系列产品：不支持（请使用 `sparse/spmm/arch35/` 实现）
 
 #### 函数原型
 

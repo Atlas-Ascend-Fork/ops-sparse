@@ -33,9 +33,9 @@ Y[X.indices[i]] = X.values[i],  i ∈ [0, X.nnz)
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -53,7 +53,7 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 > vecX 的 `indices` 与 `values` 为 Device 内存指针，由描述符创建时（`aclsparseCreateConstSpVec` / `aclsparseCreateSpVec`）传入；vecY 的 `values` 同理由 `aclsparseCreateDnVec` 传入。
 
-#### A2/A3参数说明
+#### Atlas A2系列产品、Atlas A3系列产品参数说明
  	 
 | 参数名 | 输入/输出 | 参数类型 | 说明 |
 |--------|----------|---------|------|
@@ -61,7 +61,7 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 | vecX | 输入 | aclsparseConstSpVecDescr_t | 输入稀疏向量描述符（只读，由 `aclsparseCreateConstSpVec` / `aclsparseCreateSpVec` 创建），其 indices/values 为 Device 指针，Host 内存 |
 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量描述符（由 `aclsparseCreateDnVec` 创建），其 values 为 Device 指针，作为写入目标，Host 内存 |
 
-#### A2/A3支持数据类型
+#### Atlas A2系列产品、Atlas A3系列产品支持数据类型
 
 | 数据类型 | aclDataType | 说明 |
 |----------|-------------|------|
@@ -73,16 +73,16 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 | 索引类型 | aclsparseIndexType_t | 说明 |
 |----------|----------------------|------|
-| I32 | ACL_SPARSE_INDEX_32I | 32 位有符号整数（A2/A3 仅支持该类型） |
+| I32 | ACL_SPARSE_INDEX_32I | 32 位有符号整数（Atlas A2系列产品、Atlas A3系列产品仅支持该类型） |
 
 | 索引基址 | aclsparseIndexBase_t | 说明 |
 |----------|----------------------|------|
 | ZERO | ACL_SPARSE_INDEX_BASE_ZERO | 0-based 索引，`indices[i]` 直接用作 Y 偏移 |
 | ONE | ACL_SPARSE_INDEX_BASE_ONE | 1-based 索引，内部访问 Y 时减 1 |
 
-> A2/A3（arch22，DAV_2201）实现要求 `vecX.valueType` 必须与 `vecY.valueType` 一致且在上表五 dtype 范围内，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+> Atlas A2系列产品、Atlas A3系列产品（arch22，DAV_2201）实现要求 `vecX.valueType` 必须与 `vecY.valueType` 一致且在上表五 dtype 范围内，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 
-#### A5支持数据类型
+#### Ascend 950PR&950DT系列产品支持数据类型
 
 | 数据类型 | aclDataType | 说明 |
 |----------|-------------|------|
@@ -102,13 +102,13 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 > `vecX.valueType` 必须与 `vecY.valueType` 一致，否则返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
-#### A2/A3 约束说明
+#### Atlas A2系列产品、Atlas A3系列产品约束说明
  	 
  	 - handle、vecX、vecY 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
  	 - handle 须先调用 `aclsparseSetStream` 设置 stream
  	 - nnz == 0 时直接返回 `ACL_SPARSE_STATUS_SUCCESS`，vecY 保持不变；nnz > 0 时 vecX 的 indices/values 与 vecY 的 values 不可为 nullptr
  	 - Host 校验链（非法参数在同步返回前拦截，不启动 kernel）：`nnz > 0` 且 `vecX.size == 0` 或 `vecX.size > vecY.nums`、空指针、未声明输入输出 alias、非法 idxType/idxBase/valueType 或 `vecX.valueType != vecY.valueType`，均返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
- 	 - 当前实现的支持范围（A2/A3 arch22 交付实现，与仓内 `sparse/scatter/arch22/` 代码一致）：
+- 当前实现的支持范围（Atlas A2系列产品、Atlas A3系列产品 arch22 交付实现，与仓内 `sparse/scatter/arch22/` 代码一致）：
  	   - vecX 的索引类型（idxType）仅支持 `ACL_SPARSE_INDEX_32I`（kernel 按 int32 读取 indices）；`ACL_SPARSE_INDEX_64I` 暂未支持
  	   - vecX 的值类型（valueType）与 vecY 的值类型（valueType）一致，且仅支持 `ACL_INT8` / `ACL_FLOAT16` / `ACL_BF16` / `ACL_FLOAT` / `ACL_COMPLEX64`（complex64 为 2×fp32 交错存储）
  	   - 索引基址（idxBase）支持 `ACL_SPARSE_INDEX_BASE_ZERO` 与 `ACL_SPARSE_INDEX_BASE_ONE`（ONE 时内部访问 Y 减 1 调整）
@@ -119,7 +119,7 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
  	   - 若 indices 含重复元素，多核并发写同一 GM 地址，最终写入值为对应输入 values 之一（last-write-wins，非累加），顺序由核间调度决定，结果非确定（cuSPARSE 语义下重复索引本就未定义）。如需确定性结果，调用方应保证 indices 互异。
  	   - 升序连续索引段会命中 kernel 内部的 run-length 快速拷贝路径，获得更优性能；去重有序是性能建议而非正确性前置条件。
 
-#### A5 约束说明
+#### Ascend 950PR&950DT系列产品约束说明
 
 **shape 约束**：
 
@@ -152,7 +152,7 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 **workspace**：本算子无需 workspace，无额外 Device 内存分配。
 
-**平台约束**：Kernel 使用 SIMT（`__simt_vf__` / `asc_vf_call`）线程级并行，目标架构为 arch35 / Ascend950，其他芯片不支持。
+**平台约束**：Kernel 使用 SIMT（`__simt_vf__` / `asc_vf_call`）线程级并行，目标架构为 arch35 / Ascend 950PR&950DT系列产品，其他芯片不支持。
 
 #### 返回值
 
@@ -367,7 +367,7 @@ int main()
 }
 ```
 
-预期输出如下（Ascend950 示例值）：
+预期输出如下（arch35 示例值）：
 
 ```
 Result Y after scatter:

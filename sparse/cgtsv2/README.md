@@ -25,7 +25,7 @@ dl[i] * X[i-1,j] + d[i] * X[i,j] + du[i] * X[i+1,j] = B[i,j]
 
 ### 接口契约来源
 
-本实现依据[官方 A2/A3 任务书](https://www.hiascend.com/activities/task-center/details/b8289b3a952d4e13a9e79c3a242a8338?menu=tasks)。
+本实现依据[Atlas A2系列产品、Atlas A3系列产品官方任务书](https://www.hiascend.com/activities/task-center/details/b8289b3a952d4e13a9e79c3a242a8338?menu=tasks)。
 任务书第 2.2 节明确要求 Legacy C API 的 Kernel 直调模式，第 2.3 节指定
 `aclsparseCgtsv2_bufferSizeExt`、`aclsparseCgtsv2`。此处按任务要求确认接口体系，未新增 Generic 描述符接口。
 按评审建议复用仓库既有 `aclsparseComplex { float x; float y; }`，`aclsparseComplex_t` 仅为它的类型别名，
@@ -42,9 +42,9 @@ dl[i] * X[i-1,j] + d[i] * X[i,j] + du[i] * X[i+1,j] = B[i,j]
 
 | 产品 | 支持情况 |
 | --- | --- |
-| Atlas A2 训练/推理系列 | 支持，arch22 / DAV_2201 |
-| Atlas A3 训练/推理系列 | 支持，arch22 / DAV_2201 |
-| Ascend 950PR / Ascend 950DT | 支持，arch35 / DAV_3510 |
+| Atlas A2系列产品 | 支持，arch22 / DAV_2201 |
+| Atlas A3系列产品 | 支持，arch22 / DAV_2201 |
+| Ascend 950PR&950DT系列产品 | 支持，arch35 / DAV_3510 |
 
 #### 函数原型
 
@@ -85,7 +85,7 @@ aclsparseStatus_t aclsparseCgtsv2(aclsparseHandle_t handle, int m, int n,
 示例为 `m=3,n=1,ldb=3`，矩阵主对角线为 4、两条副对角线为 1，右端项为 `[6,12,14]`，
 解析解为 `[1,2,3]`，虚部均为 0。该接口不使用 MatDescr，也没有需要 PointerMode 的标量指针参数。
 示例使用 `AclContext` 和 `std::unique_ptr` 管理 ACL、句柄、Device 输入及 workspace，包含完整查询、执行和结果检查。
-编译与运行方式见[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)，目标 SoC 按实际 A2/A3 或 Ascend 950 设备选择。
+编译与运行方式见[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)，目标 SoC 按实际 Atlas A2系列产品、Atlas A3系列产品或 Ascend 950PR&950DT系列产品设备选择。
 
 ```cpp
 #include <array>
@@ -229,7 +229,7 @@ result[2] = (3.000000, 0.000000)
 
 #### 产品支持情况
 
-与执行接口相同，支持 Atlas A2/A3。
+与执行接口相同，支持 Atlas A2系列产品、Atlas A3系列产品。
 
 #### 函数原型
 
@@ -274,7 +274,7 @@ aclsparseStatus_t aclsparseCgtsv2_bufferSizeExt(aclsparseHandle_t handle,
 `cgtsv2_api.cpp` 统一两个公开 C 入口和尺寸、handle、指针、地址跨度、workspace 对齐校验。
 `cgtsv2_backend.h` 声明内部 `Cgtsv2WorkspaceBytes` 和 `Cgtsv2Dispatch` 钩子。
 `arch22/cgtsv2_host.cpp` 只负责本架构 workspace、UB 准入和 kernel 派发。
-`arch35/cgtsv2_host.cpp` 接入同一组内部钩子，独立查询有界 RHS 槽位工作区并派发 950 内核。
+`arch35/cgtsv2_host.cpp` 接入同一组内部钩子，独立查询有界 RHS 槽位工作区并派发 arch35 内核。
 两个架构复用上游的 `aclsparseComplex_t`（`aclsparseComplex` 的 `x/y` 别名），保持两组 FP32、8 字节及 float 对齐的公共布局。
 
 ### arch22 数值与内存路径
@@ -307,7 +307,7 @@ Host 与 Device 共用 `arch22/cgtsv2_tiling_data.h` 常量；准入额外保留
 
 ### arch35 数值与内存路径
 
-Ascend 950 使用带相邻部分选主元的 twofold FP32 复数求解，实部、虚部保留独立指数。
+Ascend 950PR&950DT系列产品使用带相邻部分选主元的 twofold FP32 复数求解，实部、虚部保留独立指数。
 满足设备端强对角占优及数值范围门槛的输入走共享系数 PCR，其余输入走扩展范围通用路径。
 内部计算仍使用 real/imag 表示，公共数据的 x/y 分量按同一字节顺序读写。
 
@@ -320,5 +320,5 @@ Ascend 950 使用带相邻部分选主元的 twofold FP32 复数求解，实部�
 接口保持异步，Device 执行错误在调用方同步 stream 时检查。中途失败前已提交的任务仍可能执行，
 释放或复用数据及工作区前仍须同步。
 
-950 实现依据[官方 950 任务书](https://www.hiascend.com/activities/task-center/details/3c8d06bce4f54557b895de27e3737e0f)。
+arch35 实现依据[Ascend 950PR&950DT系列产品官方任务书](https://www.hiascend.com/activities/task-center/details/3c8d06bce4f54557b895de27e3737e0f)。
 编译运行示例：`bash build.sh --soc=ascend950 --ops=cgtsv2 --run --device=0`。

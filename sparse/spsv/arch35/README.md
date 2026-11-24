@@ -1,4 +1,4 @@
-# SpSV on Ascend 950
+# SpSV arch35 实现说明
 
 The implementation keeps host planning, device execution and their shared layout separate.
 

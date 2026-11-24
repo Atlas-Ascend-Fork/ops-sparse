@@ -4,11 +4,11 @@
 
 | 产品 | 是否支持 | SOC与架构 |
 | --- | --- | --- |
-| Atlas A3 训练系列产品 / Atlas A3 推理系列产品 | √ | ascend910_93*，DAV_2201 |
-| Atlas A2 训练系列产品 / Atlas A2 推理系列产品 | √ | ascend910b*，DAV_2201 |
+| Atlas A3系列产品 | √ | ascend910_93*，DAV_2201 |
+| Atlas A2系列产品 | √ | ascend910b*，DAV_2201 |
 
-本路径使用CANN 9.1.0及配套ASC编译器，A2与A3均由构建系统选择arch22。
-Ascend 950使用同仓独立的[arch35实现](../README.md)，不经过本Kernel路径。
+本路径使用CANN 9.1.0及配套ASC编译器，Atlas A2系列产品与Atlas A3系列产品均由构建系统选择arch22。
+Ascend 950PR&950DT系列产品使用同仓独立的[arch35实现](../README.md)，不经过本Kernel路径。
 
 ## 功能说明
 
@@ -115,13 +115,13 @@ torch_npu可后续导入。嵌入式程序应在首次启用互操作前准备�
 端到端生命周期、错误行为、四格式、原地及异步资源释放示例在
 [C++设备测试](../../../test/spsv/arch22/spsv_test.cpp)中。
 
-从仓库根目录执行。`SOC`默认选择A2，构建A3时改为`ascend910_93`；
+从仓库根目录执行。`SOC`默认选择Atlas A2系列产品，构建Atlas A3系列产品时改为`ascend910_93`；
 如环境提供具体的SOC后缀，则填写与目标设备配套的实际SOC名称。
 
 ```bash
 source /usr/local/Ascend/cann-9.1.0/set_env.sh
 SOC=ascend910b3
-# A3：SOC=ascend910_93
+# Atlas A3系列产品：SOC=ascend910_93
 cmake -S . -B "build-$SOC" -DSOC_VERSION="$SOC" -DOP_LIST=spsv -DBUILD_TEST=ON
 cmake --build "build-$SOC" -j4
 SPSV_TEST_DEVICE_ID=0 "./build-$SOC/test/spsv/spsv_test"

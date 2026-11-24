@@ -4,22 +4,22 @@
 
 | 产品 | 是否支持 | 实现说明 |
 | --- | --- | --- |
-| Ascend 950PR / Ascend 950DT | √ | 本页的Ascend 950接口说明 |
-| Atlas A3 训练系列产品 / Atlas A3 推理系列产品 | √ | [arch22](arch22/README.md) |
-| Atlas A2 训练系列产品 / Atlas A2 推理系列产品 | √ | [arch22](arch22/README.md) |
-| Atlas 200I/500 A2 推理产品 | × | — |
-| Atlas 推理系列产品 | × | — |
-| Atlas 训练系列产品 | × | — |
+| Ascend 950PR&950DT系列产品 | √ | 本页的Ascend 950PR&950DT系列产品接口说明 |
+| Atlas A3系列产品 | √ | [arch22](arch22/README.md) |
+| Atlas A2系列产品 | √ | [arch22](arch22/README.md) |
+| Atlas 200I/500 A2推理产品 | × | — |
+| Atlas推理系列产品 | × | — |
+| Atlas训练系列产品 | × | — |
 
-Atlas A2的`ascend910b*`与Atlas A3的`ascend910_93*`选择arch22，支持FP32和complex64。
-A2/A3的参数、同步行为、workspace和调用示例见[arch22接口说明](arch22/README.md)，
+Atlas A2系列产品的`ascend910b*`与Atlas A3系列产品的`ascend910_93*`选择arch22，支持FP32和complex64。
+Atlas A2系列产品、Atlas A3系列产品的参数、同步行为、workspace和调用示例见[arch22接口说明](arch22/README.md)，
 编译与回归入口见[测试说明](../../test/spsv/README.md)。
 
 arch22默认提交已加载torch_npu的Host队列，纯ACL调用方可通过
 `OPS_SPARSE_SPSV_TORCH_QUEUE=0`关闭该互操作。触发条件、GIL行为、告警降级、
 提交失败和解释器生命周期约束见[框架队列互操作](arch22/README.md#框架队列互操作)。
 
-下述详细接口与示例针对Ascend 950的arch35实现；不同架构的约束分别维护。
+下述详细接口与示例针对Ascend 950PR&950DT系列产品的arch35实现；不同架构的约束分别维护。
 
 ## 算子概述
 
@@ -57,9 +57,9 @@ SpSV 采用三阶段执行模型（bufferSize → analysis → solve），对标
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -84,9 +84,9 @@ aclsparseStatus_t aclsparseSpSV_createDescr(aclsparseSpSVDescr_t *spsvDescr)
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -110,9 +110,9 @@ aclsparseStatus_t aclsparseSpSV_destroyDescr(aclsparseSpSVDescr_t spsvDescr)
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -156,9 +156,9 @@ aclsparseStatus_t aclsparseSpSV_bufferSize(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -205,9 +205,9 @@ aclsparseStatus_t aclsparseSpSV_analysis(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -255,9 +255,9 @@ aclsparseStatus_t aclsparseSpSV_solve(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -295,9 +295,9 @@ aclsparseStatus_t aclsparseSpSV_updateMatrix(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -332,9 +332,9 @@ aclsparseStatus_t aclsparseSpMatSetAttribute(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -606,9 +606,9 @@ Complex64 Kernel 在 `numLevels == m` 时由 block 0 执行链路径；启动块
 
 | 芯片 | 架构 | 支持情况 |
 |------|------|---------|
-| Ascend 950PR | arch35 (DAV_3510) | ✅ 支持 |
-| Atlas A3 系列 | arch22 (DAV_2201) | ✅ 支持 |
-| Atlas A2 系列 | arch22 (DAV_2201) | ✅ 支持 |
+| Ascend 950PR&950DT系列产品 | arch35 (DAV_3510) | ✅ 支持 |
+| Atlas A3系列产品 | arch22 (DAV_2201) | ✅ 支持 |
+| Atlas A2系列产品 | arch22 (DAV_2201) | ✅ 支持 |
 
 ## 算法说明
 

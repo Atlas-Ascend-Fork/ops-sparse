@@ -45,7 +45,7 @@ A = [ 0    dl2   d2    du2   0     0   ]
 
 | 芯片系列 | 支持情况 |
 |---------|---------|
-| Ascend950 (Ascend950DT / Ascend950PR) | ✅ 支持（arch35, SIMD 编程模型） |
+| Ascend 950PR&950DT系列产品 | ✅ 支持（arch35, SIMD 编程模型） |
 | Ascend910B | ❌ 不支持 |
 | Ascend910_93 | ❌ 不支持 |
 
@@ -57,7 +57,7 @@ A = [ 0    dl2   d2    du2   0     0   ]
 
 | 芯片系列 | 支持情况 |
 |---------|---------|
-| Ascend950 (Ascend950DT / Ascend950PR) | ✅ 支持 |
+| Ascend 950PR&950DT系列产品 | ✅ 支持 |
 | Ascend910B | ❌ 不支持 |
 | Ascend910_93 | ❌ 不支持 |
 
@@ -109,7 +109,7 @@ aclsparseStatus_t aclsparseSgtsv2StridedBatch_bufferSizeExt(
 
 | 芯片系列 | 支持情况 |
 |---------|---------|
-| Ascend950 (Ascend950DT / Ascend950PR) | ✅ 支持 |
+| Ascend 950PR&950DT系列产品 | ✅ 支持 |
 | Ascend910B | ❌ 不支持 |
 | Ascend910_93 | ❌ 不支持 |
 

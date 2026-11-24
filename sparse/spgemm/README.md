@@ -4,12 +4,12 @@
 
 | 产品 | 是否支持 |
 | :--- | :---: |
-| <term>Ascend 950PR</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | √ |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | √ |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term>（当前支持范围为 Ascend 950PR系列产品） | √ |
+| <term>Atlas A3系列产品</term> | √ |
+| <term>Atlas A2系列产品</term> | √ |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
 ## 功能说明
 
@@ -138,7 +138,7 @@ aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
 
 ### aclsparseSpGEMMEstimateMemory
 
-用于查询 Compute workspace。ALG2/ALG3 的 `chunkFraction` 必须位于 `(0, 1]`。当前 Ascend 950PR
+用于查询 Compute workspace。ALG2/ALG3 的 `chunkFraction` 必须位于 `(0, 1]`。当前 Ascend 950PR系列产品的
 确定性实现返回 `bufferSize3=0`，`externalBuffer3` 为兼容多阶段接口保留。
 
 #### 函数原型
@@ -389,7 +389,7 @@ sparse/spgemm/
 ├── common/
 │   ├── spgemm_common.h        # 跨 arch 共享的类型与规格定义
 │   └── spgemm_validate.cpp    # 公共参数校验
-├── arch22/                    # Atlas A2/A3
+├── arch22/                    # Atlas A2系列产品、Atlas A3系列产品
 │   ├── README.md
 │   ├── spgemm.h
 │   ├── spgemm_host.cpp
@@ -400,7 +400,7 @@ sparse/spgemm/
 │   ├── spgemm_merge_emit.h
 │   ├── spgemm_merge_row.h
 │   └── spgemm_value.h
-├── arch35/                    # Ascend 950PR
+├── arch35/                    # arch35 实现
 │   ├── spgemm.h
 │   ├── spgemm_host.cpp
 │   ├── spgemm_kernel.cpp

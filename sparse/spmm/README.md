@@ -31,9 +31,9 @@ C = alpha * op(A) * op(B) + beta * C
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -53,8 +53,8 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950 的 INT8 组合使用 `ACL_INT32`，Host 内存 |
-| alg | 输入 | aclsparseSpMMAlg_t | 算法类型；A2/A3 支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3 和 FP32_HIGH_PRECISION，Host 内存；不同算法会选择对应的布局/确定性路径 |
+| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950PR&950DT系列产品的 INT8 组合使用 `ACL_INT32`，Host 内存 |
+| alg | 输入 | aclsparseSpMMAlg_t | 算法类型；Atlas A2系列产品、Atlas A3系列产品支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3 和 FP32_HIGH_PRECISION，Host 内存；不同算法会选择对应的布局/确定性路径 |
 | size | 输出 | size_t* | 输出所需 workspace 大小（字节），Host 内存 |
 
 #### 约束说明
@@ -63,7 +63,7 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 - matA、matB、matC 不可为 nullptr
 - matA 仅支持 CSR 格式（`ACL_SPARSE_FORMAT_CSR`）
 - matA 的行偏移和列索引类型必须均为 `ACL_SPARSE_INDEX_32I`，且两者类型相同
-##### Ascend 950
+##### Ascend 950PR&950DT系列产品
 
 - matA 的索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
 - opA 支持非转置、转置和共轭转置；CSR_ALG3 仅支持非转置
@@ -85,24 +85,24 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 - 转置预处理保存 CSR 结构和原始 values 的置换关系，执行时读取当前 values；Complex64 共轭转置同时取复数共轭。
 - 非零维矩阵允许 `nnz=0` 和空行。
 
-##### A2/A3
+##### Atlas A2系列产品、Atlas A3系列产品
 
-- A2/A3 的 matA 索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
-- A2/A3 的 opA/opB 支持 `ACL_SPARSE_OP_NON_TRANSPOSE`、`ACL_SPARSE_OP_TRANSPOSE` 和
+- Atlas A2系列产品、Atlas A3系列产品的 matA 索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`
+- Atlas A2系列产品、Atlas A3系列产品的 opA/opB 支持 `ACL_SPARSE_OP_NON_TRANSPOSE`、`ACL_SPARSE_OP_TRANSPOSE` 和
   `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE`
-- A2/A3 的 B/C 支持行主序和列主序；行主序 `ld >= max(1, cols)`，列主序
+- Atlas A2系列产品、Atlas A3系列产品的 B/C 支持行主序和列主序；行主序 `ld >= max(1, cols)`，列主序
   `ld >= max(1, rows)`
-- A2/A3 数据类型组合支持以下四种：
+- Atlas A2系列产品、Atlas A3系列产品数据类型组合支持以下四种：
   - matA=ACL_FLOAT, matB=ACL_FLOAT, matC=ACL_FLOAT, computeType=ACL_FLOAT
   - matA=ACL_FLOAT16, matB=ACL_FLOAT16, matC=ACL_FLOAT16, computeType=ACL_FLOAT
   - matA=ACL_BF16, matB=ACL_BF16, matC=ACL_BF16, computeType=ACL_FLOAT
   - matA=ACL_COMPLEX64, matB=ACL_COMPLEX64, matC=ACL_COMPLEX64, computeType=ACL_COMPLEX64
 - 维度匹配按 opA/opB 后的逻辑形状校验
 - M/K/N 均允许为 0；零长度输出直接成功返回，K=0 时结果遵循 `C = beta * C`
-- A2/A3 的 `CSR_ALG1` 使用布局感知通用路径，优先用于列主序 B/C；`CSR_ALG2` 在紧凑行主序
+- Atlas A2系列产品、Atlas A3系列产品的 `CSR_ALG1` 使用布局感知通用路径，优先用于列主序 B/C；`CSR_ALG2` 在紧凑行主序
   N/N 组合下使用行主序快路径，其余合法布局回退通用路径；`CSR_ALG3` 使用固定原始行序，
   要求 opA 为非转置且 opB 不是共轭转置
-- A2/A3 的 `FP32_HIGH_PRECISION` 仅支持 fp32，使用 Kahan 补偿求和
+- Atlas A2系列产品、Atlas A3系列产品的 `FP32_HIGH_PRECISION` 仅支持 fp32，使用 Kahan 补偿求和
 - size 不可为 nullptr
 
 #### 支持的稀疏格式
@@ -119,9 +119,9 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -141,7 +141,7 @@ aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOpe
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950 的 INT8 组合使用 `ACL_INT32`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950PR&950DT系列产品的 INT8 组合使用 `ACL_INT32`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型，Host 内存 |
 | buffer | 输入 | void* | workspace 缓冲区（由 GetBufferSize 返回的大小分配），Device 内存 |
 
@@ -164,9 +164,9 @@ aclsparseStatus_t aclsparseSpMMPreprocess(aclsparseHandle_t handle, aclsparseOpe
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -186,7 +186,7 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 | matB | 输入 | aclsparseConstDnMatDescr_t | 稠密矩阵 B 的描述符，Host 内存 |
 | beta | 输入 | const void* | 标量 beta 指针。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | matC | 输入/输出 | aclsparseDnMatDescr_t | 稠密矩阵 C 的描述符，Host 内存 |
-| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950 的 INT8 组合使用 `ACL_INT32`，Host 内存 |
+| computeType | 输入 | aclDataType | 计算精度类型；实数使用 `ACL_FLOAT`，复数使用 `ACL_COMPLEX64`；Ascend 950PR&950DT系列产品的 INT8 组合使用 `ACL_INT32`，Host 内存 |
 | alg | 输入 | aclsparseSpMMAlg_t | 算法类型，Host 内存 |
 | buffer | 输入 | void* | workspace 缓冲区（由 GetBufferSize 返回的大小分配），Device 内存 |
 
@@ -194,11 +194,11 @@ aclsparseStatus_t aclsparseSpMM(aclsparseHandle_t handle, aclsparseOperation_t o
 
 - 同 aclsparseSpMMGetBufferSize 的约束
 - buffer 不可为 nullptr，需按 GetBufferSize 返回的大小分配
-- A2/A3 调用前须先调用 `aclsparseSpMMPreprocess` 进行预处理
-- Ascend 950 的 `aclsparseSpMMPreprocess` 为可选步骤，首次直接执行会构建 workspace
-- A2/A3 支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3、FP32_HIGH_PRECISION；算法会参与 host
+- Atlas A2系列产品、Atlas A3系列产品调用前须先调用 `aclsparseSpMMPreprocess` 进行预处理
+- Ascend 950PR&950DT系列产品的 `aclsparseSpMMPreprocess` 为可选步骤，首次直接执行会构建 workspace
+- Atlas A2系列产品、Atlas A3系列产品支持 DEFAULT、CSR_ALG1、CSR_ALG2、CSR_ALG3、FP32_HIGH_PRECISION；算法会参与 host
   侧路径选择，CSR_ALG3 的操作限制见 GetBufferSize 约束
-- A2/A3 的 `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` 仅支持 fp32，使用 Kahan 补偿求和
+- Atlas A2系列产品、Atlas A3系列产品的 `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` 仅支持 fp32，使用 Kahan 补偿求和
 
 #### 支持的稀疏格式
 

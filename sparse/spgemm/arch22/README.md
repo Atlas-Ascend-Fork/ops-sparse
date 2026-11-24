@@ -1,6 +1,6 @@
-# SpGEMM arch22 实现说明（Atlas A2 / A3，dav-2201）
+# SpGEMM arch22 实现说明（Atlas A2系列产品、Atlas A3系列产品，dav-2201）
 
-本目录为 SpGEMM 在 Atlas A2 / A3（`NPU_ARCH=dav-2201`）上的实现，使用 **Ascend C 向量
+本目录为 SpGEMM 在 Atlas A2系列产品、Atlas A3系列产品（`NPU_ARCH=dav-2201`）上的实现，使用 **Ascend C 向量
 编程模型**（`TPipe` / `TQue` / `DataCopyPad`），与仓内 `spmm/arch22` 一致。
 
 硬件无关的描述符、状态机与入参校验位于 `../common/`，本目录只负责 arch22 的 tiling
@@ -137,12 +137,12 @@ SpGEMM 描述符的上下文中。Compute 据此选择独立的符号 Kernel 模
 | 数值抵消为 0 | **保留显式零**（结构由坐标决定，不做数值判断） |
 | INF/NAN 输入 | 按 IEEE754 正常传播，结构不受影响 |
 
-## 与 A5（arch35）共存
+## 与 arch35 实现共存
 
-- `common/` 只放硬件无关逻辑，A5 的 SIMT 细节不进入公共层；
+- `common/` 只放硬件无关逻辑，arch35 的 SIMT 细节不进入公共层；
 - `arch22/` 与 `arch35/` 目录互不重叠，CMake 依 `SOC_VERSION` 自动挑选
   （`ascend910b*` / `ascend910_93*` → `arch22`）；
 - 唯一共享文件 `include/cann_ops_sparse.h` 沿用同一套 `aclsparseSpGEMM*` 声明，
   不重复新增同名或同功能接口；
 - 核数不写死：一律走 `GetAivCoreCount()` 运行时查询，tiling 参数按查询结果推导，
-  故 A2 上调好的实现在 A3（核数与带宽不同）无需改代码。
+  故 Atlas A2系列产品上调好的实现在 Atlas A3系列产品（核数与带宽不同）无需改代码。

@@ -1,4 +1,4 @@
-# SDDMM（Atlas A2/A3）
+# SDDMM（Atlas A2系列产品、Atlas A3系列产品）
 
 ## 功能
 

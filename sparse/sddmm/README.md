@@ -4,8 +4,8 @@
 
 SDDMM（Sampled Dense-Dense Matrix Multiplication，采样稠密-稠密矩阵乘法）只在稀疏矩阵 C 的 pattern 位置计算两个稠密矩阵的乘积，并将结果原地写回 C 的 values 数组。接口语义参考 cuSPARSE Generic API 的 `cusparseSDDMM`。
 
-本目录同时包含 Atlas A2/A3（`arch22/`）和 Ascend 950（`arch35/`）实现。
-下文详细说明 Ascend 950；Atlas A2/A3 的支持矩阵、预处理和 stream 约定见
+本目录同时包含 Atlas A2系列产品、Atlas A3系列产品（`arch22/`）和 Ascend 950PR&950DT系列产品（`arch35/`）实现。
+下文详细说明 arch35 实现；Atlas A2系列产品、Atlas A3系列产品的支持矩阵、预处理和 stream 约定见
 [arch22 说明](arch22/README.md)。两种架构均支持 CSR/BSR、base 0/1、
 Host/Device 标量、复数、空矩阵和 BSR strided batch，具体限制按各架构说明执行。
 
@@ -45,7 +45,7 @@ C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
 
 ## 实现目录
 
-Ascend 950 实现按 Host、Device 及稀疏格式组织：
+arch35 实现按 Host、Device 及稀疏格式组织：
 
 ```text
 arch35/
@@ -85,7 +85,7 @@ arch35/
 
 ## PyTorch 接口
 
-Ascend 950 上通过统一 `cann_ops_sparse` wheel 使用 `torch.sparse.sampled_addmm`：
+Ascend 950PR&950DT系列产品上通过统一 `cann_ops_sparse` wheel 使用 `torch.sparse.sampled_addmm`：
 
 ```python
 import torch
@@ -110,9 +110,9 @@ torch.sparse.sampled_addmm(pattern, mat1, mat2, out=result)
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -195,7 +195,7 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
 | 格式 | 支持 | 说明 |
 |------|------|------|
 | CSR | ✅ | I32 index，base 0/1 |
-| BSR | ✅ | 方块 BSR，ROW/COL 块内布局及 strided batch；Atlas A2/A3 约束见 arch22 说明 |
+| BSR | ✅ | 方块 BSR，ROW/COL 块内布局及 strided batch；Atlas A2系列产品、Atlas A3系列产品约束见 arch22 说明 |
 | COO | ❌ | 不支持 |
 | CSC | ❌ | 不支持 |
 
@@ -205,9 +205,9 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -249,7 +249,7 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
 | 格式 | 支持 | 说明 |
 |------|------|------|
 | CSR | ✅ | I32 index，base 0/1 |
-| BSR | ✅（Ascend 950） | 方块 BSR，ROW/COL 块内布局及 strided batch |
+| BSR | ✅（Ascend 950PR&950DT系列产品） | 方块 BSR，ROW/COL 块内布局及 strided batch |
 | COO | ❌ | 不支持 |
 | CSC | ❌ | 不支持 |
 
@@ -259,9 +259,9 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持
+- Atlas A2系列产品：支持
 
 #### 函数原型
 
@@ -302,7 +302,7 @@ aclsparseStatus_t aclsparseSDDMM(
 | 格式 | 支持 | 说明 |
 |------|------|------|
 | CSR | ✅ | I32 index，base 0/1 |
-| BSR | ✅（Ascend 950） | 方块 BSR，ROW/COL 块内布局及 strided batch |
+| BSR | ✅（Ascend 950PR&950DT系列产品） | 方块 BSR，ROW/COL 块内布局及 strided batch |
 | COO | ❌ | 不支持 |
 | CSC | ❌ | 不支持 |
 
@@ -573,6 +573,6 @@ complex64 的实部和虚部分别按 FLOAT32 规则比较；CPU Golden 使用 c
 
 ## 支持芯片
 
-- Ascend 950PR / Ascend 950DT（架构 arch35 / DAV_3510）
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
-- Ascend 910B（架构 arch22 / DAV_2201）：对应 Atlas A2 训练系列产品 / Atlas A2 推理系列产品
+- Ascend 950PR&950DT系列产品（架构 arch35 / DAV_3510）
+- Atlas A3系列产品：支持
+- Ascend 910B（架构 arch22 / DAV_2201）：对应 Atlas A2系列产品

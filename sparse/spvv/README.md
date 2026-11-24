@@ -14,9 +14,9 @@ x 为稀疏向量（`aclsparseSpVecDescr_t`，索引须升序唯一、0 基、in
 
 | 产品 | 支持情况 |
 | --- | --- |
-| Atlas A2 训练/推理系列 | 支持，arch22 / DAV_2201 |
-| Atlas A3 训练/推理系列 | 支持，arch22 / DAV_2201 |
-| Ascend 950PR / Ascend 950DT | 不支持 |
+| Atlas A2系列产品 | 支持，arch22 / DAV_2201 |
+| Atlas A3系列产品 | 支持，arch22 / DAV_2201 |
+| Ascend 950PR&950DT系列产品 | 不支持 |
 
 ## 接口说明
 
@@ -65,7 +65,7 @@ aclsparseDestroy(handle);
 
 ```text
 sparse/spvv/
-└── arch22/               # Atlas A2/A3（DAV_2201）
+└── arch22/               # Atlas A2系列产品、Atlas A3系列产品（DAV_2201）
     ├── spvv_host.cpp     # Host 侧 API（参数校验 + kernel 下发）
     ├── spvv_kernel.cpp   # Kernel 侧向量化实现
     ├── spvv_kernel.h     # kernel_do 启动器声明

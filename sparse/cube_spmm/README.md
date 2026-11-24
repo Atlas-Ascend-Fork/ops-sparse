@@ -52,8 +52,8 @@ C = alpha * A * B + beta * C
 
 #### 产品支持情况
 
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
-- Ascend 910B：支持  
+- Atlas A2系列产品：支持
+- 对应芯片为 Ascend 910B。
 
 #### 函数原型
 
@@ -92,8 +92,8 @@ aclsparseStatus_t aclsparseCreateCubeSpmmMat(
 
 #### 产品支持情况
 
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
-- Ascend 910B：支持
+- Atlas A2系列产品：支持
+- 对应芯片为 Ascend 910B。
 
 #### 函数原型
 
@@ -119,8 +119,8 @@ aclsparseStatus_t aclsparseDestroyCubeSpmmMat(
 
 #### 产品支持情况
 
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
-- Ascend 910B：支持
+- Atlas A2系列产品：支持
+- 对应芯片为 Ascend 910B。
 
 #### 函数原型
 
@@ -161,7 +161,7 @@ aclsparseStatus_t aclsparseCubeSpmmPadDenseMatrixB(
 
 #### 产品支持情况
 
-- Ascend 910B：支持
+- Atlas A2系列产品（Ascend 910B）：支持
 
 #### 函数原型
 
@@ -207,7 +207,7 @@ aclsparseStatus_t aclsparseCubeSpmmGetBufferSize(
 
 #### 产品支持情况
 
-- Ascend 910B：支持
+- Atlas A2系列产品（Ascend 910B）：支持
 
 #### 函数原型
 

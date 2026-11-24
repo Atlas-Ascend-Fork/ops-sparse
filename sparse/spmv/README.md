@@ -12,7 +12,7 @@ y = alpha * op(A) * x + beta * y
 
 其中 op(A) 为稀疏矩阵 A 的操作（转置/非转置），x 为输入稠密向量，y 为输入/输出稠密向量。
 
-仓库包含两套实现：arch22（Atlas A2/A3，DAV_2201）与 arch35（Ascend 950PR/950DT），共享同一套 aclsparse 接口。
+仓库包含两套实现：arch22（Atlas A2系列产品、Atlas A3系列产品，DAV_2201）与 arch35（Ascend 950PR&950DT系列产品），共享同一套 aclsparse 接口。
 
 包含以下接口（三阶段调用流程，语义对标 cuSPARSE SpMV）：
 
@@ -40,7 +40,7 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparse
   - 一般情形返回 0；
   - **arch22：转置（opA=TRANSPOSE）且为 FP32 计算（输出 FP32/FP16/BF16）时返回 `groups * roundUp(cols, 8) * 2 * sizeof(float)`**（groups = min(AIV 核数, max(rows, 1))）：该路径在 workspace 中以 double-single（hi/lo 双平面）确定性累加、末尾与 beta*y0 双字结合后单次舍入写回（16bit 输出经 Cast 最近舍入（平局取偶，RNE）转换，舍入中点按双字低位修正），保证消减场景精度与跨核确定性；
   - **arch22：转置且输出为 COMPLEX64 时返回 `groups * roundUp(2*cols, 8) * 2 * sizeof(float)`**（交错 float2，同理）；
-  - **arch35（Ascend 950PR/950DT）：始终返回非零大小**，包含 192 字节头部和 base 归一化行偏移；转置路径还包含稳定 CSR-to-CSC 元数据（列偏移、行索引和原 CSR value 下标）与累加区，各区域按 64 字节对齐。调用方负责按返回字节数分配 Device 内存，不能硬编码旧大小。
+  - **arch35（Ascend 950PR&950DT系列产品）：始终返回非零大小**，包含 192 字节头部和 base 归一化行偏移；转置路径还包含稳定 CSR-to-CSC 元数据（列偏移、行索引和原 CSR value 下标）与累加区，各区域按 64 字节对齐。调用方负责按返回字节数分配 Device 内存，不能硬编码旧大小。
   - **arch22：`ACL_SPARSE_SPMV_CSR_ALG_CUBE` 返回分段求和所需的 workspace 大小**（gather 乘积区 + 块内推测扫描结果区）；空矩阵（`nnz == 0`）回退到向量版实现，返回 0。
 - 只做空指针与参数校验（arch35 仅检查描述符元数据，允许 CSR 或 x/y 数据指针尚未绑定），不产生 Host<->Device 数据同步。
 
@@ -56,15 +56,15 @@ aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOpe
 
 - 可选调用；arch22 为参数校验 + workspace 生命周期管理（bufferSize 为 0 时 externalBuffer 可传 nullptr；非 0 必须非空），CUBE 算法额外执行最长行探测并缓存（见接口表）；
 - 对同一 sparsity pattern 多次执行 SpMV 时，描述符、workspace 与预处理结果可复用；pattern 改变后须重新查询与预处理。
-- arch35（Ascend 950PR/950DT）：在 workspace 中生成 base 归一化 row pointer，并将 matA 的 pattern、属性和 workspace 记录为 active plan，后续 `aclsparseSpMV` 可复用；转置路径在调用 stream 上异步构建稳定的按列索引——每列内严格保留原 CSR 的行序和元素序，后续每个输出元素按固定顺序累加，避免浮点 atomic add 引入非确定性。预处理只读取 rowOffsets（rows > 0 时必须绑定）及描述符元数据，并要求 workspace 已分配；values、colInd 和 x/y 可在预处理完成后再绑定，执行阶段仍会完整检查数据指针。后续更新指针可能使缓存 plan 失效，但可直接执行 SpMV（执行时回退读取原始 CSR），无需再次预处理；但原地修改 CSR 结构（rowOffsets 或 colInd 的内容发生变化，即使指针地址不变）后必须重新调用 Preprocess——Host 不读取设备端索引内容，无法自动发现这种变化，否则可能复用旧的归一化行偏移；仅原地更新 values/x/y 不要求重新预处理。预处理与执行均将 Device 任务入队到 handle 的 stream，不同步回读 CSR；同一 stream 上的异步 H2D 可以直接排在调用前，调用方负责在读取结果或复用/释放相关内存前同步，并保证所有异步操作期间内存有效。
+- arch35（Ascend 950PR&950DT系列产品）：在 workspace 中生成 base 归一化 row pointer，并将 matA 的 pattern、属性和 workspace 记录为 active plan，后续 `aclsparseSpMV` 可复用；转置路径在调用 stream 上异步构建稳定的按列索引——每列内严格保留原 CSR 的行序和元素序，后续每个输出元素按固定顺序累加，避免浮点 atomic add 引入非确定性。预处理只读取 rowOffsets（rows > 0 时必须绑定）及描述符元数据，并要求 workspace 已分配；values、colInd 和 x/y 可在预处理完成后再绑定，执行阶段仍会完整检查数据指针。后续更新指针可能使缓存 plan 失效，但可直接执行 SpMV（执行时回退读取原始 CSR），无需再次预处理；但原地修改 CSR 结构（rowOffsets 或 colInd 的内容发生变化，即使指针地址不变）后必须重新调用 Preprocess——Host 不读取设备端索引内容，无法自动发现这种变化，否则可能复用旧的归一化行偏移；仅原地更新 values/x/y 不要求重新预处理。预处理与执行均将 Device 任务入队到 handle 的 stream，不同步回读 CSR；同一 stream 上的异步 H2D 可以直接排在调用前，调用方负责在读取结果或复用/释放相关内存前同步，并保证所有异步操作期间内存有效。
 
 ### aclsparseSpMV
 
 #### 产品支持情况
 
-- Ascend 950PR（A5，DAV_3510）/ Ascend 950DT：支持（arch35，能力矩阵见文末「Ascend 950/A5 能力和调用约定」）
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持（arch35 / DAV_3510，能力矩阵见文末「Ascend 950PR&950DT系列产品能力和调用约定」）
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
 
 #### 函数原型
 
@@ -84,10 +84,10 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 | beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。pointer mode 同 alpha；beta=0 时不读取 y 的原始值 |
 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量 y 的描述符，原地更新，Host 内存 |
 | computeType | 输入 | aclDataType | 计算精度类型：arch22 支持 `ACL_INT32` / `ACL_FLOAT` / `ACL_COMPLEX64`；arch35 支持 `ACL_FLOAT` / `ACL_INT32` / `ACL_COMPLEX64` |
-| alg | 输入 | aclsparseSpMVAlg_t | 算法类型，随产品不同：arch22（Atlas A2/A3）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` / `ACL_SPARSE_SPMV_CSR_ALG1` / `ACL_SPARSE_SPMV_CSR_ALG2`（向量单元实现）与 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`（cube 段求和实现）；arch35（Ascend 950PR/950DT）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` / `ACL_SPARSE_SPMV_CSR_ALG1` / `ACL_SPARSE_SPMV_CSR_ALG2` |
+| alg | 输入 | aclsparseSpMVAlg_t | 算法类型，随产品不同：arch22（Atlas A2系列产品、Atlas A3系列产品）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` / `ACL_SPARSE_SPMV_CSR_ALG1` / `ACL_SPARSE_SPMV_CSR_ALG2`（向量单元实现）与 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`（cube 段求和实现）；arch35（Ascend 950PR&950DT系列产品）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` / `ACL_SPARSE_SPMV_CSR_ALG1` / `ACL_SPARSE_SPMV_CSR_ALG2` |
 | externalBuffer | 输入 | void* | workspace，大小按 GetBufferSize 返回值分配；返回 0 时传 nullptr（arch22 转置确定性累加、arch22 cube 算法时必须分配；arch35 始终需要非空、64 字节对齐的 buffer，Device 内存） |
 
-#### 约束说明（arch22：Atlas A2/A3）
+#### 约束说明（arch22：Atlas A2系列产品、Atlas A3系列产品）
 
 - handle 不可为 nullptr，且须先调用 `aclsparseSetStream` 设置 stream；计算在调用方 stream 上异步执行
 - matA、vecX、vecY 不可为 nullptr；alpha、beta 不可为 nullptr
@@ -105,15 +105,15 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 - 描述符元素步长固定按 1 处理（不读取 `aclsparseCsrSetStrides` / `aclsparseDnVecSetStride` 设置的 stride）
 - 未声明的格式/类型组合返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
 
-#### 约束说明（arch35：Ascend 950PR/950DT）
+#### 约束说明（arch35：Ascend 950PR&950DT系列产品）
 
 - handle 不可为 nullptr，且须先调用 `aclsparseSetStream` 设置 stream
 - matA、vecX、vecY 不可为 nullptr
 - matA 仅支持 CSR 格式（`ACL_SPARSE_FORMAT_CSR`）
-- A5 路径支持正的元素 stride：CSR 行偏移、列索引、值以及 x/y 分别使用描述符中的 stride，输出间隙不被修改
+- Ascend 950PR&950DT系列产品路径支持正的元素 stride：CSR 行偏移、列索引、值以及 x/y 分别使用描述符中的 stride，输出间隙不被修改
 - matA 的行偏移和列索引类型必须均为 `ACL_SPARSE_INDEX_32I`，且两者类型相同
 
-以下为 A5 约束；Atlas A2/A3 差异见后文。
+以下为 Ascend 950PR&950DT系列产品约束；Atlas A2系列产品、Atlas A3系列产品差异见后文。
 
 - 由于 Kernel 按有符号 `int32_t` 读取 CSR 索引，`M`、`K` 不超过 `INT32_MAX`；`nnz` 不超过
   `INT32_MAX`（base 0）或 `INT32_MAX - 1`（base 1），避免 row offset/column 存储溢出
@@ -131,7 +131,7 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 - `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建的描述符默认元素步长为 1；通过
   `aclsparseCsrSetStrides` 和 `aclsparseDnVecSetStride` 可原生描述正步长非连续 Tensor
 - CSR rowOffsets、colInd、values 以及 vecX、vecY 的 stride 均按元素计数且必须大于 0；vecY 按其 stride 原位读写，间隙元素不会被覆盖
-- 非连续 stride 当前仅在 Ascend 950PR/950DT 路径生效；Atlas A2/A3 路径仅支持默认步长 1
+- 非连续 stride 当前仅在 Ascend 950PR&950DT系列产品路径生效；Atlas A2系列产品、Atlas A3系列产品路径仅支持默认步长 1
 - 调用方负责保证 CSR 内容合法：rowOffsets 必须从 base 开始、以 NNZ+base 结束且单调非降，colInd 必须全部位于
   `[base, cols+base)`。SpMV 和 Preprocess 不同步回读 Device 数据，也不承诺返回内容校验错误
 - INT8→INT32 路径对完整的 `alpha * dot(A, x) + beta * y` 做最终 INT32 饱和，保留正负项抵消；
@@ -139,7 +139,7 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 
 #### 支持的类型组合
 
-arch22（Atlas A2/A3）：
+arch22（Atlas A2系列产品、Atlas A3系列产品）：
 
 | matA/vecX 值类型 | vecY 类型 | computeType | 说明 |
 |---|---|---|---|
@@ -155,7 +155,7 @@ arch22（Atlas A2/A3）：
 | ACL_INT32 | ACL_INT32 | ACL_INT32 | 仓内既有组合，保留 |
 | ACL_INT32 | ACL_FLOAT | ACL_FLOAT | 仓内既有组合，保留 |
 
-arch35（Ascend 950PR/950DT）支持的值类型组合：
+arch35（Ascend 950PR&950DT系列产品）支持的值类型组合：
 
 - matA=ACL_FLOAT, vecX=ACL_FLOAT, vecY=ACL_FLOAT, computeType=ACL_FLOAT
 - matA=ACL_FLOAT16, vecX=ACL_FLOAT16, vecY=ACL_FLOAT 或 ACL_FLOAT16, computeType=ACL_FLOAT
@@ -226,16 +226,16 @@ ops-sparse 同时交付 Python/torch 层适配（`sparse/spmv/torch_extension/`�
 workspace 由调用方持有，`aclsparseSpMV` 只在其上排队异步任务、不做 stream 同步；
 因此复用同一块 buffer 前需自行保证前一次 SpMV 已完成。
 
-- Atlas A2/A3 `ACL_SPARSE_SPMV_ALG_DEFAULT`（向量版）：所有中间量都在 UB 内，返回 0，
+- Atlas A2系列产品、Atlas A3系列产品 `ACL_SPARSE_SPMV_ALG_DEFAULT`（向量版）：所有中间量都在 UB 内，返回 0，
   `externalBuffer` 可传 `nullptr`。
-- Atlas A2/A3 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`：返回分段求和所需的 workspace 大小（gather 乘积区 +
+- Atlas A2系列产品、Atlas A3系列产品 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`：返回分段求和所需的 workspace 大小（gather 乘积区 +
   块内推测扫描结果区）。调用方须按该大小申请显存，并作为 `aclsparseSpMV` 的
   `externalBuffer` 传入；未提供时回退到句柄上的 workspace（容量不足则报错）。
   空矩阵（`nnz == 0`）会回退到向量版实现，返回 0。
 
-## Ascend 950/A5 能力和调用约定
+## Ascend 950PR&950DT系列产品能力和调用约定
 
-A5 实现位于 `sparse/spmv/arch35/`，目标架构为 `dav-3510`。所有声明组合均使用二维
+arch35 实现位于 `sparse/spmv/arch35/`，目标架构为 `dav-3510`。所有声明组合均使用二维
 CSR、I32 row pointer/column index、index base 0/1，并支持 `NON_TRANSPOSE`、`TRANSPOSE` 和
 `CONJUGATE_TRANSPOSE`：
 
@@ -255,7 +255,7 @@ CSR、I32 row pointer/column index、index base 0/1，并支持 `NON_TRANSPOSE`�
 `y.size == A.cols`。支持动态 shape、空行、`nnz=0/1`、不均匀长尾以及每行未排序/重复
 column；重复坐标的贡献均计入，ALG2 按原始 entry 顺序累加。调用方应保证 `rowPtr` 单调且首尾值与 base/nnz 一致，
 column 扣除 base 后位于 `[0, A.cols)`。Host 会校验可见的 descriptor 元数据；device CSR
-结构错误的 status 回传仍需在 A5 环境完成并通过专项目测，在该决策门关闭前不得将其宣称为
+结构错误的 status 回传仍需在 Ascend 950PR&950DT系列产品环境完成并通过专项目测，在该决策门关闭前不得将其宣称为
 已支持的异步参数错误。
 
 算法支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`（映射 CSR ALG1）、`ACL_SPARSE_SPMV_CSR_ALG1`
@@ -315,9 +315,9 @@ OPS_SPARSE_TORCH_LIBRARY=build/torch_npu/libops_sparse_torch.so \
 在异步 Kernel 完成前不会被缓存分配器复用；未安装 torch_npu、设备不是 NPU 或 dispatcher
 未命中时直接报错，不提供 CPU reference fallback。
 
-## A5 测试和验收
+## Ascend 950PR&950DT系列产品测试和验收
 
-A5 C++ GTest/CSV 测试放在 `test/spmv/arch35/`，通过
+arch35 C++ GTest/CSV 测试放在 `test/spmv/arch35/`，通过
 `ops_sparse_add_gtest_tests(spmv ${OPS_SPARSE} EIGEN)` 接入。现有测试包含三阶段调用、workspace
 复用、stride、base、转置、延迟绑定、INT8→INT32 正负溢出以及 FP16 舍入等场景。
 现有仓库内 GTest 不能视为完整的九组 dtype 覆盖：BF16、输入只读/alias 断言和
@@ -326,7 +326,7 @@ ALG2 逐比特确定性尚缺少对应回归用例。算子能力矩阵不等同
 用例及内存对比；报告预热至少 10 次、采样至少 30 次，记录 median/P90、workspace、
 峰值内存和 NPU Dispatch/Profiler 证据。无 CANN/NPU 环境时只可做静态检查，不能宣称验收通过。
 
-### Atlas A2/A3：CSR 与向量元素步长
+### Atlas A2系列产品、Atlas A3系列产品：CSR 与向量元素步长
 
 arch22 支持 `aclsparseCsrSetStrides` 的 rowOffsets/colInd/values 步长及
 `aclsparseDnVecSetStride` 的 X/Y 步长，单位均为对应类型的元素；步长必须为正。

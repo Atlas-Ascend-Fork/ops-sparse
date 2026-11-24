@@ -50,9 +50,9 @@ workspace 查询在 `n>0` 时返回 `align_up(align_up(17*m,128)+85*m,128)`，`n
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
 
 #### 函数原型
 
@@ -100,9 +100,9 @@ arch22 实现说明：
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
 
 #### 函数原型
 

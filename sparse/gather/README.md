@@ -24,11 +24,11 @@ X.values[i] = Y[X.indices[i] - idxBase]   for i = 0 .. nnz-1
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT（arch35）：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品（arch22）：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品（arch22）：支持
+- Ascend 950PR&950DT系列产品（arch35）：支持
+- Atlas A3系列产品（arch22）：支持
+- Atlas A2系列产品（arch22）：支持
 
-> 说明：arch22（Atlas A2/A3）与 arch35（Ascend 950）支持的 dtype / 索引类型范围不同，见下方“支持的数据类型 / 索引类型”。arch22 实现位于 `sparse/gather/arch22/`，arch35 实现位于 `sparse/gather/arch35/`，二者按 SOC 在编译期分流，不会同时参与链接。
+> 说明：arch22（Atlas A2系列产品、Atlas A3系列产品）与 arch35（Ascend 950PR&950DT系列产品）支持的 dtype / 索引类型范围不同，见下方“支持的数据类型 / 索引类型”。arch22 实现位于 `sparse/gather/arch22/`，arch35 实现位于 `sparse/gather/arch35/`，二者按 SOC 在编译期分流，不会同时参与链接。
 
 #### 函数原型
 
@@ -53,11 +53,11 @@ aclsparseStatus_t aclsparseGather(
 - vecY、vecX 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - vecX.valueType 与 vecY.valueType 必须一致
 - 合法索引是核心契约：`vecX.indices` 中每个索引值 `X.indices[i] - idxBase` 必须落在 `[0, vecY.size)` 范围内
-  - arch22（Atlas A2/A3）：Host 侧做逐索引范围校验（D2H 拷贝索引后逐个判断），越界索引显式返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，不会静默越界读取
-  - arch35（Ascend 950）：Device 索引越界遵循异步错误协议，因此合法索引是调用方前置条件
+  - arch22（Atlas A2系列产品、Atlas A3系列产品）：Host 侧做逐索引范围校验（D2H 拷贝索引后逐个判断），越界索引显式返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，不会静默越界读取
+  - arch35（Ascend 950PR&950DT系列产品）：Device 索引越界遵循异步错误协议，因此合法索引是调用方前置条件
 - `vecX.size` 与 `vecY.size` 的基数约束：
-  - arch35（Ascend 950）：`vecX.size` 必须等于 `vecY.size`，且 `0 <= nnz <= size`
-  - arch22（Atlas A2/A3）：不做基数约束，合法性完全取决于逐索引落点（`nnz` 可大于 `vecY.size`）
+  - arch35（Ascend 950PR&950DT系列产品）：`vecX.size` 必须等于 `vecY.size`，且 `0 <= nnz <= size`
+  - arch22（Atlas A2系列产品、Atlas A3系列产品）：不做基数约束，合法性完全取决于逐索引落点（`nnz` 可大于 `vecY.size`）
 - `size` 和 `nnz` 的接口上限为 `INT64_MAX`；实际还受 Device 可分配内存、元素字节数以及地址范围不溢出的约束
 - `nnz=0` 成功返回且不启动 Kernel；`size=0` 仅允许 `nnz=0`。**校验顺序：handle → `nnz==0` 早退 → 描述符/数据指针**，因此空 handle 即便 `nnz=0` 也返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`，而零 `nnz` 时不要求 `indices`/`values` 有效
 - 非空输入、索引和输出指针必须位于当前 NPU Device，且在异步执行完成前保持有效
@@ -66,7 +66,7 @@ aclsparseStatus_t aclsparseGather(
 - 支持索引乱序（indices 不需要排序）
 - 支持 `vecX.indices` 中存在重复元素（arch22 下 `nnz` 可大于 `vecY.size`，例如 `vecY.size=1, nnz=2, indices=[0,0]`（base0）会输出同一元素两次，与 `torch.index_select` 语义一致）
 
-> arch22（Atlas A2/A3）Host 侧额外约束（不满足即显式返回错误，**不退回 CPU**）：
+> arch22（Atlas A2系列产品、Atlas A3系列产品）Host 侧额外约束（不满足即显式返回错误，**不退回 CPU**）：
 > - `vecX.valueType` 与 `vecY.valueType` 须一致，且须在 {`ACL_FLOAT`, `ACL_FLOAT16`, `ACL_BF16`, `ACL_COMPLEX64`} 内（FP64 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）
 > - `vecX.idxType` 须为 `ACL_SPARSE_INDEX_32I`（I64 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）
 > - `vecX.idxBase` 须为 0 或 1（其它值返回 `ACL_SPARSE_STATUS_INVALID_VALUE`）
@@ -82,8 +82,8 @@ aclsparseStatus_t aclsparseGather(
 | FP64 | `ACL_DOUBLE` | ✅（仅 arch35） | arch22 不支持 |
 | COMPLEX64 | `ACL_COMPLEX64` | ✅ | arch22 / arch35 均支持 |
 
-Ascend 950 任务声明的必选类型为 FP16、BF16、FP32 和 COMPLEX64。FP64 为既有低层 C++ 接口兼容能力；PyTorch/ATen 适配仅开放四种必选类型。
-arch22（Atlas A2/A3）支持范围：**FP32 / FP16 / BF16 / COMPLEX64**，与任务书一致；不支持 FP64。
+Ascend 950PR&950DT系列产品任务声明的必选类型为 FP16、BF16、FP32 和 COMPLEX64。FP64 为既有低层 C++ 接口兼容能力；PyTorch/ATen 适配仅开放四种必选类型。
+arch22（Atlas A2系列产品、Atlas A3系列产品）支持范围：**FP32 / FP16 / BF16 / COMPLEX64**，与任务书一致；不支持 FP64。
 
 #### 支持的索引类型
 
