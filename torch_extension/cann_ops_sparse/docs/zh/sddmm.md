@@ -4,7 +4,7 @@
 
 | 产品 | 架构 |
 | --- | --- |
-| Ascend 950 | arch35 |
+| Ascend 950PR&950DT系列产品 | arch35 |
 
 使用 PyTorch 2.7 或更新版本及与之配套的 torch_npu。构建和安装遵循
 [统一扩展说明](../../../README.md)，可通过

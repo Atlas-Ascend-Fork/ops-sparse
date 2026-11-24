@@ -4,11 +4,11 @@
 
 | 产品 | 架构目录 | 是否支持 |
 | :--- | :---: | :---: |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | `arch22` | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | `arch22` | √ |
-| <term>Ascend 950PR/Ascend 950DT</term> | `arch35` | √ |
+| <term>Atlas A2系列产品</term> | `arch22` | √ |
+| <term>Atlas A3系列产品</term> | `arch22` | √ |
+| <term>Ascend 950PR&950DT系列产品</term> | `arch35` | √ |
 
-Ascend 950 构建命令为 `bash build.sh --ops=spmm --soc=ascend950`。
+Ascend 950PR&950DT系列产品构建命令为 `bash build.sh --ops=spmm --soc=ascend950`。
 
 Torch 扩展与 `libops_sparse.so` 应从同一版本源码构建，头文件由 wheel 打包提供。
 源码构建时使用 `OPS_SPARSE_LIB_DIR` 指向本次构建的主库目录，重新构建并加载对应
@@ -121,7 +121,7 @@ SpMM 的公共矩阵路由注册了一阶 VJP，支持 `float16`、`bfloat16`、
   `out` dtype 与输入不符、device 不一致，或 `m`/`k`/`nnz` 超出 int32 时抛 `RuntimeError`。
 - int64 CSR 索引窄化到 int32 会溢出时抛 `RuntimeError`，不会静默截断。
 - `m`/`k`/`n` 任一为 0 时返回合法的零长度结果，取值遵循 `out = beta * self`，不启动
-  主 Kernel（Ascend 950 的零维和空乘积由适配层处理）。
+  主 Kernel（Ascend 950PR&950DT系列产品的零维和空乘积由适配层处理）。
 - functional 与 out overload 都由公共路由进入同一个 SpMM provider；out overload
   返回调用方传入的原对象。
 - 正常路径全程异步，不做设备同步。handle 由公共层按 `device + stream` 缓存，
