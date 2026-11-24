@@ -212,12 +212,6 @@ fi
 
 echo "BUILD_OPS=${BUILD_OPS}, RUN_TEST=${RUN_TEST}, ENABLE_PACKAGE=${ENABLE_PACKAGE}"
 
-# ==========================
-# 构建
-# ==========================
-rm -rf -- "${BUILD_PATH}"
-mkdir -p -- "${BUILD_PATH}"
-
 # 默认 SOC_VERSION，ASCEND_CANN_PACKAGE_PATH 使用环境变量
 if [ -z "${SOC_VERSION}" ]; then
     SOC_VERSION="ascend910b3"
@@ -237,6 +231,12 @@ if [ -z "${matched}" ]; then
     echo "Supported SOC: ${SUPPORT_COMPUTE_UNIT_SHORT[*]}"
     exit 1
 fi
+
+# ==========================
+# 构建
+# ==========================
+rm -rf -- "${BUILD_PATH}"
+mkdir -p -- "${BUILD_PATH}"
 
 # Default Release; override via CMAKE_BUILD_TYPE=Debug.
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
