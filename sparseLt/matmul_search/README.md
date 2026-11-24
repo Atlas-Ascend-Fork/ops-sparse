@@ -4,20 +4,20 @@
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
-> Ascend 950PR/Ascend 950DT 上的 aclsparseLtMatmulSearch 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
+> Ascend 950PR&950DT系列产品上的 aclsparseLtMatmulSearch 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
 
 ## 功能说明
 
 - **算子功能**：aclsparseLtMatmulSearch 是 Matmul 算法自动搜索（auto-tuning）接口。该接口评估 plan 描述的 matmul 的可用算法候选（algConfigId × splitKMode × splitK，候选空间由库内生成规则枚举），每个候选在 streams[0] 上按 `aclsparseLtMatmul` 相同语义计时执行 searchIterations 次（默认 5，经 `aclsparseLtMatmulAlgSetAttribute` + `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` 设置）并取最小耗时，自动选择最快的配置并回写：plan 绑定的 algSelection 属性（algConfigId / splitKMode / splitK，可经 `aclsparseLtMatmulAlgGetAttribute` 查询）、plan 内 tilingData 与 workspaceSize（按选中配置重算）。面向同一 matmul 重复执行多次的场景：以一次性搜索成本换取后续每次执行的稳定收益。
 - **实现形态**：纯 Host 侧控制流（枚举候选 → 改写 algSelection → 重算 tiling/workspace → 调既有 `aclsparseLtMatmul` 计时 → 选优回写 → 以选中配置终态执行一次），无 Search 专属 device kernel（非紧凑 dense 输入的布局预处理复用 aclsparseLtMatmul 既有路径，见"行为声明"）。数值计算 100% 由既有 aclsparseLtMatmul kernel 承载，候选仅改变 tiling 切分字段，不改变数学语义 `D = Activation(alpha * op(A) * op(B) + beta * C + bias)`，matD 数值精度与 aclsparseLtMatmul 完全一致。
-- **目标平台**：<term>Ascend 950PR/Ascend 950DT</term>（arch35 / DAV_3510）。
+- **目标平台**：<term>Ascend 950PR&950DT系列产品</term>（arch35 / DAV_3510）。
 - **编程模型**：Host 侧候选枚举与 aclrt event 计时（Device 侧时间戳），Device 侧计算复用既有 aclsparseLtMatmul kernel。
 - **支持数据类型**：与 aclsparseLtMatmul 相同——FP32 / FP16 / BF16（`computeType = ACL_SPARSE_COMPUTE_32F`，FP32 累加）；INT8（`computeType = ACL_SPARSE_COMPUTE_32I`，int32 累加，支持 INT8/INT32 双输出）。搜索本身不引入新的 dtype 限制；C/D dtype 组合随 aclsparseLtMatmul 支持域（INT8 A/B 下 C ∈ {INT8, INT32, FP16, BF16} 超集，D 与 C 同型，C=INT8 时 D 亦可为 INT32）。
 - **batch 支持**：与 aclsparseLtMatmul 相同（A/B-sparse 两侧均支持）。A-sparse × batch 场景须先经 `aclsparseLtSpMMAPrune`（其 structured 侧描述符的 `NUM_BATCHES`/`BATCH_STRIDE` 生效，一次调用产出全 batch 的 A_pruned）产出 A_pruned 后显式经 matA 传入——matA=nullptr 的 workspace 回退仅支持 numBatches=1（workspace 的 aPruned 区为单 batch 容量）。

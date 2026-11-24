@@ -4,12 +4,12 @@
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
 ## 功能说明
 
@@ -20,7 +20,7 @@
   ```
 
   其中 A_pruned 是经 `aclsparseLtSpMMAPrune` 剪枝后的稠密存储矩阵（被置零元素以 0 表示）。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加 → activation（ReLU/GeLU，可选）→ 类型转换写出。alpha/beta 支持标量（Host float）或逐行向量缩放（Device float[M]，启用 `ALPHA_VECTOR_SCALING`/`BETA_VECTOR_SCALING`）。bias 为长度 = m 的逐行广播向量（dtype 与 C 相同；唯一例外：INT8 A/B × C/D ∈ {INT8,INT32}（32I 计算域）时为 FP32——INT8 × C/D=FP16/BF16 的 bias 仍为 FP16/BF16 = C dtype）。activation 支持 ReLU（`min(upperBound, max(threshold, D))`）与 GeLU（`gelu_scaling * x * sigmoid(sqrt(8/π) * (x + 0.044715 * x³))`），二者互斥。支持 batch 批量计算（`NUM_BATCHES` + `BATCH_STRIDE`）。该算子对标 cuSPARSELt 中的 `cusparseLtMatmul`，采用描述符（Descriptor）+ 算法选择（AlgSelection）+ 执行计划（Plan）的分段式调用模型，通过描述符属性扩展实现 epilogue 功能，不新增计算接口。
-- **目标平台**：<term>Ascend 950PR/Ascend 950DT</term>（arch35 / DAV_3510）。
+- **目标平台**：<term>Ascend 950PR&950DT系列产品</term>（arch35 / DAV_3510）。
 - **编程模型**：ascendc Cube（Mmad/Fixpipe）矩阵乘硬件单元执行核心 GEMM，Vector 单元执行 epilogue（alpha·acc + beta·C + bias + activation + 类型转换）。splitK=1 时采用 AIC+AIV 融合单 kernel 路径（L0C→UB→GM）；splitK>1 时采用两段式路径（Cube 写 temp → epilogue 归约写 D）。bias 与 activation 在 `beta·C` 之后、类型转换之前于 FP32 域执行。算子异步启动，内部不执行 stream 同步。
 - **支持 dtype**：FP32 / FP16 / BF16 / INT8（v2 扩展 BF16/INT8）。INT8 路径使用 `computeType = ACL_SPARSE_COMPUTE_32I`（int32 累加），C/D 支持 INT8/INT32/FP16/BF16 组合（详见"约束说明"数据类型一致性与"INT8 双输出"章节）。
 - **支持路径**：sparse×dense（2:4 结构化稀疏 × 稠密）+ dense×dense（稠密 × 稠密，v2 新增）。dense×dense 路径跳过剪枝前置，matA 须显式传入。

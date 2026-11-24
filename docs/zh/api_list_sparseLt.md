@@ -39,8 +39,8 @@
 | [aclsparseLtMatmulSearch](#aclsparseltmatmulsearch) | 搜索最优 matmul 算法并回写 plan（auto-tuning） |
 | [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
 | [aclsparseLtSpMMAPruneCheck](#aclsparseltspmmaprunecheck) | 校验稠密矩阵是否已满足 2:4 结构化稀疏约束 |
-| [aclsparseLtSpMMACompressedSize](#aclsparseltspmmacompressedsize) | 查询压缩后矩阵及临时空间所需存储大小（Ascend950） |
-| [aclsparseLtSpMMACompress](#aclsparseltspmmacompress) | 将结构化稀疏矩阵压缩为紧凑存储（Ascend950） |
+| [aclsparseLtSpMMACompressedSize](#aclsparseltspmmacompressedsize) | 查询压缩后矩阵及临时空间所需存储大小（Ascend 950PR&950DT系列产品） |
+| [aclsparseLtSpMMACompress](#aclsparseltspmmacompress) | 将结构化稀疏矩阵压缩为紧凑存储（Ascend 950PR&950DT系列产品） |
 
 ## 接口详情
 
@@ -758,7 +758,7 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 
 **功能**：对稠密矩阵执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16/BF16/INT8）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与输入同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。直接接收 Matmul 描述符，剪枝对象由 matA/matB 的 sparsity 字段决定：matA 为 `ACL_SPARSE_LT_SPARSITY_50_PERCENT` 时剪枝矩阵 A（A-sparse），matB 为该值时剪枝矩阵 B（B-sparse），从中读取稀疏侧矩阵的维度、数据类型、order 与 op 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。
 
-> 说明：本算子为软件实现的 2:4 结构化稀疏剪枝，不依赖 Ascend 950 硬件的 2:4 稀疏加速单元，仅通过 Vector API 完成剪枝计算。FP32 统一采用 1:2 模式（分组为 2、保留 1，即每 2 个元素中保留绝对值最大的 1 个），并非"4 选 2"；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
+> 说明：本算子为软件实现的 2:4 结构化稀疏剪枝，不依赖 Ascend 950PR&950DT系列产品硬件的 2:4 稀疏加速单元，仅通过 Vector API 完成剪枝计算。FP32 统一采用 1:2 模式（分组为 2、保留 1，即每 2 个元素中保留绝对值最大的 1 个），并非"4 选 2"；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
 
 **剪枝规则**：
 
@@ -773,9 +773,9 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
 
 > 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
 
@@ -836,9 +836,9 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
 
 > 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
 

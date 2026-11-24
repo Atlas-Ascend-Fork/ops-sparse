@@ -4,17 +4,17 @@
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
 ## 功能说明
 
 - **算子功能**：aclsparseLtSpMMAPruneCheck 校验稠密矩阵是否满足 2:4 结构化稀疏条件：沿剪枝维度逐分组统计非零元素个数，全部分组的非零数不超过保留上限时 `d_valid=0`（满足条件），任一分组超限时 `d_valid=1`（不满足）。该算子对标 cuSPARSELt 中的 `cusparseLtSpMMAPruneCheck`。校验对象由 Matmul 描述符中 matA/matB 的结构化稀疏标记决定（须恰有一侧为 `ACL_SPARSE_LT_SPARSITY_50_PERCENT`），校验条件为组级（基本 2:4）条件，与剪枝算法（TILE/STRIP）无关；经 `aclsparseLtSpMMAPrune` 产出的数据保证通过本检查。支持多 batch：`d_valid` 为全部 batch 判定结果的按位或（任一 batch 存在违规分组 → 1，全部 batch 合法 → 0），单 batch 判定逻辑不变。
-- **目标平台**：<term>Ascend 950PR/Ascend 950DT</term>（arch35 / DAV_3510）。
+- **目标平台**：<term>Ascend 950PR&950DT系列产品</term>（arch35 / DAV_3510）。
 - **编程模型**：Ascend C Vector（RegBase / AIV），多核按行带 × 列块二维 tile 网格切分并行（grid-stride 领取），全程按等宽无符号整数位视图做位级判零（无数据类型转换）。算子异步启动，内部不执行 stream 同步，调用方如需读取 d_valid 须自行同步。
 
 ### 数学原理

@@ -4,19 +4,19 @@
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
-> Ascend 950PR/Ascend 950DT 上的 aclsparseLtMatmulAlgSetAttribute 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
+> Ascend 950PR&950DT系列产品上的 aclsparseLtMatmulAlgSetAttribute 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
 
 ## 功能说明
 
 - **算子功能**：aclsparseLtMatmulAlgSetAttribute 用于在 `aclsparseLtMatmulPlanInit` 之前设置 Matmul 算法选择描述符（`aclsparseLtMatmulAlgSelection_t`）的配置属性，包括算法配置 ID（`algConfigId`）、splitK 切分因子（`splitK`）、搜索迭代次数（`searchIterations`）等。这些属性影响后续 PlanInit 计算的 cube tiling 策略与 workspace 布局。配套接口 `aclsparseLtMatmulAlgGetAttribute` 用于查询属性当前值。两个接口均为纯 Host 端元数据操作，不启动任何 kernel。该算子对标 cuSPARSELt 中的 `cusparseLtMatmulAlgSetAttribute` / `cusparseLtMatmulAlgGetAttribute`。
-- **目标平台**：<term>Ascend 950PR/Ascend 950DT</term>（arch35 / DAV_3510）。
+- **目标平台**：<term>Ascend 950PR&950DT系列产品</term>（arch35 / DAV_3510）。
 - **编程模型**：Host 端属性读写，直接操作 `aclsparseLtMatmulAlgSelection` 结构体字段。不涉及 Device 内存访问，不消耗 NPU 计算资源。
 
 ### 作用原理

@@ -4,17 +4,17 @@
 
 | 产品 | 是否支持 |
 | :----------------------------------------- | :------:|
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
 ## 功能说明
 
 - **算子功能**：aclsparseLtSpMMAPrune 对稠密矩阵执行 2:4 结构化稀疏剪枝，输出与输入同型的稠密存储矩阵（被置零元素以 0 表示）。该算子对标 cuSPARSELt 中的 `cusparseLtSpMMAPrune`，是结构化稀疏矩阵乘法的前置步骤。剪枝对象由 Matmul 描述符中 matA/matB 的 sparsity 字段决定：matA 为 `ACL_SPARSE_LT_SPARSITY_50_PERCENT` 时剪枝矩阵 A（A-sparse，剪枝结果作为 Matmul 的稀疏侧输入 matA）；matB 为 `ACL_SPARSE_LT_SPARSITY_50_PERCENT` 时剪枝矩阵 B（B-sparse，剪枝结果作为 Matmul 的稀疏侧输入 matB）。支持两种剪枝算法：STRIP（逐分组剪枝）与 TILE（逐 tile 剪枝），详见"剪枝算法（pruneAlg）"。
-- **目标平台**：<term>Ascend 950PR/Ascend 950DT</term>（arch35 / DAV_3510）。
+- **目标平台**：<term>Ascend 950PR&950DT系列产品</term>（arch35 / DAV_3510）。
 - **编程模型**：ascendc vector API，多核按行（沿行剪枝）或按行块（沿列剪枝）切分并行；不使用矩阵乘硬件（Cube）。剪枝是确定性操作（按绝对值比较），不涉及随机性。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。
 
 ### 数学原理

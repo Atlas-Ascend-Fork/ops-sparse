@@ -8,7 +8,7 @@ CSV 驱动测试覆盖四种数据类型、行列方向、A/B 稀疏侧、op/ord
 
 独立 CPU 参考实现按字节比较 values 和 metadata，并检查输入、填充区和输出保护区。组内非零数量超限（overfull）的输入仅检查输入不变和输出边界，不要求确定的压缩数值结果或同步报错。
 
-按仓库[环境部署说明](../../docs/zh/install/quick_install.md)加载 CANN 环境，并确保 CMake 能找到 GTest。以下命令均在仓库根目录执行，完整功能测试需要 Ascend950 设备：
+按仓库[环境部署说明](../../docs/zh/install/quick_install.md)加载 CANN 环境，并确保 CMake 能找到 GTest。以下命令均在仓库根目录执行，完整功能测试需要 Ascend 950PR&950DT系列产品设备：
 
 ```bash
 bash build.sh --ops=spmma_compress --soc=ascend950 --run

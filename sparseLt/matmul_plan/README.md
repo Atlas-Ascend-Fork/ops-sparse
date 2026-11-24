@@ -23,9 +23,9 @@ algSelection 用于在计算执行前选中本次 matmul 运算采用的算法�
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 功能描述
 
@@ -61,9 +61,9 @@ aclsparseStatus_t aclsparseLtMatmulAlgSelectionInit(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 功能描述
 
@@ -91,9 +91,9 @@ aclsparseStatus_t aclsparseLtMatmulAlgSelectionDestroy(aclsparseLtMatmulAlgSelec
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 功能描述
 
@@ -130,9 +130,9 @@ aclsparseStatus_t aclsparseLtMatmulPlanInit(
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：不支持
+- Atlas A2系列产品：不支持
 
 #### 功能描述
 

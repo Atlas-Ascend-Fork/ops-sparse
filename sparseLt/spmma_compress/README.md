@@ -4,12 +4,12 @@
 
 | 产品 | 是否支持 |
 | :--- | :---: |
-| <term>Ascend 950PR/Ascend 950DT</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
-| <term>Atlas 200I/500 A2 推理产品</term> | × |
-| <term>Atlas 推理系列产品</term> | × |
-| <term>Atlas 训练系列产品</term> | × |
+| <term>Ascend 950PR&950DT系列产品</term> | √ |
+| <term>Atlas A3系列产品</term> | × |
+| <term>Atlas A2系列产品</term> | × |
+| <term>Atlas 200I/500 A2推理产品</term> | × |
+| <term>Atlas推理系列产品</term> | × |
+| <term>Atlas训练系列产品</term> | × |
 
 ## 功能说明
 
@@ -67,7 +67,7 @@ aclsparseStatus_t aclsparseLtSpMMACompress(
 
 - 稀疏矩阵描述符的 sparsity 须为 `ACL_SPARSE_LT_SPARSITY_50_PERCENT`。输入还须满足公共[矩阵描述符](../matmul_descriptor/README.md)和 [Plan](../matmul_plan/README.md) 的创建约束，包括 INT8 支持的 A/B、op、order 组合。
 - rows、cols、ld 均为正，rows、cols 不超过 INT32_MAX。ld 和 batchStride 使用 64 位计算；跨度、输出大小和地址计算不能溢出。
-- 两个接口都需要有效的 Ascend950 运行时环境。连续物理宽度对应的字节数无需为 256 的整数倍；宽矩阵按片上统一缓冲区（UB）容量分块。
+- 两个接口都需要有效的 Ascend 950PR&950DT系列产品运行时环境。连续物理宽度对应的字节数无需为 256 的整数倍；宽矩阵按片上统一缓冲区（UB）容量分块。
 
 ### 输入布局与内存
 
@@ -131,7 +131,7 @@ aclsparseStatus_t aclsparseLtSpMMACompress(
 | ACL_SPARSE_STATUS_INVALID_VALUE | 非法 Plan、参数、尺寸、对齐、跨度或溢出。 |
 | ACL_SPARSE_STATUS_EXECUTION_FAILED | Compress 启动前已有线程运行时错误，或启动后立即观察到错误。 |
 | ACL_SPARSE_STATUS_NOT_SUPPORTED | 不支持的数据类型。 |
-| ACL_SPARSE_STATUS_ARCH_MISMATCH | 平台不是 Ascend950。 |
+| ACL_SPARSE_STATUS_ARCH_MISMATCH | 平台不是 Ascend 950PR&950DT系列产品。 |
 | ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES | 平台资源不可用，或 UB 无法容纳最小分块。 |
 
 Compress 在 kernel 启动前后调用 `aclrtPeekAtLastError(ACL_RT_THREAD_LEVEL)`。线程已有错误时，不提交任务；启动后立即观察到错误时，也返回执行失败。接口不清除线程错误，由调用者处理。此检查仅覆盖 last-error 通道可立即观察到的错误，无法覆盖所有底层入队故障；设备执行期间的错误仍须通过后续 ACL 同步操作检查。
