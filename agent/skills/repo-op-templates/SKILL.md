@@ -31,11 +31,11 @@ ops-sparse 仓中的算子按 **编程模型** 和 **目标架构** 两个维度
 |------|------------|----------|--------------|------|
 | arch20 | ascend310p* | dav-2002 | SIMD | 推理芯片 |
 | arch22 | ascend910b* / ascend910_93* | dav-2201 | SIMD | 训练/推理芯片 |
-| **arch35** | **ascend950*** | **dav-3510** | SIMD / RegBase / SIMT | Atlas A5 系列（当前重点） |
+| **arch35** | **ascend950*** | **dav-3510** | SIMD / RegBase / SIMT | Ascend 950PR&950DT系列产品（当前重点） |
 
 > **架构默认反选**：目标 arch 目录默认由 SOC 参数反选（ascend950 → arch35，ascend910b/910_93 → arch22，ascend310p → arch20），优先使用该默认值。
 
-> SIMD 编程模型在所有架构上可用，是默认选择。Kernel 侧代码的架构差异由 AscendC 编译器屏蔽。RegBase 和 SIMT **仅 Ascend950 (arch35) 可用**。
+> SIMD 编程模型在所有架构上可用，是默认选择。Kernel 侧代码的架构差异由 AscendC 编译器屏蔽。RegBase 和 SIMT **仅 Ascend 950PR&950DT系列产品 (arch35) 可用**。
 
 > **编程模型选择**：算子开发模板选择时，应优先评估 SIMD 方案（SIMD / RegBase）的可行性。仅在经评估后当前目标架构或算子数据依赖模式确实无法使用 SIMD 表达时，才允许退化为 SIMT 方案。
 

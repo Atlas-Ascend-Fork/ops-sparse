@@ -36,11 +36,11 @@ git clone -b ${tag_version} https://gitcode.com/cann/ops-sparse.git
 
 ## 算子支持情况
 
-下表汇总 **已实现的计算/转换类算子** 在 Atlas A2/A3、Ascend 950PR/950DT 上的支持情况（按源码 `arch22` / `arch35` 与各算子 README 产品说明整理）。**不包含** handle / 描述符创建销毁等通用 API。已写入接口文档的条目见 [接口列表](docs/zh/api_list.md)（按通用 API / 算子 API 分类；本表中部分算子的详细接口说明仍以各算子目录 `README.md` 为准，接口列表将持续补齐）。
+下表汇总 **已实现的计算/转换类算子** 在 `arch22` / `arch35` 上的支持情况（按源码与各算子 README 产品说明整理）。**不包含** handle / 描述符创建销毁等通用 API。已写入接口文档的条目见 [接口列表](docs/zh/api_list.md)（按通用 API / 算子 API 分类；本表中部分算子的详细接口说明仍以各算子目录 `README.md` 为准，接口列表将持续补齐）。
 
-图例：`√` 已支持，`×` 当前未支持。A2/A3 对应 `arch22`，950PR/950DT 对应 `arch35`（同架构实现共享，合并为一列展示）。
+图例：`√` 已支持，`×` 当前未支持。各列按源码架构展示，具体产品支持范围以各算子目录的 `README.md` 为准。
 
-| 算子 | 代表接口 | A2/A3 | 950PR/950DT |
+| 算子 | 代表接口 | arch22 | arch35 |
 |------|----------|:-----:|:----------:|
 | [SpMV](sparse/spmv/README.md) | `aclsparseSpMV` | √ | √ |
 | [SpMVOp](sparse/spmv_op/README.md) | `aclsparseSpMVOp` | × | √ |

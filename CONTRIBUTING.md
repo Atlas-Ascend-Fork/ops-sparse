@@ -164,9 +164,9 @@ test/${operator}/                           # 算子测试目录
 
 > **说明**：
 > - `${operator}` 为算子名，如 `spmv`、`spmm`、`sddmm`。
-> - `${arch_dir}` 为架构子目录，如 `arch22`（Atlas A2/A3）、`arch35`（Ascend 950），由编译时 `--soc` 参数决定：
+> - `${arch_dir}` 为架构子目录，如 `arch22`（Atlas A2系列产品、Atlas A3系列产品）、`arch35`（Ascend 950PR&950DT系列产品），由编译时 `--soc` 参数决定：
 >   - `arch22`：Ascend 910B / 910_93（NPU 架构 `dav-2201`）
->   - `arch35`：Ascend 950（NPU 架构 `dav-3510`）
+>   - `arch35`：Ascend 950PR&950DT系列产品（NPU 架构 `dav-3510`）
 >   - `arch20`：Ascend 310P（NPU 架构 `dav-2002`）
 > - 算子源码目录（`sparse/`）下**无需**提供 `CMakeLists.txt`，由 `sparse/CMakeLists.txt` 自动收集。
 > - 算子说明文档 `README.md` 放置在**算子源码目录**（`sparse/${operator}/README.md`），承载算子语义、接口、参数约束与支持的稀疏格式；测试与复现说明放置在**测试目录**（`test/${operator}/README.md`），承载测试入口、运行命令与复现步骤。两者职责不同，**现有算子 README 无需搬迁**。
@@ -186,7 +186,7 @@ test/${operator}/                           # 算子测试目录
 **放置原则**：
 
 1. Host/Kernel 实现放入 `sparse/${operator}/${arch_dir}/`，不要在算子根目录与多个 `${arch_dir}/` 下同时放置同名入口文件，否则会产生符号冲突。
-2. 同一算子在不同芯片上的实现，分别维护在各自的 `${arch_dir}/` 目录（如 910B 的 `arch22/`、950 的 `arch35/`）。
+2. 同一算子在不同芯片上的实现，分别维护在各自的 `${arch_dir}/` 目录（如 910B 的 `arch22/`、Ascend 950PR&950DT系列产品的 `arch35/`）。
 3. 测试文件放入 `test/${operator}/${arch_dir}/${operator}_test.cpp`，与 `sparse/${operator}/${arch_dir}/` 一一对应；`CMakeLists.txt` 调用 `ops_sparse_add_test()`，按 `SOC_ARCH_DIRS` 自动选择当前 SOC 的测试源文件，无匹配则跳过。
 
 **测试 CMakeLists 示例**：
@@ -195,7 +195,7 @@ test/${operator}/                           # 算子测试目录
 ops_sparse_add_test(spmm ${OPS_SPARSE})
 ```
 
-**具体示例**（`spmm`：当前实现面向 Ascend 950，位于 `arch35/`）：
+**具体示例**（`spmm`：当前实现面向 Ascend 950PR&950DT系列产品，位于 `arch35/`）：
 
 ```text
 sparse/spmm/

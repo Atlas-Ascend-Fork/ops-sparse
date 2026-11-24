@@ -193,8 +193,8 @@
 | [aclsparseCubeSpmmGetBufferSize](../../sparse/cube_spmm/README.md#aclsparsecubespmmgetbuffersize) | 查询 CubeSpMM 所需工作区大小 |
 | [aclsparseCubeSpmm](../../sparse/cube_spmm/README.md#aclsparsecubespmm) | 执行 CubeSpMM（Cube 加速稀疏-稠密矩阵乘） |
 | [aclsparseCubeSpmmPadDenseMatrixB](../../sparse/cube_spmm/README.md#aclsparsecubespmmpaddensematrixb) | 按 CubeSpMM 布局要求补齐稠密 B 矩阵 |
-| [aclsparseCubeSpmm1dCreatePlan](#aclsparsecubespmm1dcreateplan) | 从 Host vector-CSR 准备 CubeSpMM 1D 计划（仅 A2/A3，arch22） |
-| [aclsparseCubeSpmm1dCreateCsrPlan](#aclsparsecubespmm1dcreatecsrplan) | 从 Host 标准 CSR 转换并准备 CubeSpMM 1D 计划（仅 A2/A3，arch22） |
+| [aclsparseCubeSpmm1dCreatePlan](#aclsparsecubespmm1dcreateplan) | 从 Host vector-CSR 准备 CubeSpMM 1D 计划（仅 Atlas A2系列产品、Atlas A3系列产品，arch22） |
+| [aclsparseCubeSpmm1dCreateCsrPlan](#aclsparsecubespmm1dcreatecsrplan) | 从 Host 标准 CSR 转换并准备 CubeSpMM 1D 计划（仅 Atlas A2系列产品、Atlas A3系列产品，arch22） |
 | [aclsparseCubeSpmm1dGetPlanInfo](#aclsparsecubespmm1dgetplaninfo) | 查询 CubeSpMM 1D 的逻辑/补齐尺寸、配置和内存需求（仅 arch22） |
 | [aclsparseCubeSpmm1dExecute](#aclsparsecubespmm1dexecute) | 异步计算 FP16 A/B、FP32 输出的 C=A×B，执行前清零 C（仅 arch22） |
 | [aclsparseCubeSpmm1dDestroyPlan](#aclsparsecubespmm1ddestroyplan) | 释放 CubeSpMM 1D 计划及其持有的 A，不等待 stream（仅 arch22） |
@@ -600,9 +600,9 @@ aclsparseStatus_t aclsparseGather(
 
 **产品支持情况**：
 
-- Ascend 950PR / Ascend 950DT（arch35）：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品（arch22）：支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品（arch22）：支持
+- Ascend 950PR&950DT系列产品（arch35）：支持
+- Atlas A3系列产品（arch22）：支持
+- Atlas A2系列产品（arch22）：支持
 
 > 说明：arch22 与 arch35 支持的 dtype / 索引类型范围不同，详见 `sparse/gather/README.md`。
 
@@ -617,7 +617,7 @@ aclsparseStatus_t aclsparseGather(
 - handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
 - vecY、vecX 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - vecX.valueType 与 vecY.valueType 必须一致
-- 基数约束：arch35（Ascend 950）要求 `vecX.size == vecY.size` 且 `0 <= nnz <= size`；arch22（Atlas A2/A3）不做基数约束，合法性取决于逐索引落点（`nnz` 可大于 `vecY.size`）
+- 基数约束：arch35（Ascend 950PR&950DT系列产品）要求 `vecX.size == vecY.size` 且 `0 <= nnz <= size`；arch22（Atlas A2系列产品、Atlas A3系列产品）不做基数约束，合法性取决于逐索引落点（`nnz` 可大于 `vecY.size`）
 - vecX.indices 中每个索引值 `X.indices[i] - idxBase` 必须在 `[0, vecY.size)` 范围内：arch22 在 Host 侧逐索引校验，越界显式返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；arch35 遵循异步错误协议，合法索引为调用方前置条件
 - 支持索引乱序（indices 不需要排序）
 - 支持 vecX.indices 中存在重复元素
@@ -2033,7 +2033,7 @@ aclsparseStatus_t aclsparseSpMM(
 );
 ```
 
-**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。零维输入：arch35 上 matA.rows / matA.cols / matC.cols（即 m/k/n）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；**A2/A3（arch22）不同**——M/K/N 均允许为 0，零长度输出直接返回 `ACL_SPARSE_STATUS_SUCCESS`（K=0 时结果遵循 `C = beta * C`），三个入口（GetBufferSize / Preprocess / SpMM）行为一致，详见 `sparse/spmm/README.md`。
+**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。零维输入：arch35 上 matA.rows / matA.cols / matC.cols（即 m/k/n）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；**Atlas A2系列产品、Atlas A3系列产品（arch22）不同**——M/K/N 均允许为 0，零长度输出直接返回 `ACL_SPARSE_STATUS_SUCCESS`（K=0 时结果遵循 `C = beta * C`），三个入口（GetBufferSize / Preprocess / SpMM）行为一致，详见 `sparse/spmm/README.md`。
 
 **参数说明**：
 
@@ -2070,8 +2070,8 @@ aclsparseStatus_t aclsparseCubeSpmm1dCreatePlan(
 `m` 必须为 16 的倍数；行块指针长度为 `m/16+1`，每块列索引严格递增，
 数值为 `16*vectors` 个有限 FP16 位模式。`plan` 为 Host 输出参数，调用前 `*plan` 必须为空。
 
-**产品支持**：Atlas A2/A3，`arch22`。仅在 Ascend910B3 上完成板测；
-950PR/950DT（`arch35`）及其他无对应实现的构建不编译或导出本接口族。
+**产品支持**：Atlas A2系列产品、Atlas A3系列产品，`arch22`。仅在 Ascend910B3 上完成板测；
+Ascend 950PR&950DT系列产品（`arch35`）及其他无对应实现的构建不编译或导出本接口族。
 以下四个接口采用相同产品边界。
 
 `options == NULL` 使用自适应选择；非空时须正确设置 `structSize`、`tilingKey`、
@@ -2713,9 +2713,9 @@ aclsparseStatus_t aclsparseSgtsv2(
 
 **产品支持情况**：
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
 
 **参数说明**：
 
@@ -2765,9 +2765,9 @@ aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
 
 **产品支持情况**：
 
-- Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
 
 **参数说明**：
 
@@ -2815,9 +2815,9 @@ aclsparseStatus_t aclsparseCgtsv2(
 
 **产品支持情况**：
 
-- Ascend 950PR / Ascend 950DT：支持（arch35 / DAV_3510）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持（arch35 / DAV_3510）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
 
 **参数说明**：
 
@@ -2864,9 +2864,9 @@ aclsparseStatus_t aclsparseCgtsv2_bufferSizeExt(
 
 **产品支持情况**：
 
-- Ascend 950PR / Ascend 950DT：支持（arch35 / DAV_3510）
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持（arch22 / DAV_2201）
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持（arch22 / DAV_2201）
+- Ascend 950PR&950DT系列产品：支持（arch35 / DAV_3510）
+- Atlas A2系列产品：支持（arch22 / DAV_2201）
+- Atlas A3系列产品：支持（arch22 / DAV_2201）
 
 **参数说明**：
 
