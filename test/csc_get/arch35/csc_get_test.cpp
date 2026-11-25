@@ -285,6 +285,29 @@ TEST_F(CscGetExceptionTest, CscSetPointersRejectFormatMismatch) {
     }
 }
 
+// Exercise the CSC setter directly, including guards not covered by CscGet.
+TEST_F(CscGetExceptionTest, CscSetPointersRejectNullDescrAndOffsets) {
+    EXPECT_EQ(aclsparseCscSetPointers(nullptr, offsets_.data(), indices_.data(), values_.data()),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    auto mat = SpMatManager::createCsc(2, 2, 2, offsets_.data(), indices_.data(),
+                                       values_.data(), ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                       ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    EXPECT_EQ(aclsparseCscSetPointers(mat.get(), nullptr, indices_.data(), values_.data()),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(aclsparseCscSetPointers(mat.get(), offsets_.data(), nullptr, values_.data()),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(aclsparseCscSetPointers(mat.get(), offsets_.data(), indices_.data(), nullptr),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+TEST_F(CscGetExceptionTest, CscSetPointersAllowEmptyMatrixNullPointers) {
+    auto mat = SpMatManager::createCsc(0, 0, 0, nullptr, nullptr, nullptr,
+                                       ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                       ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    EXPECT_EQ(aclsparseCscSetPointers(mat.get(), nullptr, nullptr, nullptr),
+              ACL_SPARSE_STATUS_SUCCESS);
+}
+
 // L2-20: NPU wrapper 对负维度入参在分配前直接拒绝 -> createRet/getRet 均为 INVALID_VALUE，
 // 不进入设备分配路径（负 nnz 经 static_cast<size_t> 会变成超大分配并使异常冲出 wrapper）
 TEST_F(CscGetExceptionTest, NpuWrapperRejectNegativeDims) {
