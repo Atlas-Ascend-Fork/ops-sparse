@@ -340,7 +340,7 @@ execute 阶段，kernel 内 block `b` 处理行范围 `[binEdge[b], binEdge[b+1]
 **适用场景**：nnz 分布极不均匀（幂律分布）、m 较大。
 **限制**：createDescr 后原地修改 csrValues 会使 reorder/bin_edge 失效（用户责任，无运行时检测）。
 
-> **平台说明**：ALG2 preprocess 采用 host-side 实现（而非 device-side kernel），原因是在 dav-3510 平台上 AIV-only `__aicore__` kernel 直接访问 `__gm__` 在非极小矩阵上不稳定（AIC error 507035）。仓内 `sparse/spmm/arch35/spmm_csr_mat.cpp` 亦使用 host-side 预处理作为先例。
+> **平台说明**：ALG2 preprocess 采用 host-side 实现（而非 device-side kernel），原因是在 dav-3510 平台上 AIV-only `__aicore__` kernel 直接访问 `__gm__` 在非极小矩阵上不稳定（AIC error 507035）。仓内 `sparse/spmm/arch35/host/spmm_csr_mat.cpp` 亦使用 host-side 预处理作为先例。
 
 ### 精度说明
 
