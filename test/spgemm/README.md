@@ -14,11 +14,11 @@ test/spgemm/
 ├── README.md
 ├── spgemm_golden.h
 ├── spgemm_param.h
-├── arch22/                              # Atlas A2/A3
+├── arch22/                              # arch22
 │   ├── spgemm_harness.h
 │   ├── spgemm_ref.h
 │   └── spgemm_test.cpp                  # C++功能与接口测试
-├── arch35/                              # Ascend 950PR
+├── arch35/                              # arch35
 │   ├── spgemm_npu_wrapper.h
 │   ├── spgemm_test.cpp                  # C++功能与接口测试
 │   ├── spgemm_test.csv                  # 仓库原有参数化回归用例
@@ -29,7 +29,7 @@ test/spgemm/
 
 ## C++测试
 
-在已安装CANN开发环境的Ascend 950PR设备上执行：
+在已安装CANN开发环境的 Ascend 950PR系列产品 设备上执行：
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh

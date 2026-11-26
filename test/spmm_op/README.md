@@ -16,7 +16,7 @@ $$
 
 | 产品 | 是否支持 |
 |------|---------|
-| Ascend 950PR/Ascend 950DT | ✓ |
+| Ascend 950PR&950DT系列产品 | ✓ |
 
 > 非 `ascend950*` 平台编译时会跳过 `spmm_op_test`。
 

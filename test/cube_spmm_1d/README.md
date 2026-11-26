@@ -17,7 +17,7 @@ C: M × N，FP32
 
 支持 d=16 的垂直 vector-CSR，也提供标准 CSR 的内存准备接口。
 实现位于 `sparse/cube_spmm_1d/arch22/`，已在 Ascend910B3、CANN 8.5 环境验证。
-源码支持范围为 A2/A3（`arch22`）；950（`arch35`）构建不编译或导出本接口族。
+源码支持范围为 `arch22`；`arch35` 构建不编译或导出本接口族。
 不支持转置、alpha/beta 缩放、批处理或任意 leading dimension；A/B 必须为有限数。
 
 ## 环境与构建

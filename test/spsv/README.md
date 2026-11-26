@@ -1,9 +1,9 @@
-# SpSV测试（Atlas A2/A3）
+# SpSV测试（arch22）
 
 测试沿用仓库的GTest构建与运行入口。生产接口和限制见
 [arch22接口说明](../../sparse/spsv/arch22/README.md)。
-`ascend910b*`（A2）和`ascend910_93*`（A3）均选择arch22；
-Ascend 950的既有测试在arch35目录中独立构建。
+Atlas A2系列产品的`ascend910b*`和Atlas A3系列产品的`ascend910_93*`均选择arch22；
+arch35 的既有测试在对应目录中独立构建。
 
 arch22源码按`host/`、`kernel/`组织；本目录保留原生GTest入口。
 对应内部头文件路径仅加入`spsv_test`的arch22构建配置。
@@ -15,7 +15,7 @@ arch22源码按`host/`、`kernel/`组织；本目录保留原生GTest入口。
 ```bash
 source /usr/local/Ascend/cann-9.1.0/set_env.sh
 SOC=ascend910b3
-# A3：SOC=ascend910_93；有具体后缀时使用环境对应的实际SOC名称
+# Atlas A3系列产品：SOC=ascend910_93；有具体后缀时使用环境对应的实际SOC名称
 cmake -S . -B "build-$SOC" -DSOC_VERSION="$SOC" -DOP_LIST=spsv -DBUILD_TEST=ON
 cmake --build "build-$SOC" -j2
 SPSV_TEST_DEVICE_ID=0 "./build-$SOC/test/spsv/spsv_test"
@@ -42,7 +42,7 @@ ULP误差和重复执行一致性。生命周期负例由父测试在独立进�
 
 本目录采用CANN社区任务“09-9：aclsparseSpSV算子开发(A2/A3)”的专项精度要求。
 任务来源见[社区任务书索引](https://gitcode.com/cann/cann-ops-competitions/blob/master/04_tasks/01_community-task-2026/docs/README.md#9月份发放的任务)。
-专项参数同时记载于社区任务仓库的[SpSV A2/A3设计文档“精度标准/性能标准”](https://gitcode.com/cann/cann-ops-competitions/blob/master/04_tasks/01_community-task-2026/tasklist/09-9-aclsparseSpSV-A2A3/qq_69884268/docs/design.md)。
+专项参数同时记载于社区任务仓库的[SpSV 在 Atlas A2系列产品和 Atlas A3系列产品上的设计文档“精度标准/性能标准”](https://gitcode.com/cann/cann-ops-competitions/blob/master/04_tasks/01_community-task-2026/tasklist/09-9-aclsparseSpSV-A2A3/qq_69884268/docs/design.md)。
 《aclsparseSpSV算子开发(A2/A3)任务书》第3.2节“精度要求”规定：
 
 - FP32使用FP64 Golden；complex64使用complex128 Golden，并分别比较实部与虚部。

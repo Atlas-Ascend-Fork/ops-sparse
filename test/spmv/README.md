@@ -7,13 +7,13 @@ SpMV 计算 `y = alpha * op(A) * x + beta * y`。平台能力以
 
 | 平台 | 测试源码 | 构建入口 |
 | --- | --- | --- |
-| Atlas A2/A3（arch22） | `arch22/spmv_test.cpp` | `ops_sparse_add_test`，独立测试程序 |
-| Ascend 950PR/950DT（arch35） | `arch35/spmv_test.cpp`、`arch35/spmv_test.csv` | `ops_sparse_add_gtest_tests(spmv ${OPS_SPARSE} EIGEN)` |
+| arch22 | `arch22/spmv_test.cpp` | `ops_sparse_add_test`，独立测试程序 |
+| Ascend 950PR&950DT系列产品（arch35） | `arch35/spmv_test.cpp`、`arch35/spmv_test.csv` | `ops_sparse_add_gtest_tests(spmv ${OPS_SPARSE} EIGEN)` |
 
-A2/A3 支持 DEFAULT 与 CSR_ALG_CUBE；CUBE 仅支持非转置、FP32/FP16 输入和 FP32 输出。
-下文 A5 各节的用例名、CSV 和 GTest 命令均针对 arch35，不能直接用于 arch22 程序。
+arch22 支持 DEFAULT 与 CSR_ALG_CUBE；CUBE 仅支持非转置、FP32/FP16 输入和 FP32 输出。
+下文 arch35 各节的用例名、CSV 和 GTest 命令均针对 arch35，不能直接用于 arch22 程序。
 
-## arch22（Atlas A2/A3）编译运行
+## arch22 编译运行
 
 先加载实际安装路径的 CANN 环境，例如：
 
@@ -51,7 +51,7 @@ python3 -m pip install build_out/cann_ops_sparse-*.whl --force-reinstall --no-de
 OPS_SPARSE_LIB_DIR=$PWD/build_out/lib64 python3 -m pytest test/spmv/python/ -v
 ```
 
-## A5 实现与调用约定
+## arch35 实现与调用约定
 
 实现位于 `sparse/spmv/arch35/`：
 
@@ -59,12 +59,12 @@ OPS_SPARSE_LIB_DIR=$PWD/build_out/lib64 python3 -m pytest test/spmv/python/ -v
 - `spmv_host.cpp` 实现 GetBufferSize、Preprocess、Execute 和参数校验。
 - `spmv_kernel.cpp` 实现行偏移归一化以及非转置、转置计算。
 
-A5 支持 CSR、I32 索引、base 0/1，支持非转置 N、转置 T 和共轭转置 H。
+arch35 支持 CSR、I32 索引、base 0/1，支持非转置 N、转置 T 和共轭转置 H。
 复数 H 对矩阵元素取共轭；实数 H 与 T 等价。非转置要求
 `x.size == A.cols`、`y.size == A.rows`，转置/共轭转置要求
 `x.size == A.rows`、`y.size == A.cols`。
 
-A5 支持的类型组合如下，alpha/beta 类型必须与 computeType 一致：
+arch35 支持的类型组合如下，alpha/beta 类型必须与 computeType 一致：
 
 | A / x | computeType | y |
 | --- | --- | --- |
@@ -83,7 +83,7 @@ rows 或 cols 为 0 时必须 nnz=0；nnz=0 时执行 beta*y。
 
 ### Workspace 与预处理
 
-1. GetBufferSize 校验元数据，不要求 CSR 和 x/y 数据已绑定。A5 的 N/T/H
+1. GetBufferSize 校验元数据，不要求 CSR 和 x/y 数据已绑定。arch35 的 N/T/H
    均返回非零 workspace 大小，调用方必须按查询值分配足量、64 字节对齐的设备内存。
    接口不接收实际分配大小，不能保证检测出欠配。
 2. Preprocess 可选。它生成归一化的连续 rowOffsets，并记录 active plan，
@@ -97,8 +97,8 @@ rows 或 cols 为 0 时必须 nnz=0；nnz=0 时执行 beta*y。
    在读取结果、复用或释放内存前同步。beta=0 时不读取旧 y。
 
 workspace 包含 192 字节头部、归一化行偏移，转置另有累加区，各区域按 64 字节对齐。
-A2/A3 DEFAULT 在转置且 FP16/BF16 输出时查询返回每列 4 字节的 FP32 累加空间，
-其他 DEFAULT 路径返回 0；CUBE 按实现查询分段求和空间。该约定与 A5 不同。
+arch22 DEFAULT 在转置且 FP16/BF16 输出时查询返回每列 4 字节的 FP32 累加空间，
+其他 DEFAULT 路径返回 0；CUBE 按实现查询分段求和空间。该约定与 arch35 不同。
 
 ### 算法与确定性
 
@@ -114,7 +114,7 @@ ALG2 转置按固定 row/entry 顺序归约。当前仓库测试没有对其执�
 不能将算法设计描述当作确定性回归已通过的证据。
 INT8→INT32 结果最终饱和到 INT32 范围，缩放时保留抵消并检查中间溢出。
 
-## A5 仓库内测试覆盖
+## arch35 仓库内测试覆盖
 
 `arch35/spmv_test.csv` 当前有 **6 条数据记录**（不含表头），全部用于 FP32 的
 `SpmvA5Cases/SpmvArch35Test.ThreeStageAndExecute/*` 参数化测试。
@@ -146,7 +146,7 @@ BF16、输入只读/alias 断言和 ALG2 逐比特确定性仍缺少仓库内对
 任务书附带的官方精度、性能和内存对比属于独立验收流程，不是此 CSV 或 GTest 的选项。
 应使用任务书对应版本的官方工具、case 文件及实际原始日志；本 README 不提供已验收通过的证明。
 
-## A5 编译与运行
+## arch35 编译与运行
 
 先加载实际安装路径的 CANN 环境，例如：
 

@@ -32,7 +32,7 @@ test/spmat_get_indexbase/
 
 ## C++测试
 
-在已安装 CANN 开发环境的设备上（如 Ascend 950PR），从仓根执行：
+在已安装 CANN 开发环境的设备上（如 Ascend 950PR系列产品的设备），从仓根执行：
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh

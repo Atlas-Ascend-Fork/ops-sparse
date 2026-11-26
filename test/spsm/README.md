@@ -2,7 +2,7 @@
 
 ## 测试说明
 
-SpSM 测试覆盖 `aclsparseSpSM*` 多阶段接口和 `aclsparseSpSMUpdateMatrix`，验证 Ascend 950 上的
+SpSM 测试覆盖 `aclsparseSpSM*` 多阶段接口和 `aclsparseSpSMUpdateMatrix`，验证 arch35 上的
 CSR、CSC、COO 稀疏三角求解。覆盖 FP32、complex64，`opA`/`opB` 的 N/T/H 组合，LOWER/UPPER、
 UNIT/NON_UNIT，ROW/COL 稠密布局，Host/Device pointer mode、原地求解、数值更新、异步 stream
 语义及异常生命周期。算子规格、接口约束和调用流程见
@@ -23,13 +23,13 @@ test/spsm/
         ├── spsm_npu_wrapper.h          # NPU 接口调用封装
         ├── spsm_test.cpp               # 参数化 C++ UT/ST
         ├── spsm_test.csv               # 基础与专项参数用例
-        ├── spsm_extended_test.cpp       # Ascend 950 专项、边界及生命周期测试
+        ├── spsm_extended_test.cpp       # arch35 专项、边界及生命周期测试
         └── spsm_perf.cpp                # 独立性能测试程序
 ```
 
 ## 环境要求
 
-- Ascend 950PR 设备
+- Ascend 950PR系列产品 设备
 - 与仓库版本匹配的 CANN 开发环境
 - Eigen3（构建测试时由工程依赖配置提供）
 
@@ -55,7 +55,7 @@ bash build.sh --ops=spsm --soc=ascend950 --run
 (cd build/test/spsm && ./spsm_test --gtest_color=no)
 ```
 
-当前 Ascend 950 完整测试目标包含 248 项测试。测试结果以 GTest 进程退出码和生成的 XML 为准；
+当前 arch35 完整测试目标包含 248 项测试。测试结果以 GTest 进程退出码和生成的 XML 为准；
 需要保留报告时可执行：
 
 ```bash

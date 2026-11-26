@@ -10,26 +10,26 @@ ops-sparse 仓库中的 SPMM (Sparse Matrix-Dense Matrix Multiplication) 算子�
 
 | 产品                                                         |  是否支持 |
 | :----------------------------------------------------------- |:-------:|
-| <term>Ascend 950PR/Ascend 950DT</term>                       |    ✓    |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>       |    ✓    |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>       |    ✓    |
+| <term>Ascend 950PR&950DT系列产品</term>                       |    ✓    |
+| <term>Atlas A3系列产品</term>       |    ✓    |
+| <term>Atlas A2系列产品</term>       |    ✓    |
 
-> Ascend 950PR/950DT 的源码和测试分别位于 `sparse/spmm/arch35/` 与 `test/spmm/arch35/`，仅在 `ascend950*` 目标编译。
+> Ascend 950PR&950DT系列产品的源码和测试分别位于 `sparse/spmm/arch35/` 与 `test/spmm/arch35/`，仅在 `ascend950*` 目标编译。
 
-A2/A3 源码位于 `sparse/spmm/arch22/`，测试位于 `test/spmm/arch22/`。按目标 SOC 编译对应实现，接口约束见算子说明。
+arch22 源码位于 `sparse/spmm/arch22/`，测试位于 `test/spmm/arch22/`。按目标 SOC 编译对应实现，接口约束见算子说明。
 
 ## 目录结构介绍
 
 ```txt
 sparse/spmm/arch22/
-├── kernels/              // A2/A3 AscendC kernel 与 dtype 分发
+├── kernels/              // arch22 AscendC kernel 与 dtype 分发
 ├── spmm_host.cpp         // Host 侧参数校验、workspace 与 Tiling
 ├── spmm_csr_mat.cpp      // CSR 预处理、行重排与分桶
 ├── spmm_csr_mat.h
 └── spmm.h                // 公共接口与 Tiling 定义
 ```
 
-Ascend 950PR/950DT 的实现单独位于 `arch35`，其内部结构如下：
+Ascend 950PR&950DT系列产品的实现单独位于 `arch35`，其内部结构如下：
 
 ```txt
 sparse/spmm/arch35/
@@ -55,7 +55,7 @@ sparse/spmm/arch35/
 test/spmm/
 ├── CMakeLists.txt
 ├── README.md
-├── arch22/             // A2/A3 功能、精度和缺陷回归
+├── arch22/             // arch22 功能、精度和缺陷回归
 ├── arch35/
 │   ├── spmm_test.cpp
 │   ├── spmm_task_dtype_test.cpp
@@ -108,7 +108,7 @@ C = alpha * op(A) * op(B) + beta * C
   的两侧小值、实虚部、抵消、范围检查及部分列宽回退。
 - `test_op_builder_lifecycle.py` 验证公共 builder 的模块缓存与退出清理顺序。
 
-A2/A3 测试包含 FP16/BF16/FP32/Complex64、转置、共轭转置、索引基址 0/1、零维输入及确定性算法；对应接口约束见算子说明。
+arch22 测试包含 FP16/BF16/FP32/Complex64、转置、共轭转置、索引基址 0/1、零维输入及确定性算法；对应接口约束见算子说明。
 
 ## C++ 调用流程
 
@@ -135,7 +135,7 @@ bash build.sh --ops=spmm --soc=ascend950 --run
 生命周期测试，任一用例失败时返回非零值。可对生成的 `spmm_test` 使用
 `--gtest_list_tests` 查看用例，或使用 `--gtest_filter` 选择回归范围。
 
-A2/A3 使用相同构建入口，并将 `--soc` 设为对应产品。
+arch22 使用相同构建入口，并将 `--soc` 设为对应产品。
 
 Python/ATen 适配测试：
 

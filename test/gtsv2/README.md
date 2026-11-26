@@ -8,8 +8,8 @@ workspace、分配 128 字节对齐缓冲区、在句柄绑定的 stream 上异�
 
 测试按 SOC 自动选择实现：
 
-- `ascend910b`、`ascend910_93` 使用 `arch22/`（Atlas A2/A3）；
-- `ascend950` 使用 `arch35/`（Ascend 950PR/950DT）。
+- `ascend910b`、`ascend910_93` 使用 `arch22/`（Atlas A2系列产品和Atlas A3系列产品）；
+- `ascend950` 使用 `arch35/`（Ascend 950PR&950DT系列产品）。
 
 ## 目录结构
 
@@ -20,18 +20,18 @@ test/gtsv2/
 ├── gtsv2_golden.h          # 全程 FP64 的带选主元 CPU Golden
 ├── gtsv2_param.h           # CSV 参数解析
 ├── arch22/
-│   ├── gtsv2_test.cpp      # 公共回归 + A2/A3 专项测试
-│   └── gtsv2_test.csv      # A2/A3 shape、pivot 与性能形状
+│   ├── gtsv2_test.cpp      # 公共回归 + arch22 专项测试
+│   └── gtsv2_test.csv      # arch22 shape、pivot 与性能形状
 └── arch35/
     ├── gtsv2_npu_wrapper.h
     ├── gtsv2_test.cpp
     └── gtsv2_test.csv
 ```
 
-## A2/A3 覆盖范围
+## arch22 覆盖范围
 
 `arch22/gtsv2_test.cpp` 复用 arch35 的公共 API、数值和异常测试，并增加
-A2/A3 实现专项检查。当前覆盖：
+arch22 实现专项检查。当前覆盖：
 
 - 30 组 CSV 用例：`m=3`、`n=0/1/多 RHS`、`ldb=m/带 padding`、非对齐
   shape、确定性 pivot 分支、奇异矩阵、UB/GM 路径边界，以及 P-01/P-02/P-03
@@ -80,13 +80,13 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 在仓库根目录按实际硬件执行：
 
 ```bash
-# Atlas A2（报告中分别记录 910B3、910B4 实际型号）
+# Atlas A2系列产品（报告中分别记录 910B3、910B4 实际型号）
 bash build.sh --ops=gtsv2 --soc=ascend910b --run
 
-# Atlas A3
+# Atlas A3系列产品
 bash build.sh --ops=gtsv2 --soc=ascend910_93 --run
 
-# A5 交叉回归
+# arch35 交叉回归
 bash build.sh --ops=gtsv2 --soc=ascend950 --run
 ```
 

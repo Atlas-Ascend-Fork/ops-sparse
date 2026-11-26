@@ -26,7 +26,7 @@ test/gather/
 
 ## C++测试
 
-在已安装CANN开发环境的Ascend 950PR设备上，从仓根执行：
+在已安装CANN开发环境的 Ascend 950PR系列产品 设备上，从仓根执行：
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh

@@ -10,9 +10,9 @@ ops-sparse 仓库中的 **Cube SpMM** 算子实现了稀疏矩阵与稠密矩阵
 
 | 产品                                                         |  是否支持 |
 | :----------------------------------------------------------- |:-------:|
-| <term>Ascend 910B 系列</term>                                |    ✓    |
-| <term>Ascend 950PR/Ascend 950DT</term>                       |    ✗    |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>       |    ✗    |
+| <term>Atlas A2系列产品（Ascend 910B）</term>                                |    ✓    |
+| <term>Ascend 950PR&950DT系列产品</term>                       |    ✗    |
+| <term>Atlas A3系列产品</term>       |    ✗    |
 
 > Cube SpMM 当前版本仅在 `arch22`（DAV-2201）平台交付。非 `ascend910b*` 平台编译时会跳过 `cube_spmm_test`。
 

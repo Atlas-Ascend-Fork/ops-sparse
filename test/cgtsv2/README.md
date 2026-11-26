@@ -15,7 +15,7 @@ source /actual/CANN/set_env.sh
 bash build.sh --soc=ascend910b3 --ops=cgtsv2 --run --device=0
 ```
 
-Ascend 950 使用 `--soc=ascend950`；SoC 和设备号按实际环境选择。GTest 必需，Eigen3 不需要。
+arch35 使用 `--soc=ascend950`；SoC 和设备号按实际环境选择。GTest 必需，Eigen3 不需要。
 直接运行测试二进制时，应在其构建目录下执行，以便读取 `cgtsv2_test.csv`。
 
 ## 测试文件
@@ -67,9 +67,9 @@ arch22 按评审要求调用共享 `test/frame/VerifyConfig/Verifier`。框架�
 
 | 文件 | 用途 |
 | --- | --- |
-| `arch35/cgtsv2_test.cpp` | 950 数值、接口、守卫及 Runtime 陈旧错误回归 |
-| `arch35/cgtsv2_test.csv` | 950 原有 97 条确定性参数 |
-| `arch35/cgtsv2_npu_wrapper.h` | 950 RAII 缓冲及异步执行流程 |
+| `arch35/cgtsv2_test.cpp` | arch35 数值、接口、守卫及 Runtime 陈旧错误回归 |
+| `arch35/cgtsv2_test.csv` | arch35 原有 97 条确定性参数 |
+| `arch35/cgtsv2_npu_wrapper.h` | arch35 RAII 缓冲及异步执行流程 |
 
 共 112 个 GTest 实例：97 条 CSV 参数化用例、15 个独立测试。装载要求总数恰为 97，
 L0=24、L1=73，且 case_name 唯一；缺失、增删行、重复或分级数量漂移在注册阶段抛 runtime_error。
@@ -84,4 +84,4 @@ L0=24、L1=73，且 case_name 唯一；缺失、增删行、重复或分级数�
 二者都在 complex128 中执行带部分选主元求解。此次整合保留两套参考函数的运算次序和精度判据。
 arch35 保留实部、虚部各 99% 混合容差及最大误差位置有限 ULP 上限，以及 FLT_MAX 离群值拒绝回归。
 
-950 编译命令：`bash build.sh --soc=ascend950 --ops=cgtsv2 --run --device=0`。
+arch35 编译命令：`bash build.sh --soc=ascend950 --ops=cgtsv2 --run --device=0`。

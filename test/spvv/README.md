@@ -14,11 +14,11 @@ $$
 
 | 产品                                        | 是否支持 |
 | ------------------------------------------- | :------: |
-| Atlas A2 训练系列产品/Atlas A2 推理系列产品 |    √    |
-| Atlas A3 训练系列产品/Atlas A3 推理系列产品 |    √    |
-| Ascend 950PR / Ascend 950DT                      |    ×    |
+| Atlas A2系列产品 |    √    |
+| Atlas A3系列产品 |    √    |
+| Ascend 950PR&950DT系列产品                      |    ×    |
 
-> 当前仅提供 arch22（DAV-2201）实现，覆盖 ascend910b（A2）与 ascend910_93（A3）。Ascend 950PR/950DT（arch35 / DAV-3510）尚未适配。
+> 当前仅提供 arch22（DAV-2201）实现，覆盖 Atlas A2系列产品（ascend910b）与 Atlas A3系列产品（ascend910_93）。Ascend 950PR&950DT系列产品（arch35 / DAV-3510）尚未适配。
 
 ## 目录结构介绍
 
