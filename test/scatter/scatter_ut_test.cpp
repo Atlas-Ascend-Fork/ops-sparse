@@ -208,17 +208,6 @@ static void RecordFunctional(const CaseParams &p, const char *status, const char
     RecordCase(r);
 }
 
-static void RecordPlanned(const char *caseId, const char *check, const std::string &reason)
-{
-    CaseRecord r;
-    r.caseId = caseId;
-    r.gtest = "(planned)";
-    r.status = "PLANNED";
-    r.check = check;
-    r.detail = reason;
-    RecordCase(r);
-}
-
 // ===================== 数据生成（value_spec / indices 模式 / 固定 seed） =====================
 
 static std::vector<int32_t> SampleUniqueShuffled(size_t size, size_t k, std::mt19937 &rng,

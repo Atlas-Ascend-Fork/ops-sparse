@@ -32,9 +32,7 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
-import importlib.util
 import os
-import sys
 import weakref
 from pathlib import Path
 
