@@ -168,7 +168,7 @@ fi
 # 通用逻辑，不限定具体组名/算子名，新增组目录自动生效。
 if [ -n "${BUILD_OPS}" ]; then
     IFS=',' read -ra _ops_arr <<< "${BUILD_OPS}"
-    _expanded=""
+    _expanded=()
     shopt -s nullglob
     for _op in "${_ops_arr[@]}"; do
         if [ -d "${BASE_PATH}/test/${_op}" ]; then
@@ -176,17 +176,18 @@ if [ -n "${BUILD_OPS}" ]; then
             for _d2 in "${BASE_PATH}/test/${_op}"/*/; do
                 if [ -f "${_d2}CMakeLists.txt" ]; then
                     _leaf=$(basename "${_d2}")
-                    _expanded="${_expanded:+${_expanded},}${_leaf}"
+                    _expanded+=("${_leaf}")
                     _has_leaf=1
                 fi
             done
-            [ "$_has_leaf" -eq 0 ] && _expanded="${_expanded:+${_expanded},}${_op}"
+            [ "$_has_leaf" -eq 0 ] && _expanded+=("${_op}")
         else
-            _expanded="${_expanded:+${_expanded},}${_op}"
+            _expanded+=("${_op}")
         fi
     done
     shopt -u nullglob
-    BUILD_OPS="${_expanded}"
+    # A group and an explicitly requested leaf may select the same test.
+    BUILD_OPS=$(printf '%s\n' "${_expanded[@]}" | awk '!seen[$0]++' | paste -sd, -)
 fi
 
 if [ "${ENABLE_TORCH_EXTENSION}" == "TRUE" ]; then
