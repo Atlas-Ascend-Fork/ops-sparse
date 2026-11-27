@@ -138,16 +138,17 @@ int aclsparseLtAlgGetAttributeTest()
                                       &splitK, sizeof(int32_t));
 
     // 5. 查询属性并校验
+    aclsparseLtConstMatmulAlgSelection_t constAlgSel = algSel;
     int32_t queryAlgConfigId = -1;
     int32_t querySplitK = -1;
     int32_t queryMaxId = -1;
-    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &algSel, ACLSPARSELT_MATMUL_ALG_CONFIG_ID,
+    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &constAlgSel, ACLSPARSELT_MATMUL_ALG_CONFIG_ID,
                                             &queryAlgConfigId, sizeof(int32_t));
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("GetAttribute(ALG_CONFIG_ID) failed: %d\n", ret); return ret);
-    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &algSel, ACLSPARSELT_MATMUL_SPLIT_K,
+    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &constAlgSel, ACLSPARSELT_MATMUL_SPLIT_K,
                                             &querySplitK, sizeof(int32_t));
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("GetAttribute(SPLIT_K) failed: %d\n", ret); return ret);
-    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &algSel, ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID,
+    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &constAlgSel, ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID,
                                             &queryMaxId, sizeof(int32_t));
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("GetAttribute(ALG_CONFIG_MAX_ID) failed: %d\n", ret); return ret);
 

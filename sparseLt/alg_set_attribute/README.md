@@ -249,12 +249,13 @@ int aclsparseLtAlgSetAttributeTest()
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("AlgSetAttribute(SPLIT_K) failed: %d\n", ret); return ret);
 
     // 8. ★ 通过 AlgGetAttribute 回读验证设置是否生效
+    aclsparseLtConstMatmulAlgSelection_t constAlgSel = algSel;
     int32_t getAlgConfigId = -1;
     int32_t getSplitK = -1;
-    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &algSel, ACLSPARSELT_MATMUL_ALG_CONFIG_ID,
+    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &constAlgSel, ACLSPARSELT_MATMUL_ALG_CONFIG_ID,
                                            &getAlgConfigId, sizeof(int32_t));
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("AlgGetAttribute(ALG_CONFIG_ID) failed: %d\n", ret); return ret);
-    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &algSel, ACLSPARSELT_MATMUL_SPLIT_K,
+    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &constAlgSel, ACLSPARSELT_MATMUL_SPLIT_K,
                                            &getSplitK, sizeof(int32_t));
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("AlgGetAttribute(SPLIT_K) failed: %d\n", ret); return ret);
     LOG_PRINT("algConfigId: set=%d, get=%d\n", algConfigId, getAlgConfigId);
@@ -262,7 +263,7 @@ int aclsparseLtAlgSetAttributeTest()
 
     //    查询 ALG_CONFIG_MAX_ID（只读，返回 2，表示 algConfigId 0 和 1 共 2 种配置）
     int32_t maxId = 0;
-    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &algSel, ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID,
+    ret = aclsparseLtMatmulAlgGetAttribute(&handle, &constAlgSel, ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID,
                                            &maxId, sizeof(int32_t));
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("AlgGetAttribute(MAX_ID) failed: %d\n", ret); return ret);
     LOG_PRINT("ALG_CONFIG_MAX_ID = %d\n", maxId);
@@ -273,8 +274,9 @@ int aclsparseLtAlgSetAttributeTest()
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("PlanInit failed: %d\n", ret); return ret);
 
     // 10. 查询 workspace 大小并分配（splitK>1 时包含 temp 区）
+    aclsparseLtConstMatmulPlan_t constPlan = plan;
     size_t workspaceSize = 0;
-    ret = aclsparseLtMatmulGetWorkspace(&handle, &plan, &workspaceSize);
+    ret = aclsparseLtMatmulGetWorkspace(&handle, &constPlan, &workspaceSize);
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("GetWorkspaceSize failed: %d\n", ret); return ret);
     LOG_PRINT("workspaceSize = %zu bytes (splitK=2 includes temp buffer)\n", workspaceSize);
     void *dWorkspace = nullptr;
@@ -283,14 +285,15 @@ int aclsparseLtAlgSetAttributeTest()
     }
 
     // 11. 剪枝：dA -> dAPruned
+    aclsparseLtConstMatmulDescriptor_t constMatmulDesc = matmulDesc;
     ret = aclsparseLtSpMMAPrune(
-        &handle, &matmulDesc, dA, dAPruned, ACLSPARSELT_PRUNE_SPMMA_STRIP, stream);
+        &handle, &constMatmulDesc, dA, dAPruned, ACLSPARSELT_PRUNE_SPMMA_STRIP, stream);
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("SpMMAPrune failed: %d\n", ret); return ret);
 
     // 12. 执行 Matmul：D = alpha * A_pruned * B + beta * C
     //     splitK=2 时 Cube 将 K 维度切分为 2 段并行，epilogue 归约求和写 D
     ret = aclsparseLtMatmul(
-        &handle, &plan,
+        &handle, &constPlan,
         &alpha,
         dAPruned, dB,
         &beta, dC, dD,
